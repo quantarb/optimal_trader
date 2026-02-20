@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 
 artifacts/
-data/
 *.zip
 entry2exit.csv
+data/*.db
+data/*.sqlite
