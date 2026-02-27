@@ -1,23 +1,30 @@
-from .base import FitSpec, Model, SequenceSpec
-from .stable_baselines3 import (
+from __future__ import annotations
+
+from .common import (
     RLConfig,
-    run_a2c_workflow,
-    run_ppo_workflow,
+    apply_buy_cap,
     backtest_buy_and_hold_equal_weight,
     backtest_strategy_per_stock_discrete,
     make_rebalance_mask,
-    apply_buy_cap,
-    trade_cost_from_bps,
+    run_sb3_workflow,
     summarize_returns,
+    trade_cost_from_bps,
 )
 
+
+def run_a2c_workflow(*, bt_panel, cfg: RLConfig, train_split_date, years):
+    return run_sb3_workflow(
+        bt_panel=bt_panel,
+        cfg=cfg,
+        train_split_date=train_split_date,
+        years=years,
+        algorithm="a2c",
+    )
+
+
 __all__ = [
-    "FitSpec",
-    "Model",
-    "SequenceSpec",
     "RLConfig",
     "run_a2c_workflow",
-    "run_ppo_workflow",
     "backtest_buy_and_hold_equal_weight",
     "backtest_strategy_per_stock_discrete",
     "make_rebalance_mask",

@@ -48,6 +48,10 @@ class ExecutionConfig(BaseModel):
     # - If True: turnover = 0.5 * sum(|w_t - w_{t-1}|)
     # - Else: turnover = sum(|w_t - w_{t-1}|)
     turnover_half_l1: bool = True
+    # Execution engine:
+    # - "weights": legacy weight x return engine
+    # - "rl_env": discrete action engine used by SB3 workflows
+    execution_mode: str = "weights"
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,27 @@ def _portfolio_returns(
     return pret
 
 
+def _weights_to_discrete_actions(
+        weights: pd.DataFrame,
+        *,
+        eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    Convert target weights into per-symbol discrete actions:
+      0 = hold, 1 = buy/increase long, 2 = sell/decrease/exit long.
+    """
+    w = weights.fillna(0.0).to_numpy(dtype=float)
+    if w.shape[0] == 0:
+        return np.zeros_like(w, dtype=int)
+    prev = np.zeros(w.shape[1], dtype=float)
+    actions = np.zeros_like(w, dtype=int)
+    for t in range(w.shape[0]):
+        cur = w[t]
+        actions[t] = np.where(cur > prev + eps, 1, np.where(cur < prev - eps, 2, 0))
+        prev = cur
+    return actions.astype(int)
+
+
 def backtest_panel(
         panel: pd.DataFrame,
         *,
@@ -173,6 +198,43 @@ def backtest_panel(
 
     w = strategy.compute_weights(panel0)
     w = w.reindex(sym_ret.index).reindex(columns=sym_ret.columns).fillna(0.0)
+
+    if str(cfg.execution_mode).lower() == "rl_env":
+        # Reuse the same discrete per-stock execution engine as RL.
+        from modules.models.stable_baselines3 import backtest_strategy_per_stock_discrete
+
+        if (w < -1e-12).any().any():
+            # Current RL environment implementation is long-only.
+            # Fall back to legacy engine for strategies with short weights.
+            pass
+        else:
+            # Keep execution numerically stable with sparse panels.
+            px_exec = px.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+            action_type = _weights_to_discrete_actions(w)
+            eq_abs, ret_abs, _cash = backtest_strategy_per_stock_discrete(
+                action_type=action_type,
+                close_by_day=px_exec,
+                eligible_by_day=None,
+                buy_score_by_day=None,
+                initial_balance=1.0,
+                fee_bps=float(cfg.fee_bps),
+                slippage_bps=float(cfg.slippage_bps),
+                max_buys_per_day=None,
+                rebalance_mask=None,
+            )
+            turnover = _compute_turnover(w, half_l1=cfg.turnover_half_l1)
+            costs = pd.Series(0.0, index=eq_abs.index, name="costs")
+            equity = eq_abs.rename("equity")
+            pret_net = ret_abs.rename("portfolio_return_net")
+            stats = _summarize_stats(pret_net, equity, turnover, cfg)
+            return BacktestResult(
+                strategy_name=strategy.name,
+                stats=stats,
+                equity_curve=equity,
+                returns=pret_net,
+                turnover=turnover,
+                costs=costs,
+            )
 
     turnover = _compute_turnover(w, half_l1=cfg.turnover_half_l1)
 

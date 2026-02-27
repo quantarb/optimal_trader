@@ -1,10 +1,51 @@
-from .training import train_rf_models, train_ae, save_raw_stack_artifacts
+from .training import RawRFModels, train_rf_models, train_ae, save_raw_stack_artifacts
 from .inference import predict_symbol_fresh, pretty_print_symbol_prediction
+from .evaluation import (
+    StrategyCase,
+    ProbabilityColumnConfig,
+    enrich_scored_panel,
+    resolve_price_column,
+    make_backtest_panel,
+    make_exec_cfg,
+    run_case,
+    strategy_diagnostics,
+    build_anchored_fold,
+)
+from modules.models.stable_baselines3 import (
+    RLConfig,
+    run_a2c_workflow,
+    run_ppo_workflow,
+    backtest_buy_and_hold_equal_weight,
+    backtest_strategy_per_stock_discrete,
+    make_rebalance_mask,
+    apply_buy_cap,
+    trade_cost_from_bps,
+    summarize_returns,
+)
 
 __all__ = [
+    "RawRFModels",
     "train_rf_models",
     "train_ae",
     "save_raw_stack_artifacts",
     "predict_symbol_fresh",
     "pretty_print_symbol_prediction",
+    "StrategyCase",
+    "ProbabilityColumnConfig",
+    "enrich_scored_panel",
+    "resolve_price_column",
+    "make_backtest_panel",
+    "make_exec_cfg",
+    "run_case",
+    "strategy_diagnostics",
+    "build_anchored_fold",
+    "RLConfig",
+    "run_a2c_workflow",
+    "run_ppo_workflow",
+    "backtest_buy_and_hold_equal_weight",
+    "backtest_strategy_per_stock_discrete",
+    "make_rebalance_mask",
+    "apply_buy_cap",
+    "trade_cost_from_bps",
+    "summarize_returns",
 ]
