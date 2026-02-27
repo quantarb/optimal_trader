@@ -30,11 +30,22 @@ def make_autoencoder_familiarity_predictor(
     """Factory for AE familiarity predictor used by the generic latest-day scorer."""
 
     def _predict(latest_df: pd.DataFrame, ae_model: Any) -> np.ndarray:
+        work_df = latest_df.copy()
+        for c in numeric_cols:
+            if c not in work_df.columns:
+                work_df[c] = 0.0
+        for c in numeric_cols:
+            work_df[c] = pd.to_numeric(work_df[c], errors="coerce")
+        work_df[numeric_cols] = work_df[numeric_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
         cat_cols = list(getattr(ae_model, "_artifact", None).cat_cols) if getattr(ae_model, "_artifact", None) is not None else []
+        for c in cat_cols:
+            if c not in work_df.columns:
+                work_df[c] = ""
         if hasattr(ae_model, "familiarity"):
             return np.asarray(
                 ae_model.familiarity(
-                    latest_df,
+                    work_df,
                     numeric_cols=numeric_cols,
                     categorical_cols=cat_cols,
                     quantile=quantile,
@@ -56,7 +67,7 @@ def make_autoencoder_familiarity_predictor(
             raise AttributeError("Could not locate torch model.")
 
         x_num = torch.tensor(
-            latest_df[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0).values,
+            work_df[numeric_cols].values,
             dtype=torch.float32,
         )
         raw_model.eval()
@@ -241,8 +252,12 @@ def predict_latest_day_with_all_models(
     prob_cols: list[str] = []
     if clf is not None:
         used_clf = list(getattr(clf, "_used_features", latest_df.columns))
+        for c in used_clf:
+            if c not in latest_df.columns:
+                latest_df[c] = 0.0
+        x_clf = latest_df[used_clf].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
         model_clf = getattr(clf, "model", clf)
-        all_prob_cols, prob_cols = _get_class_probability_columns(model_clf, clf, latest_df[used_clf])
+        all_prob_cols, prob_cols = _get_class_probability_columns(model_clf, clf, x_clf)
         for col, arr in all_prob_cols.items():
             latest_df[col] = arr
         latest_df["pred_rf_cls_proba"] = _select_primary_probability(prob_cols, latest_df)
@@ -252,8 +267,12 @@ def predict_latest_day_with_all_models(
     # RF Regressor
     if reg is not None:
         used_reg = list(getattr(reg, "_used_features", latest_df.columns))
+        for c in used_reg:
+            if c not in latest_df.columns:
+                latest_df[c] = 0.0
+        x_reg = latest_df[used_reg].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
         model_reg = getattr(reg, "model", reg)
-        latest_df["pred_rf_reg"] = model_reg.predict(latest_df[used_reg])
+        latest_df["pred_rf_reg"] = model_reg.predict(x_reg)
     else:
         latest_df["pred_rf_reg"] = np.nan
 
@@ -383,6 +402,9 @@ def score_latest_with_cluster_familiarity(
     flavor_space: Any,
     market_position_value: int | Mapping[Any, Any] | pd.Series | None = 0,
     market_position_col: str = "market_position",
+    buy_prob_col: str = "clf__prob_buy",
+    short_prob_col: str | None = "clf__prob_short",
+    infer_short_from_buy: bool = False,
     round_decimals: int | None = None,
 ) -> tuple[pd.Timestamp, pd.DataFrame]:
     """
@@ -432,8 +454,21 @@ def score_latest_with_cluster_familiarity(
     if "cluster_familiarity" not in scored.columns:
         scored["cluster_familiarity"] = 0.0
 
-    scored["buy_score"] = scored["clf__prob_buy"] * scored["ranking"] * scored["cluster_familiarity"]
-    scored["short_score"] = scored["clf__prob_short"] * scored["ranking"] * scored["cluster_familiarity"]
+    if buy_prob_col not in scored.columns:
+        raise KeyError(f"Configured buy probability column '{buy_prob_col}' not found.")
+    buy_prob = pd.to_numeric(scored[buy_prob_col], errors="coerce").fillna(0.0)
+
+    if short_prob_col is not None:
+        if short_prob_col not in scored.columns:
+            raise KeyError(f"Configured short probability column '{short_prob_col}' not found.")
+        short_prob = pd.to_numeric(scored[short_prob_col], errors="coerce").fillna(0.0)
+    elif infer_short_from_buy:
+        short_prob = (1.0 - buy_prob).clip(0.0, 1.0)
+    else:
+        raise KeyError("Short probability column not configured. Set short_prob_col or infer_short_from_buy=True.")
+
+    scored["buy_score"] = buy_prob * scored["ranking"] * scored["cluster_familiarity"]
+    scored["short_score"] = short_prob * scored["ranking"] * scored["cluster_familiarity"]
     return latest_date, scored
 
 

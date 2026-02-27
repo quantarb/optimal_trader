@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 
 artifacts/
+AutogluonModels/
 *.zip
 entry2exit.csv
 data/*.db

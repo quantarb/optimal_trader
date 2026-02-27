@@ -61,13 +61,19 @@ class SklearnRFRegressor(Model):
         if spec.weight_col and spec.weight_col in df.columns:
             w = pd.to_numeric(df[spec.weight_col], errors="coerce").fillna(1.0).to_numpy()
 
-        # 4. Train/Test Split
-        X_tr, X_va, y_tr, y_va, w_tr, w_va = train_test_split(
-            X, y, w,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            shuffle=True,
-        )
+        # 4. Train/Test Split (optional in no-holdout mode)
+        use_holdout = (self.test_size > 0.0) and (self.test_size < 1.0)
+        if use_holdout:
+            X_tr, X_va, y_tr, y_va, w_tr, w_va = train_test_split(
+                X, y, w,
+                test_size=self.test_size,
+                random_state=self.random_state,
+                shuffle=True,
+            )
+        else:
+            # Full-fit mode: no internal holdout split. Diagnostics are in-sample.
+            X_tr, y_tr, w_tr = X, y, w
+            X_va, y_va, w_va = X, y, w
 
         # 5. Training
         self.model.fit(X_tr, y_tr, sample_weight=w_tr)
@@ -81,6 +87,7 @@ class SklearnRFRegressor(Model):
             "n_obs": len(df),
             "n_train": len(X_tr),
             "n_test": len(X_va),
+            "eval_mode": "holdout" if use_holdout else "in_sample",
             "target_mean": y.mean(),
             "target_std": y.std(),
             "pred_mean": y_pred.mean(),
@@ -117,6 +124,8 @@ class SklearnRFRegressor(Model):
         s, m = self._train_stats, self._metrics
 
         print(f"DATASET: {s['n_obs']:,} obs | {len(self._used_features)} features")
+        if s.get("eval_mode") == "in_sample":
+            print("  - Split Mode: In-sample eval (no internal holdout split).")
         print(f"  - Dropped {s['dropped_count']} non-numeric features.")
 
         print(f"\nTARGET VS PREDICTION DIST:")

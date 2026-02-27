@@ -1,7 +1,42 @@
 import pandas as pd
 import numpy as np
 
-def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
+
+def _assign_trade_id(out: pd.DataFrame) -> pd.DataFrame:
+    """Create stable, unique trade_id values if missing."""
+    if "trade_id" in out.columns and out["trade_id"].notna().all():
+        return out
+
+    base_cols = {
+        "symbol": out.get("symbol", pd.Series([""] * len(out))).astype(str),
+        "entry_date": pd.to_datetime(out.get("entry_date"), errors="coerce").dt.strftime("%Y%m%d"),
+        "exit_date": pd.to_datetime(out.get("exit_date"), errors="coerce").dt.strftime("%Y%m%d"),
+        "side": out.get("side", pd.Series([""] * len(out))).astype(str),
+        "horizon": out.get("horizon", pd.Series([""] * len(out))).astype(str),
+    }
+    base = (
+        "T|"
+        + base_cols["symbol"].fillna("")
+        + "|E" + base_cols["entry_date"].fillna("NA")
+        + "|X" + base_cols["exit_date"].fillna("NA")
+        + "|S" + base_cols["side"].fillna("")
+        + "|H" + base_cols["horizon"].fillna("")
+    )
+    dup_n = base.groupby(base).cumcount()
+    out["trade_id"] = np.where(dup_n > 0, base + "|N" + dup_n.astype(str), base)
+    return out
+
+
+def _finalize_trades_df(out: pd.DataFrame, *, trade_id_as_index: bool) -> pd.DataFrame:
+    out = out.dropna(subset=["entry_date", "exit_date"])
+    out = out[out["exit_date"] > out["entry_date"]].sort_values(["symbol", "entry_date", "exit_date"]).reset_index(drop=True)
+    out = _assign_trade_id(out)
+    if trade_id_as_index:
+        out = out.set_index("trade_id", drop=False).sort_index()
+    return out
+
+
+def labels_panel_to_trades_df(label_df: pd.DataFrame, *, trade_id_as_index: bool = False) -> pd.DataFrame:
     df = label_df.copy()
 
     # --- ensure we have a date column
@@ -28,12 +63,13 @@ def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
         out["entry_date"] = pd.to_datetime(out["entry_date"])
         out["exit_date"] = pd.to_datetime(out["exit_date"])
         cols = ["symbol", "entry_date", "exit_date"]
+        if "trade_id" in out.columns:
+            cols.append("trade_id")
         for c in ["side", "horizon", "entry_px", "exit_px", "trade_return", "trade_duration_days", "sample_weight"]:
             if c in out.columns:
                 cols.append(c)
-        out = out[cols].dropna(subset=["entry_date", "exit_date"])
-        out = out[out["exit_date"] > out["entry_date"]].sort_values(["symbol", "entry_date"]).reset_index(drop=True)
-        return out
+        out = out[cols]
+        return _finalize_trades_df(out, trade_id_as_index=trade_id_as_index)
 
     # Case B: there is an explicit trade/pair id
     id_candidates = [c for c in ["trade_id", "pair_id", "signal_id", "event_id"] if c in df.columns]
@@ -68,6 +104,7 @@ def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
                 "entry_date": pd.to_datetime(entry_row["date"]),
                 "exit_date": pd.to_datetime(exit_row["date"]),
             }
+            row["trade_id"] = str(trade_id)
             for c in ["side", "horizon", "entry_px", "exit_px", "trade_return", "trade_duration_days", "sample_weight"]:
                 if c in g.columns:
                     row[c] = entry_row.get(c, np.nan)
@@ -76,9 +113,8 @@ def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
                         row[c] = exit_row.get(c, row[c])
             rows.append(row)
 
-        out = pd.DataFrame(rows).dropna(subset=["entry_date", "exit_date"])
-        out = out[out["exit_date"] > out["entry_date"]].sort_values(["symbol", "entry_date"]).reset_index(drop=True)
-        return out
+        out = pd.DataFrame(rows)
+        return _finalize_trades_df(out, trade_id_as_index=trade_id_as_index)
 
     # Case C: No id — pair consecutive rows (common when there are exactly 2 events per trade)
     # We pair (0,1), (2,3), ... within each (symbol,horizon,side) bucket.
@@ -110,6 +146,7 @@ def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
                 "entry_date": entry_row["date"],
                 "exit_date": exit_row["date"],
             }
+            row["trade_id"] = f"PAIR|{row['symbol']}|{pd.Timestamp(row['entry_date']).strftime('%Y%m%d')}|{pd.Timestamp(row['exit_date']).strftime('%Y%m%d')}|{i//2}"
             for c in ["side", "horizon", "entry_px", "exit_px", "trade_return", "trade_duration_days", "sample_weight"]:
                 if c in g.columns:
                     row[c] = entry_row.get(c, np.nan)
@@ -117,6 +154,5 @@ def labels_panel_to_trades_df(label_df: pd.DataFrame) -> pd.DataFrame:
                         row[c] = exit_row.get(c, row[c])
             rows.append(row)
 
-    out = pd.DataFrame(rows).dropna(subset=["entry_date", "exit_date"])
-    out = out[out["exit_date"] > out["entry_date"]].sort_values(["symbol", "entry_date"]).reset_index(drop=True)
-    return out
+    out = pd.DataFrame(rows)
+    return _finalize_trades_df(out, trade_id_as_index=trade_id_as_index)

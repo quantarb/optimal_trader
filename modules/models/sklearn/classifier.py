@@ -66,7 +66,7 @@ class SklearnRFClassifier(Model):
             print(f"\n! ERROR: Target '{spec.target_col}' has only one class: {unique_classes}.")
             return self
 
-        # 3. Random Shuffle Split
+        # 3. Random Shuffle Split (optional in no-holdout mode)
         split_ratio = getattr(spec, "split_ratio", 0.8)
         test_size = 1.0 - split_ratio
 
@@ -74,13 +74,19 @@ class SklearnRFClassifier(Model):
         if spec.weight_col and spec.weight_col in df.columns:
             w = pd.to_numeric(df[spec.weight_col], errors="coerce").fillna(1.0).to_numpy()
 
-        X_tr, X_va, y_tr, y_va, w_tr, w_va = train_test_split(
-            X, y, w,
-            test_size=test_size,
-            random_state=self.random_state,
-            shuffle=True,
-            stratify=y,
-        )
+        use_holdout = (test_size > 0.0) and (test_size < 1.0)
+        if use_holdout:
+            X_tr, X_va, y_tr, y_va, w_tr, w_va = train_test_split(
+                X, y, w,
+                test_size=test_size,
+                random_state=self.random_state,
+                shuffle=True,
+                stratify=y,
+            )
+        else:
+            # Full-fit mode: no internal holdout split. Diagnostics are in-sample.
+            X_tr, y_tr, w_tr = X, y, w
+            X_va, y_va, w_va = X, y, w
 
         # 4. Capture stats
         self._train_stats = {
@@ -88,6 +94,7 @@ class SklearnRFClassifier(Model):
             "n_train": len(X_tr),
             "n_test": len(X_va),
             "split_ratio": split_ratio,
+            "eval_mode": "holdout" if use_holdout else "in_sample",
             "n_features_numeric": len(self._used_features),
             "dropped_count": len(non_numeric),
             "classes": unique_classes.tolist(),
@@ -141,7 +148,10 @@ class SklearnRFClassifier(Model):
 
         print(f"DATASET & SPLIT:")
         print(f"  - Total Observations: {s['n_obs']:,}")
-        print(f"  - Random Split:       {s['split_ratio']:.1%} Train / {1 - s['split_ratio']:.1%} Test")
+        if s.get("eval_mode") == "holdout":
+            print(f"  - Random Split:       {s['split_ratio']:.1%} Train / {1 - s['split_ratio']:.1%} Test")
+        else:
+            print("  - Split Mode:         In-sample eval (no internal holdout split)")
         print(f"  - Features:           {s['n_features_numeric']} numeric (filtered {s['dropped_count']} strings)")
 
         print(f"\nCLASS DISTRIBUTION (Mapping: {self._class_mapping}):")

@@ -10,8 +10,42 @@ from modules.api import (
     build_fundamental_dataframe,
     build_macro_dataframe,
 )
-from modules.analysis import add_cluster_explanations
-from modules.analysis.alpha_flavors import score_trade_flavor
+
+
+def _ae_familiarity(ae_model: Any, row_num: pd.DataFrame) -> float:
+    artifact = getattr(ae_model, "_artifact", None)
+    if artifact is None:
+        return 1.0
+
+    numeric_cols = list(getattr(artifact, "numeric_cols", []) or [])
+    categorical_cols = list(getattr(artifact, "cat_cols", []) or [])
+    if not numeric_cols:
+        return 1.0
+
+    for c in numeric_cols:
+        if c not in row_num.columns:
+            row_num[c] = 0.0
+        row_num[c] = pd.to_numeric(row_num[c], errors="coerce")
+    row_num[numeric_cols] = row_num[numeric_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    for c in categorical_cols:
+        if c not in row_num.columns:
+            row_num[c] = ""
+
+    if hasattr(ae_model, "familiarity"):
+        fam = np.asarray(
+            ae_model.familiarity(
+                row_num,
+                numeric_cols=numeric_cols,
+                categorical_cols=categorical_cols,
+                quantile=99.9,
+                mode="latent_reciprocal_soft",
+            ),
+            dtype=float,
+        ).reshape(-1)
+        if len(fam):
+            return float(np.clip(fam[0], 0.0, 1.0))
+    return 1.0
 
 
 def _class_probs_for_buy_short(clf_wrapper: Any, X: pd.DataFrame) -> tuple[float, float]:
@@ -41,9 +75,11 @@ def predict_symbol_fresh(
     *,
     ctx,
     clf_raw: Any,
-    reg_raw: Any,
+    reg_raw: Any | None = None,
+    reg_trade_return_raw: Any | None = None,
+    reg_duration_raw: Any | None = None,
     ae_raw: Any,
-    flavor_space: Any,
+    flavor_space: Any | None = None,
     start_date: str = "1980-01-01",
     end_date: str | None = None,
 ) -> tuple[pd.Timestamp, pd.Series]:
@@ -89,9 +125,12 @@ def predict_symbol_fresh(
     row = row.loc[[sym]].copy()
 
     clf_feats = list(getattr(clf_raw, "_used_features", []))
-    reg_feats = list(getattr(reg_raw, "_used_features", []))
-    flavor_numeric = list(getattr(flavor_space, "numeric_cols", []))
-    required = sorted(set(clf_feats + reg_feats + flavor_numeric))
+    primary_reg = reg_trade_return_raw if reg_trade_return_raw is not None else reg_raw
+    if primary_reg is None:
+        raise ValueError("predict_symbol_fresh requires reg_trade_return_raw (or legacy reg_raw).")
+
+    reg_feats = list(getattr(primary_reg, "_used_features", []))
+    required = sorted(set(clf_feats + reg_feats))
 
     for c in required:
         if c not in row.columns:
@@ -110,41 +149,37 @@ def predict_symbol_fresh(
 
     p_buy, p_short = _class_probs_for_buy_short(clf_raw, X_clf)
 
-    reg_model = getattr(reg_raw, "model", reg_raw)
-    ranking = float(np.asarray(reg_model.predict(X_reg), dtype=float).reshape(-1)[0])
-
-    flavor_scored = score_trade_flavor(
-        flavor_space=flavor_space,
-        entries_df=row_num,
-        ae_model=ae_raw,
-    )
-    cluster_col = str(flavor_space.cluster_col)
-    min_dist_col = f"{cluster_col}__min_dist"
-    fam_col = f"{cluster_col}__familiarity"
+    reg_model = getattr(primary_reg, "model", primary_reg)
+    predicted_trade_return = float(np.asarray(reg_model.predict(X_reg), dtype=float).reshape(-1)[0])
+    ranking = predicted_trade_return
+    predicted_duration_days = np.nan
+    if reg_duration_raw is not None:
+        reg_dur_feats = list(getattr(reg_duration_raw, "_used_features", []))
+        for c in reg_dur_feats:
+            if c not in row_num.columns:
+                row_num[c] = 0.0
+        X_reg_dur = row_num[reg_dur_feats]
+        reg_duration_model = getattr(reg_duration_raw, "model", reg_duration_raw)
+        predicted_duration_days = float(np.asarray(reg_duration_model.predict(X_reg_dur), dtype=float).reshape(-1)[0])
+        predicted_duration_days = max(0.0, predicted_duration_days)
 
     out = row_num.copy()
     out["clf__prob_buy"] = p_buy
     out["clf__prob_short"] = p_short
     out["ranking"] = ranking
+    out["predicted_trade_return"] = predicted_trade_return
+    out["predicted_duration_days"] = predicted_duration_days
+    out["ae_familiarity"] = _ae_familiarity(ae_raw, row_num)
 
-    for c in [cluster_col, min_dist_col, fam_col, "cluster_familiarity"]:
-        if c in flavor_scored.columns:
-            out[c] = flavor_scored[c]
-
-    if "cluster_familiarity" not in out.columns and fam_col in out.columns:
-        out["cluster_familiarity"] = out[fam_col]
-    if "cluster_familiarity" not in out.columns:
-        out["cluster_familiarity"] = 0.0
-
-    out["buy_score"] = out["clf__prob_buy"] * out["ranking"] * out["cluster_familiarity"]
-    out["short_score"] = out["clf__prob_short"] * out["ranking"] * out["cluster_familiarity"]
-
-    out = add_cluster_explanations(
-        out,
-        flavor_space=flavor_space,
-        top_matches=5,
-        top_deviations=3,
-    )
+    if pd.notna(predicted_trade_return):
+        out["expected_buy_return"] = out["clf__prob_buy"] * out["predicted_trade_return"] * out["ae_familiarity"]
+        out["expected_short_return"] = out["clf__prob_short"] * out["predicted_trade_return"] * out["ae_familiarity"]
+        # Backward-compatible aliases.
+        out["buy_score"] = out["expected_buy_return"]
+        out["short_score"] = out["expected_short_return"]
+    else:
+        out["buy_score"] = out["clf__prob_buy"] * out["ranking"] * out["ae_familiarity"]
+        out["short_score"] = out["clf__prob_short"] * out["ranking"] * out["ae_familiarity"]
 
     return latest_date, out.loc[sym]
 
@@ -160,53 +195,27 @@ def pretty_print_symbol_prediction(symbol: str, latest_dt: pd.Timestamp, pred: p
     p_buy = get_num("clf__prob_buy", 0.0)
     p_short = get_num("clf__prob_short", 0.0)
     ranking = get_num("ranking", 0.0)
-    fam = get_num("cluster_familiarity", 0.0)
+    predicted_trade_return = get_num("predicted_trade_return", np.nan)
+    predicted_duration_days = get_num("predicted_duration_days", np.nan)
+    fam = get_num("ae_familiarity", 0.0)
     buy_score = get_num("buy_score", 0.0)
     short_score = get_num("short_score", 0.0)
-
-    cmr = get_num("cluster_mean_return", np.nan)
-    csh = get_num("cluster_sharpe", np.nan)
-    cmd = get_num("cluster_mean_duration", np.nan)
-
-    matches = pred.get("top_matching_features", []) or []
-    devs = pred.get("top_deviating_features", []) or []
-
-    cluster_candidates = [c for c in pred.index if c.endswith("cluster_id") or c == "cluster_id" or c.startswith("cluster_")]
-    cluster_val = None
-    if "cluster_id" in pred.index:
-        cluster_val = pred["cluster_id"]
-    elif cluster_candidates:
-        cluster_val = pred[cluster_candidates[0]]
+    expected_buy_return = get_num("expected_buy_return", np.nan)
+    expected_short_return = get_num("expected_short_return", np.nan)
 
     print(f"{s} | {pd.Timestamp(latest_dt).date()}")
     print("-" * 72)
-    if cluster_val is not None and pd.notna(cluster_val):
-        print(f"Cluster: {cluster_val}")
     print(f"BUY prob:   {p_buy:.3f}")
     print(f"SHORT prob: {p_short:.3f}")
     print(f"Ranking:    {ranking:.3f}")
-    print(f"Familiarity:{fam:.3f}")
+    if pd.notna(predicted_trade_return):
+        print(f"Pred ret:   {predicted_trade_return:.4f}")
+    if pd.notna(predicted_duration_days):
+        print(f"Pred dur:   {predicted_duration_days:.1f} days")
+    print(f"AE fam:     {fam:.3f}")
+    if pd.notna(expected_buy_return):
+        print(f"Exp BUY ret:{expected_buy_return:.4f}")
     print(f"BUY score:  {buy_score:.3f}")
+    if pd.notna(expected_short_return):
+        print(f"Exp SHRT ret:{expected_short_return:.4f}")
     print(f"SHORT score:{short_score:.3f}")
-    print()
-
-    print("Cluster history:")
-    print(f"  Mean return:  {cmr:.3f}" if pd.notna(cmr) else "  Mean return:  N/A")
-    print(f"  Sharpe:       {csh:.3f}" if pd.notna(csh) else "  Sharpe:       N/A")
-    print(f"  Mean duration:{cmd:.1f} days" if pd.notna(cmd) else "  Mean duration:N/A")
-    print()
-
-    print("Top matches:")
-    if matches:
-        for feat, val in list(matches)[:5]:
-            print(f"  + {feat}: {val}")
-    else:
-        print("  (none)")
-    print()
-
-    print("Top deviations:")
-    if devs:
-        for feat, val in list(devs)[:3]:
-            print(f"  - {feat}: {val}")
-    else:
-        print("  (none)")
