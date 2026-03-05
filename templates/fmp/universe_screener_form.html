@@ -440,7 +440,7 @@
 
           <div class="group-title">Market Cap Range</div>
           <div class="range-field">
-            <label>Market Cap</label>
+            <label>Market Cap (USD, Millions)</label>
             <div class="range-grid">
               <div>
                 <span class="sub-label">Min</span>
@@ -524,7 +524,7 @@
 
           <div class="group-title">Volume Range</div>
           <div class="range-field">
-            <label>Volume</label>
+            <label>Volume (Millions)</label>
             <div class="range-grid">
               <div>
                 <span class="sub-label">Min</span>
@@ -609,8 +609,10 @@
             </div>
             <div class="pager" id="pager">
               <div class="pager-controls">
+                <button type="button" id="first-page">First</button>
                 <button type="button" id="prev-page">Previous</button>
                 <button type="button" id="next-page">Next</button>
+                <button type="button" id="last-page">Last</button>
                 <span id="page-info"></span>
               </div>
               <div class="pager-controls">
@@ -638,8 +640,10 @@
       if (!table || !body || !pager) return;
 
       const pageSizeEl = document.getElementById("page-size");
+      const firstEl = document.getElementById("first-page");
       const prevEl = document.getElementById("prev-page");
       const nextEl = document.getElementById("next-page");
+      const lastEl = document.getElementById("last-page");
       const infoEl = document.getElementById("page-info");
       const sortButtons = Array.from(table.querySelectorAll(".sort-btn"));
       const symbolColIndex = parseInt(table.getAttribute("data-symbol-col-index"), 10);
@@ -733,8 +737,10 @@
           .join("");
 
         infoEl.textContent = `Page ${currentPage} of ${totalPages} (${totalRows} rows)`;
+        firstEl.disabled = currentPage <= 1;
         prevEl.disabled = currentPage <= 1;
         nextEl.disabled = currentPage >= totalPages;
+        lastEl.disabled = currentPage >= totalPages;
 
         sortButtons.forEach((btn, idx) => {
           const ind = btn.querySelector(".sort-indicator");
@@ -765,6 +771,13 @@
         render();
       });
 
+      firstEl.addEventListener("click", () => {
+        if (currentPage > 1) {
+          currentPage = 1;
+          render();
+        }
+      });
+
       prevEl.addEventListener("click", () => {
         if (currentPage > 1) {
           currentPage -= 1;
@@ -776,6 +789,14 @@
         const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
         if (currentPage < totalPages) {
           currentPage += 1;
+          render();
+        }
+      });
+
+      lastEl.addEventListener("click", () => {
+        const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+        if (currentPage < totalPages) {
+          currentPage = totalPages;
           render();
         }
       });
@@ -904,6 +925,18 @@
       const countrySelect = document.querySelector('select[name="country"]');
       const sectorSelect = document.querySelector('select[name="sector"]');
       const industrySelect = document.querySelector('select[name="industry"]');
+      function ensureDefaultCountry(sel) {
+        if (!sel) return;
+        const hasSelected = Array.from(sel.options).some((o) => o.selected && o.value);
+        if (hasSelected) return;
+        const usOption = Array.from(sel.options).find((o) => {
+          const value = String(o.value || "").trim().toUpperCase();
+          const label = String(o.text || "").trim().toLowerCase();
+          return value === "US" || label.includes("united states");
+        });
+        if (usOption) usOption.selected = true;
+      }
+      ensureDefaultCountry(countrySelect);
       [countrySelect, sectorSelect, industrySelect].forEach((sel) => {
         if (!sel) return;
         sel.classList.add("hidden-multi");

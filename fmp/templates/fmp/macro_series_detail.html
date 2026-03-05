@@ -1,82 +1,143 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ series_obj.display_name|default:series_obj.code }}</title>
-  <style>
-    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
-    .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
-    .chart-wrap { border: 1px solid #e2e8ef; border-radius: 10px; padding: 12px; margin-top: 12px; background: #fbfdff; }
-    .chart-wrap canvas { width: 100%; max-height: 460px; }
-    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 12px; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
-    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
-    th { background: #f3f7fb; position: sticky; top: 0; }
-    a { color: #0d6a6d; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <p><a href="{{ back_href }}">&larr; {{ back_label }}</a></p>
-    <h1>{{ series_obj.display_name|default:series_obj.code }}</h1>
-    <p>Code: {{ series_obj.code }} | Category: {{ category_label }} | Points: {{ points_count }}</p>
-    {% if points_count %}
-      <div class="chart-wrap">
-        <canvas id="seriesChart"></canvas>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in display_rows %}
-              <tr>
-                <td>{{ row.0 }}</td>
-                <td>{{ row.1 }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <p>No stored observations for this series.</p>
-    {% endif %}
-  </div>
+{% extends "fmp/chart_base.html" %}
+
+{% block page_title %}{{ series_obj.display_name|default:series_obj.code }}{% endblock %}
+
+{% block extra_styles %}
+  .chart-wrap { margin-top: 12px; }
+  .table-wrap { margin-top: 12px; }
+  .hc-chart { width: 100%; height: 460px; }
+{% endblock %}
+
+{% block card_content %}
+  <p><a href="{{ back_href }}">&larr; {{ back_label }}</a></p>
+  <h1>{{ series_obj.display_name|default:series_obj.code }}</h1>
+  <p>Code: {{ series_obj.code }} | Category: {{ category_label }} | Points: {{ points_count }}</p>
   {% if points_count %}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <div class="chart-wrap">
+      <div id="seriesChart" class="hc-chart"></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in display_rows %}
+            <tr>
+              <td>{{ row.0 }}</td>
+              <td>{{ row.1 }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p id="chartError" style="display:none; color:#ab2323; font-weight:600;"></p>
+  {% else %}
+    <p>No stored observations for this series.</p>
+  {% endif %}
+{% endblock %}
+
+{% block page_script %}
+  {% if points_count %}
     <script>
-      new Chart(document.getElementById("seriesChart"), {
-        type: "line",
-        data: {
-          labels: {{ labels_json|safe }},
-          datasets: [
-            {
-              label: "{{ series_obj.display_name|default:series_obj.code|escapejs }}",
-              data: {{ values_json|safe }},
-              borderColor: "#0d6a6d",
-              backgroundColor: "#0d6a6d",
-              pointRadius: 0,
-              borderWidth: 1.5,
-              tension: 0,
+      function toUtcMs(dateStr) {
+        const parts = String(dateStr || "").split("-");
+        if (parts.length !== 3) return NaN;
+        const y = Number(parts[0]);
+        const m = Number(parts[1]);
+        const d = Number(parts[2]);
+        if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return NaN;
+        return Date.UTC(y, m - 1, d);
+      }
+
+      function showError(message) {
+        const el = document.getElementById("chartError");
+        if (!el) return;
+        el.textContent = message;
+        el.style.display = "block";
+      }
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error("Failed to load " + src));
+          document.head.appendChild(s);
+        });
+      }
+
+      async function ensureHighchartsLoaded() {
+        if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+        const urls = [
+          "https://code.highcharts.com/stock/highstock.js",
+          "https://cdn.jsdelivr.net/npm/highcharts@12.4.0/highstock.js",
+          "https://unpkg.com/highcharts@12.4.0/highstock.js"
+        ];
+        for (const u of urls) {
+          try {
+            await loadScript(u);
+            if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+          } catch (_) {}
+        }
+        return false;
+      }
+
+      const labels = {{ labels_json|safe }};
+      const values = {{ values_json|safe }};
+      const seriesData = [];
+      for (let i = 0; i < labels.length; i += 1) {
+        const x = toUtcMs(labels[i]);
+        if (!Number.isFinite(x)) continue;
+        const y = values[i];
+        seriesData.push([x, (typeof y === "number" && Number.isFinite(y)) ? y : null]);
+      }
+
+      ensureHighchartsLoaded().then((ok) => {
+        if (!ok) {
+          showError("Highcharts failed to load from all CDNs. Network or CSP is blocking external scripts.");
+          return;
+        }
+        try {
+          Highcharts.stockChart("seriesChart", {
+            chart: { backgroundColor: "#fbfdff" },
+            credits: { enabled: false },
+            rangeSelector: {
+              selected: 4,
+              allButtonsEnabled: true,
+              buttons: [
+                { type: "month", count: 1, text: "1M" },
+                { type: "month", count: 6, text: "6M" },
+                { type: "ytd", text: "YTD" },
+                { type: "year", count: 1, text: "1Y" },
+                { type: "year", count: 5, text: "5Y" },
+                { type: "all", text: "Max" }
+              ]
             },
-          ],
-        },
-        options: {
-          responsive: true,
-          interaction: { mode: "index", intersect: false },
-          scales: {
-            x: { ticks: { maxTicksLimit: 12 } },
-            y: { title: { display: true, text: "Value" } },
-          },
-        },
+            legend: { enabled: false },
+            tooltip: { valueDecimals: 4 },
+            yAxis: {
+              title: { text: "Value" }
+            },
+            series: [
+              {
+                type: "line",
+                name: "{{ series_obj.display_name|default:series_obj.code|escapejs }}",
+                data: seriesData,
+                color: "#0d6a6d",
+                lineWidth: 1.6,
+                marker: { enabled: false }
+              }
+            ]
+          });
+        } catch (err) {
+          showError("Chart render failed: " + (err && err.message ? err.message : "unknown error"));
+        }
       });
     </script>
   {% endif %}
-</body>
-</html>
+{% endblock %}

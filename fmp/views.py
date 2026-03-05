@@ -156,6 +156,50 @@ def _collect_columns(records: list[dict]) -> list[str]:
     return cols
 
 
+def _market_cap_millions_to_dollars(value):
+    if value is None:
+        return None
+    return float(value) * 1_000_000
+
+
+def _volume_millions_to_units(value):
+    if value is None:
+        return None
+    return float(value) * 1_000_000
+
+
+def _default_country_value(country_choices: list[tuple[str, str]] | None) -> str:
+    if not country_choices:
+        return "US"
+    for value, _label in country_choices:
+        if str(value).strip().upper() == "US":
+            return str(value)
+    for value, label in country_choices:
+        v = str(value).strip().lower()
+        l = str(label).strip().lower()
+        if v in {"united states", "usa"} or "united states" in l:
+            return str(value)
+    return "US"
+
+
+def _default_us_exchange_values(exchange_choices: list[tuple[str, str]] | None) -> list[str]:
+    if not exchange_choices:
+        return []
+    # Keep defaults strict to avoid accidental non-US exchanges (e.g., NASDAQ Helsinki).
+    known_us_codes = {"NASDAQ", "NYSE", "AMEX", "CBOE", "OTC", "PNK", "IEX", "ARCA", "BATS"}
+    selected: list[str] = []
+    seen: set[str] = set()
+    for value, _label in exchange_choices:
+        v = str(value).strip()
+        if not v:
+            continue
+        if v.upper() in known_us_codes:
+            if v not in seen:
+                seen.add(v)
+                selected.append(v)
+    return selected
+
+
 def _safe_float(value):
     if value is None or value == "":
         return None
@@ -945,8 +989,8 @@ def _fetch_filter_choices(api_key: str | None) -> dict[str, list[tuple[str, str]
             )
             countries = _extract_choices(
                 client.get_json("/stable/available-countries"),
-                value_keys=("country", "countryCode", "code", "name", "value"),
-                label_keys=("name", "country", "countryCode", "code", "value"),
+                value_keys=("countryCode", "code", "country", "name", "value"),
+                label_keys=("country", "name", "countryCode", "code", "value"),
             )
 
             for value, _label in industries:
@@ -984,9 +1028,13 @@ def universe_screener(request: HttpRequest) -> JsonResponse:
     try:
         symbols, records = screen_companies_fmp(
             api_key=api_key,
-            limit=_parse_int(request.GET.get("limit"), "limit", 1000),
-            marketCapMoreThan=_parse_float(request.GET.get("marketCapMoreThan"), "marketCapMoreThan"),
-            marketCapLowerThan=_parse_float(request.GET.get("marketCapLowerThan"), "marketCapLowerThan"),
+            limit=_parse_int(request.GET.get("limit"), "limit", 10000),
+            marketCapMoreThan=_market_cap_millions_to_dollars(
+                _parse_float(request.GET.get("marketCapMoreThan"), "marketCapMoreThan")
+            ),
+            marketCapLowerThan=_market_cap_millions_to_dollars(
+                _parse_float(request.GET.get("marketCapLowerThan"), "marketCapLowerThan")
+            ),
             sector=request.GET.get("sector") or None,
             industry=request.GET.get("industry") or None,
             betaMoreThan=_parse_float(request.GET.get("betaMoreThan"), "betaMoreThan"),
@@ -995,8 +1043,12 @@ def universe_screener(request: HttpRequest) -> JsonResponse:
             priceLowerThan=_parse_float(request.GET.get("priceLowerThan"), "priceLowerThan"),
             dividendMoreThan=_parse_float(request.GET.get("dividendMoreThan"), "dividendMoreThan"),
             dividendLowerThan=_parse_float(request.GET.get("dividendLowerThan"), "dividendLowerThan"),
-            volumeMoreThan=_parse_float(request.GET.get("volumeMoreThan"), "volumeMoreThan"),
-            volumeLowerThan=_parse_float(request.GET.get("volumeLowerThan"), "volumeLowerThan"),
+            volumeMoreThan=_volume_millions_to_units(
+                _parse_float(request.GET.get("volumeMoreThan"), "volumeMoreThan")
+            ),
+            volumeLowerThan=_volume_millions_to_units(
+                _parse_float(request.GET.get("volumeLowerThan"), "volumeLowerThan")
+            ),
             exchange=request.GET.get("exchange") or None,
             country=request.GET.get("country") or None,
             isEtf=_parse_bool(request.GET.get("isEtf")),
@@ -1043,9 +1095,9 @@ def universe_screener_form(request: HttpRequest):
                 try:
                     _, records = screen_companies_fmp(
                         api_key=api_key,
-                        limit=data.get("limit") or 1000,
-                        marketCapMoreThan=data.get("marketCapMoreThan"),
-                        marketCapLowerThan=data.get("marketCapLowerThan"),
+                        limit=data.get("limit") or 10000,
+                        marketCapMoreThan=_market_cap_millions_to_dollars(data.get("marketCapMoreThan")),
+                        marketCapLowerThan=_market_cap_millions_to_dollars(data.get("marketCapLowerThan")),
                         sector=data.get("sector") or None,
                         industry=data.get("industry") or None,
                         betaMoreThan=data.get("betaMoreThan"),
@@ -1054,8 +1106,8 @@ def universe_screener_form(request: HttpRequest):
                         priceLowerThan=data.get("priceLowerThan"),
                         dividendMoreThan=data.get("dividendMoreThan"),
                         dividendLowerThan=data.get("dividendLowerThan"),
-                        volumeMoreThan=data.get("volumeMoreThan"),
-                        volumeLowerThan=data.get("volumeLowerThan"),
+                        volumeMoreThan=_volume_millions_to_units(data.get("volumeMoreThan")),
+                        volumeLowerThan=_volume_millions_to_units(data.get("volumeLowerThan")),
                         exchange=exchange_param,
                         country=data.get("country") or None,
                         isEtf=_parse_bool(data.get("isEtf")),
@@ -1072,7 +1124,17 @@ def universe_screener_form(request: HttpRequest):
                 except Exception as exc:
                     error = str(exc)
     else:
-        form = UniverseScreenerForm(initial={"limit": 1000}, **dynamic_choices)
+        form = UniverseScreenerForm(
+            initial={
+                "limit": 10000,
+                "marketCapMoreThan": 5000,
+                "country": _default_country_value(dynamic_choices.get("country_choices")),
+                "exchange": _default_us_exchange_values(dynamic_choices.get("exchange_choices")),
+                "isFund": "false",
+                "includeAllShareClasses": "false",
+            },
+            **dynamic_choices,
+        )
 
     return render(
         request,

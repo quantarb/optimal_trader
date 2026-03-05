@@ -123,10 +123,23 @@ ECONOMIC_INDICATOR_SERIES = (
 
 MACRO_SERIES_CHOICES = tuple((series, series) for series in ECONOMIC_INDICATOR_SERIES)
 
+
+def _find_us_country_value(choices: Sequence[tuple[str, str]]) -> str:
+    for value, _label in choices:
+        if str(value).strip().upper() == "US":
+            return str(value)
+    for value, label in choices:
+        v = str(value).strip().lower()
+        l = str(label).strip().lower()
+        if v in {"united states", "usa"} or "united states" in l:
+            return str(value)
+    return "US"
+
+
 class UniverseScreenerForm(forms.Form):
-    limit = forms.IntegerField(required=False, min_value=1, initial=1000)
-    marketCapMoreThan = forms.FloatField(required=False)
-    marketCapLowerThan = forms.FloatField(required=False)
+    limit = forms.IntegerField(required=False, min_value=1, initial=10000)
+    marketCapMoreThan = forms.FloatField(required=False, label="Market Cap Min (Millions)", initial=5000)
+    marketCapLowerThan = forms.FloatField(required=False, label="Market Cap Max (Millions)")
     sector = forms.ChoiceField(required=False, choices=SECTOR_CHOICES)
     industry = forms.ChoiceField(required=False, choices=INDUSTRY_CHOICES)
     betaMoreThan = forms.FloatField(required=False)
@@ -135,18 +148,18 @@ class UniverseScreenerForm(forms.Form):
     priceLowerThan = forms.FloatField(required=False)
     dividendMoreThan = forms.FloatField(required=False)
     dividendLowerThan = forms.FloatField(required=False)
-    volumeMoreThan = forms.FloatField(required=False)
-    volumeLowerThan = forms.FloatField(required=False)
+    volumeMoreThan = forms.FloatField(required=False, label="Volume Min (Millions)")
+    volumeLowerThan = forms.FloatField(required=False, label="Volume Max (Millions)")
     exchange = forms.MultipleChoiceField(
         required=False,
         choices=EXCHANGE_CHOICES[1:],
         widget=forms.SelectMultiple(attrs={"size": 8}),
     )
-    country = forms.ChoiceField(required=False, choices=COUNTRY_CHOICES)
+    country = forms.ChoiceField(required=False, choices=COUNTRY_CHOICES, initial="US")
     isEtf = forms.ChoiceField(required=False, choices=BOOL_CHOICES)
-    isFund = forms.ChoiceField(required=False, choices=BOOL_CHOICES)
+    isFund = forms.ChoiceField(required=False, choices=BOOL_CHOICES, initial="false")
     isActivelyTrading = forms.ChoiceField(required=False, choices=BOOL_CHOICES)
-    includeAllShareClasses = forms.ChoiceField(required=False, choices=BOOL_CHOICES)
+    includeAllShareClasses = forms.ChoiceField(required=False, choices=BOOL_CHOICES, initial="false")
 
     def __init__(
         self,
@@ -166,6 +179,14 @@ class UniverseScreenerForm(forms.Form):
             self.fields["exchange"].choices = list(exchange_choices)
         if country_choices:
             self.fields["country"].choices = list(country_choices)
+        if not self.is_bound:
+            country_field = self.fields["country"]
+            country_values = {str(v) for v, _ in country_field.choices}
+            existing = self.initial.get("country", country_field.initial)
+            if str(existing) not in country_values:
+                fallback_country = _find_us_country_value(country_field.choices)
+                self.initial["country"] = fallback_country
+                country_field.initial = fallback_country
 
 
 class EconomicIndicatorsForm(forms.Form):
