@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ symbol_obj.symbol }} OHLCV Chart</title>
+  <style>
+    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
+    .card { max-width: 1200px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    h1 { margin: 0 0 8px; }
+    p { margin-top: 0; color: #4d5b6b; }
+    .chart-wrap { border: 1px solid #e2e8ef; border-radius: 10px; padding: 12px; margin-bottom: 16px; background: #fbfdff; }
+    .chart-wrap canvas { width: 100%; max-height: 420px; }
+    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-bottom: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; vertical-align: top; }
+    th { background: #f3f7fb; position: sticky; top: 0; }
+    a { color: #0d6a6d; text-decoration: none; }
+    .mode-row { display: flex; gap: 8px; margin: 8px 0 12px; }
+    .mode-link { border: 1px solid #0d6a6d; border-radius: 6px; padding: 5px 10px; font-size: 0.82rem; }
+    .mode-link.active { background: #0d6a6d; color: #fff; }
+    .range-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 12px; }
+    .range-btn { border: 1px solid #8795a5; background: #fff; color: #2d3b4b; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; }
+    .range-btn.active { border-color: #0d6a6d; background: #0d6a6d; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p>
+      <a href="/fmp/symbol/{{ symbol_obj.symbol }}/">&larr; Back to Symbol Detail</a>
+      |
+      <a href="/fmp/universe-screener/form/">&larr; Back to Screener</a>
+    </p>
+    <h1>{{ symbol_obj.symbol }} OHLCV ({{ mode_label }})</h1>
+    <div class="mode-row">
+      <a class="mode-link{% if price_mode == 'adjusted' %} active{% endif %}" href="/fmp/symbol/{{ symbol_obj.symbol }}/chart/?price_mode=adjusted">Adjusted</a>
+      <a class="mode-link{% if price_mode == 'unadjusted' %} active{% endif %}" href="/fmp/symbol/{{ symbol_obj.symbol }}/chart/?price_mode=unadjusted">Unadjusted</a>
+    </div>
+    <div class="range-row">
+      <button class="range-btn" data-range="5d" type="button">5D</button>
+      <button class="range-btn" data-range="1m" type="button">1M</button>
+      <button class="range-btn" data-range="6m" type="button">6M</button>
+      <button class="range-btn" data-range="ytd" type="button">YTD</button>
+      <button class="range-btn" data-range="1y" type="button">1Y</button>
+      <button class="range-btn active" data-range="5y" type="button">5Y</button>
+      <button class="range-btn" data-range="max" type="button">Max</button>
+    </div>
+    <p>Points plotted: {{ points_count }}</p>
+    <p>Events: {{ events_count }}</p>
+
+    {% if points_count %}
+      <div class="chart-wrap">
+        <canvas id="ohlcChart"></canvas>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="volumeChart"></canvas>
+      </div>
+      <h3>Events</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="eventsTableBody">
+            <tr><td colspan="3">No events in selected range.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No stored `{{ price_mode }}` price data found yet. Refresh historical price data first.</p>
+    {% endif %}
+  </div>
+
+  {% if points_count %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      const labels = {{ labels_json|safe }};
+      const opens = {{ opens_json|safe }};
+      const highs = {{ highs_json|safe }};
+      const lows = {{ lows_json|safe }};
+      const closes = {{ closes_json|safe }};
+      const volumes = {{ volumes_json|safe }};
+      const events = {{ events_json|safe }};
+      const full = {
+        labels: labels.slice(),
+        opens: opens.slice(),
+        highs: highs.slice(),
+        lows: lows.slice(),
+        closes: closes.slice(),
+        volumes: volumes.slice(),
+        events: events.slice(),
+      };
+      const eventsByDate = {};
+      for (const e of full.events) {
+        if (!e || !e.x) continue;
+        if (!eventsByDate[e.x]) eventsByDate[e.x] = [];
+        eventsByDate[e.x].push(e);
+      }
+      const ohlcCtx = document.getElementById("ohlcChart");
+      const tooltipCallbacks = {
+        label: function(context) {
+          const raw = context.raw || {};
+          if (raw.type) {
+            const lines = [raw.type + ": " + context.parsed.y];
+            if (Array.isArray(raw.details)) {
+              for (const d of raw.details) lines.push(d);
+            }
+            return lines;
+          }
+          return context.dataset.label + ": " + context.parsed.y;
+        },
+        afterBody: function(items) {
+          if (!items || !items.length) return [];
+          const first = items[0];
+          const idx = Number.isInteger(first.dataIndex) ? first.dataIndex : -1;
+          const labelFromIndex = idx >= 0 ? String(ohlcChart.data.labels[idx] || "") : "";
+          const raw = first.raw || {};
+          const parsed = first.parsed || {};
+          const date = String(labelFromIndex || raw.x || parsed.x || first.label || "").slice(0, 10);
+          if (!date) return [];
+          const evs = eventsByDate[date] || [];
+          if (!evs.length) return [];
+          const lines = ["Events:"];
+          for (const ev of evs) {
+            let line = "- " + (ev.type || "Event");
+            if (Array.isArray(ev.details) && ev.details.length) line += " | " + ev.details.join(" | ");
+            lines.push(line);
+          }
+          return lines;
+        }
+      };
+
+      const ohlcChart = new Chart(ohlcCtx, {
+        type: "line",
+        data: {
+          labels: full.labels.slice(),
+          datasets: [
+            { label: "Open", data: full.opens.slice(), borderColor: "#4a84f5", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "High", data: full.highs.slice(), borderColor: "#2e9f5d", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "Low", data: full.lows.slice(), borderColor: "#d44d3a", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "Close", data: full.closes.slice(), borderColor: "#7e57c2", pointRadius: 0, borderWidth: 1.5, tension: 0 },
+            {
+              label: "Events",
+              data: full.events.slice(),
+              type: "scatter",
+              showLine: false,
+              pointRadius: 4,
+              pointHoverRadius: 6,
+              pointBackgroundColor: "#b33b5e",
+              pointBorderColor: "#7f2641",
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: "index", intersect: false },
+          plugins: { tooltip: { callbacks: tooltipCallbacks } },
+          scales: {
+            x: { ticks: { maxTicksLimit: 12 } },
+            y: { title: { display: true, text: "Price" } },
+          },
+        },
+      });
+
+      const volCtx = document.getElementById("volumeChart");
+      const volumeChart = new Chart(volCtx, {
+        type: "bar",
+        data: {
+          labels: full.labels.slice(),
+          datasets: [
+            { label: "Volume", data: full.volumes.slice(), backgroundColor: "rgba(13,106,109,0.45)", borderColor: "#0d6a6d", borderWidth: 1 },
+          ],
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: { ticks: { maxTicksLimit: 12 } },
+            y: { title: { display: true, text: "Volume" } },
+          },
+        },
+      });
+
+      function parseDate(s) {
+        return new Date(s + "T00:00:00");
+      }
+
+      function cutoffDate(rangeKey, lastDate) {
+        const d = new Date(lastDate.getTime());
+        if (rangeKey === "1m") d.setMonth(d.getMonth() - 1);
+        else if (rangeKey === "6m") d.setMonth(d.getMonth() - 6);
+        else if (rangeKey === "1y") d.setFullYear(d.getFullYear() - 1);
+        else if (rangeKey === "5y") d.setFullYear(d.getFullYear() - 5);
+        else if (rangeKey === "ytd") return new Date(lastDate.getFullYear(), 0, 1);
+        return d;
+      }
+
+      function applyRange(rangeKey) {
+        if (!full.labels.length) return;
+
+        let startIdx = 0;
+        if (rangeKey === "5d") {
+          startIdx = Math.max(0, full.labels.length - 5);
+        } else if (rangeKey !== "max") {
+          const lastDate = parseDate(full.labels[full.labels.length - 1]);
+          const cutoff = cutoffDate(rangeKey, lastDate);
+          startIdx = full.labels.findIndex((d) => parseDate(d) >= cutoff);
+          if (startIdx < 0) startIdx = 0;
+        }
+
+        const rangeLabels = full.labels.slice(startIdx);
+        const inRange = new Set(rangeLabels);
+        ohlcChart.data.labels = rangeLabels;
+        ohlcChart.data.datasets[0].data = full.opens.slice(startIdx);
+        ohlcChart.data.datasets[1].data = full.highs.slice(startIdx);
+        ohlcChart.data.datasets[2].data = full.lows.slice(startIdx);
+        ohlcChart.data.datasets[3].data = full.closes.slice(startIdx);
+        ohlcChart.data.datasets[4].data = full.events.filter((e) => inRange.has(e.x));
+        ohlcChart.update();
+
+        volumeChart.data.labels = rangeLabels;
+        volumeChart.data.datasets[0].data = full.volumes.slice(startIdx);
+        volumeChart.update();
+
+        const tableBody = document.getElementById("eventsTableBody");
+        if (tableBody) {
+          const rangeEvents = full.events
+            .filter((e) => inRange.has(e.x))
+            .sort((a, b) => String(b.x).localeCompare(String(a.x)));
+          if (!rangeEvents.length) {
+            tableBody.innerHTML = '<tr><td colspan="3">No events in selected range.</td></tr>';
+          } else {
+            tableBody.innerHTML = rangeEvents
+              .map((e) => {
+                const details = Array.isArray(e.details) && e.details.length ? e.details.join(" | ") : "";
+                return `<tr><td>${e.x || ""}</td><td>${e.type || ""}</td><td>${details}</td></tr>`;
+              })
+              .join("");
+          }
+        }
+      }
+
+      document.querySelectorAll(".range-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          applyRange(btn.dataset.range || "max");
+        });
+      });
+
+      applyRange("5y");
+    </script>
+  {% endif %}
+</body>
+</html>

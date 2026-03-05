@@ -1,0 +1,1663 @@
+import os
+from pathlib import Path
+import math
+import re
+import json
+import time
+import hashlib
+from datetime import timedelta
+from typing import Any
+import pandas as pd
+
+from django.http import Http404, HttpRequest, JsonResponse
+from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
+from django.views.decorators.http import require_GET
+from django.utils import timezone
+from django.db.models import Min, Max, Count
+
+from .endpoints import get_symbol_endpoint_definitions
+from .forms import (
+    COUNTRY_CHOICES,
+    EXCHANGE_CHOICES,
+    INDUSTRY_CHOICES,
+    SECTOR_CHOICES,
+    EconomicIndicatorsForm,
+    TreasuryRatesForm,
+    UniverseScreenerForm,
+)
+from .models import (
+    Country,
+    EconomicIndicatorObservation,
+    EconomicIndicatorSeries,
+    Exchange,
+    Industry,
+    Sector,
+    Symbol,
+    SymbolSectionHistorical,
+    SymbolSectionSnapshot,
+    SymbolSectionState,
+    TreasuryRateObservation,
+    TreasuryRateSeries,
+)
+from features.naming import feature_display_name
+from modules.data.fmp_client import FMPClient
+from modules.data.universe_fmp import screen_companies_fmp
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+except Exception:
+    pass
+
+
+def _parse_bool(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    v = value.strip().lower()
+    if v in {"1", "true", "t", "yes", "y"}:
+        return True
+    if v in {"0", "false", "f", "no", "n"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value}")
+
+
+def _parse_float(value: str | None, field: str) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid float for {field}: {value}") from exc
+
+
+def _parse_int(value: str | None, field: str, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer for {field}: {value}") from exc
+
+
+def _format_cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ""
+        if value.is_integer():
+            return f"{int(value):,}"
+        if abs(value) >= 1000:
+            return f"{value:,.2f}"
+        if abs(value) >= 1:
+            return f"{value:,.4f}".rstrip("0").rstrip(".")
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _abbrev_number(value: float) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000_000:
+        return f"{value / 1_000_000_000_000:.2f}".rstrip("0").rstrip(".") + "T"
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}".rstrip("0").rstrip(".") + "B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.2f}".rstrip("0").rstrip(".") + "K"
+    return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def _format_cell_for_column(column: str, value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+
+    col = column.lower()
+    numeric_value = value if isinstance(value, (int, float)) else None
+
+    if "marketcap" in col and isinstance(numeric_value, (int, float)):
+        return _abbrev_number(float(numeric_value))
+
+    if "price" in col and isinstance(numeric_value, (int, float)):
+        return "$" + f"{float(numeric_value):,.2f}"
+
+    if "dividend" in col and isinstance(numeric_value, (int, float)):
+        if "yield" in col or "percent" in col or col.endswith("pct"):
+            pct_value = float(numeric_value) * 100 if abs(float(numeric_value)) <= 1 else float(numeric_value)
+            return f"{pct_value:.2f}".rstrip("0").rstrip(".") + "%"
+        return "$" + f"{float(numeric_value):,.2f}"
+
+    if ("yield" in col or "percent" in col or col.endswith("pct")) and isinstance(numeric_value, (int, float)):
+        pct_value = float(numeric_value) * 100 if abs(float(numeric_value)) <= 1 else float(numeric_value)
+        return f"{pct_value:.2f}".rstrip("0").rstrip(".") + "%"
+
+    return _format_cell(value)
+
+
+def _prettify_header(name: str) -> str:
+    return feature_display_name(name)
+
+
+def _collect_columns(records: list[dict]) -> list[str]:
+    cols: list[str] = []
+    seen: set[str] = set()
+    for row in records:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                cols.append(key)
+    return cols
+
+
+def _safe_float(value):
+    if value is None or value == "":
+        return None
+    try:
+        out = float(value)
+        if math.isnan(out):
+            return None
+        return out
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_safe(value: Any):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    return value
+
+
+def _fetch_economic_indicators_from_api(
+    api_key: str,
+    start_date: str,
+    end_date: str,
+    series: tuple[str, ...],
+) -> pd.DataFrame:
+    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2)
+    frames: list[pd.DataFrame] = []
+
+    for raw_series in series:
+        series_name = str(raw_series).strip()
+        if not series_name:
+            continue
+        try:
+            df = client.economic_indicators(series_name, from_date=start_date, to_date=end_date)
+        except Exception:
+            continue
+        if df is None or df.empty or "Error Message" in df.columns or "date" not in df.columns:
+            continue
+        chosen_df = df.copy()
+        chosen_df["date"] = pd.to_datetime(chosen_df["date"], errors="coerce")
+        chosen_df = chosen_df.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        value_col = "value"
+        if value_col not in chosen_df.columns:
+            numeric_cols = [c for c in chosen_df.columns if c != "date" and pd.api.types.is_numeric_dtype(chosen_df[c])]
+            if not numeric_cols:
+                continue
+            value_col = numeric_cols[0]
+        clean = chosen_df[["date", value_col]].rename(columns={value_col: series_name}).set_index("date")
+        frames.append(clean)
+
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, axis=1).sort_index()
+    df = df[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))]
+    return df
+
+
+def _fetch_treasury_rates_from_api(
+    api_key: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2)
+    try:
+        tr_df = client.treasury_rates(from_date=start_date, to_date=end_date)
+    except Exception:
+        return pd.DataFrame()
+    if tr_df is None or tr_df.empty or "date" not in tr_df.columns:
+        return pd.DataFrame()
+    tr_df["date"] = pd.to_datetime(tr_df["date"], errors="coerce")
+    tr_df = tr_df.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
+    rename_map = {c: f"macro__ust_{c}" for c in tr_df.columns if c != "date"}
+    tr_df = tr_df.rename(columns=rename_map).set_index("date")
+    return tr_df
+
+
+def _series_is_stale(series_obj, start_date, end_date, *, threshold_days: int) -> bool:
+    if not series_obj.last_fetched_at:
+        return True
+    age = timezone.now() - series_obj.last_fetched_at
+    if age > timedelta(days=threshold_days):
+        return True
+    if series_obj.min_date and series_obj.min_date > start_date:
+        return True
+    if series_obj.max_date and series_obj.max_date < end_date:
+        return True
+    return False
+
+
+def _store_series_dataframe(
+    df: pd.DataFrame,
+    *,
+    series_model,
+    observation_model,
+) -> None:
+    if df.empty:
+        return
+    safe_df = df.sort_index()
+    fetched_at = timezone.now()
+    for col in safe_df.columns:
+        series_obj, _ = series_model.objects.get_or_create(
+            code=str(col),
+            defaults={
+                "display_name": _prettify_header(str(col)),
+            },
+        )
+        values_by_date = []
+        for idx, value in safe_df[col].items():
+            obs_date = pd.Timestamp(idx).date()
+            if pd.isna(value):
+                continue
+            val = float(value)
+            observation_model.objects.update_or_create(
+                series=series_obj,
+                observation_date=obs_date,
+                defaults={
+                    "value": val,
+                    "payload": {"value": val},
+                },
+            )
+            values_by_date.append(obs_date)
+        if values_by_date:
+            series_obj.display_name = _prettify_header(str(col))
+            series_obj.last_fetched_at = fetched_at
+            series_obj.min_date = min(values_by_date)
+            series_obj.max_date = max(values_by_date)
+            series_obj.save(
+                update_fields=[
+                    "display_name",
+                    "last_fetched_at",
+                    "min_date",
+                    "max_date",
+                    "last_updated",
+                ]
+            )
+
+
+def _load_series_dataframe_from_db(
+    series_codes: list[str],
+    start_date,
+    end_date,
+    *,
+    series_model,
+    observation_model,
+    threshold_days: int,
+) -> pd.DataFrame:
+    if not series_codes:
+        return pd.DataFrame()
+    series_qs = series_model.objects.filter(code__in=series_codes)
+    series_map = {row.code: row for row in series_qs}
+    if len(series_map) != len(set(series_codes)):
+        return pd.DataFrame()
+    for code in series_codes:
+        series_obj = series_map[code]
+        if _series_is_stale(series_obj, start_date, end_date, threshold_days=threshold_days):
+            return pd.DataFrame()
+    obs_qs = (
+        observation_model.objects.filter(
+            series__code__in=series_codes,
+            observation_date__gte=start_date,
+            observation_date__lte=end_date,
+        )
+        .select_related("series")
+        .order_by("observation_date")
+    )
+    rows: dict[str, dict[str, float | None]] = {}
+    for obs in obs_qs.iterator():
+        date_key = obs.observation_date.isoformat()
+        row = rows.setdefault(date_key, {})
+        row[obs.series.code] = obs.value
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    out.index = pd.to_datetime(out.index)
+    for code in series_codes:
+        if code not in out.columns:
+            out[code] = None
+    return out[series_codes]
+
+
+def _build_series_summaries(series_codes: list[str], *, series_model) -> list[dict]:
+    if not series_codes:
+        return []
+    rows = (
+        series_model.objects.filter(code__in=series_codes)
+        .annotate(observation_count=Count("observations"))
+        .order_by("code")
+    )
+    summaries = []
+    for row in rows:
+        summaries.append(
+            {
+                "code": row.code,
+                "display_name": row.display_name or _prettify_header(row.code),
+                "start_date": row.min_date.isoformat() if row.min_date else "",
+                "end_date": row.max_date.isoformat() if row.max_date else "",
+                "count": int(row.observation_count or 0),
+                "detail_href": reverse("macro-series-detail", args=[row.code]),
+            }
+        )
+    return summaries
+
+
+def _save_symbols(records: list[dict]) -> int:
+    saved = 0
+    for row in records:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+
+        Symbol.objects.update_or_create(
+            symbol=symbol,
+            defaults={
+                "company_name": str(row.get("companyName") or row.get("name") or ""),
+                "exchange": str(row.get("exchangeShortName") or row.get("exchange") or ""),
+                "country": str(row.get("country") or ""),
+                "sector": str(row.get("sector") or ""),
+                "industry": str(row.get("industry") or ""),
+                "market_cap": _safe_float(row.get("marketCap")),
+                "price": _safe_float(row.get("price")),
+                "beta": _safe_float(row.get("beta")),
+                "volume": _safe_float(row.get("volume")),
+                "dividend": _safe_float(row.get("lastDividend") or row.get("dividend")),
+                "dividend_yield": _safe_float(row.get("dividendYield")),
+                "payload": _json_safe(row),
+            },
+        )
+        saved += 1
+    return saved
+
+
+def _normalize_cell(value):
+    try:
+        value = value.item()  # numpy scalar -> python scalar
+    except Exception:
+        pass
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    return value
+
+
+def _df_to_table(df, *, max_rows: int = 20) -> tuple[list[str], list[list]]:
+    if df is None or getattr(df, "empty", True):
+        return [], []
+    if "date" in df.columns:
+        try:
+            df = df.sort_values("date", ascending=False)
+        except Exception:
+            pass
+    df = df.head(max_rows)
+    columns = [str(c) for c in list(df.columns)]
+    rows: list[list] = []
+    for row in df.to_dict(orient="records"):
+        rows.append([_format_cell_for_column(col, _normalize_cell(row.get(col))) for col in columns])
+    return columns, rows
+
+
+def _records_to_table(records: list[dict], *, max_rows: int = 20) -> tuple[list[str], list[str], list[list]]:
+    if not records:
+        return [], [], []
+    records = records[:max_rows]
+    columns = _collect_columns(records)
+    header_labels = [_prettify_header(c) for c in columns]
+    rows: list[list] = []
+    for row in records:
+        rows.append([_format_cell_for_column(col, _normalize_cell(row.get(col))) for col in columns])
+    return columns, header_labels, rows
+
+
+def _to_records(data: Any) -> list[dict]:
+    if data is None:
+        return []
+    if isinstance(data, list):
+        out: list[dict] = []
+        for item in data:
+            if isinstance(item, dict):
+                out.append(item)
+            else:
+                out.append({"value": item})
+        return out
+    if isinstance(data, dict):
+        # Some endpoints wrap rows inside one list-valued key.
+        list_values = [v for v in data.values() if isinstance(v, list)]
+        if len(list_values) == 1:
+            return _to_records(list_values[0])
+        return [data]
+    return [{"value": data}]
+
+
+def _fetch_first_success(client: FMPClient, candidates: list[tuple[str, dict]]) -> Any:
+    last_exc: Exception | None = None
+    for path, params in candidates:
+        try:
+            return client.get_json(path, params=params)
+        except Exception as exc:
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No endpoint candidates provided.")
+
+
+def _fetch_all_historical_records(client: FMPClient, candidates: list[tuple[str, dict]]) -> list[dict]:
+    """
+    Fetch as much historical data as an endpoint exposes.
+    - If endpoint supports page+limit: paginate until empty/short page.
+    - Otherwise: single request (or with increased limit if 'limit' is present).
+    """
+    last_exc: Exception | None = None
+    for path, base_params in candidates:
+        try:
+            params = dict(base_params or {})
+            all_records: list[dict] = []
+            if "limit" in params:
+                params["limit"] = 10_000
+
+            if "page" in params and "limit" in params:
+                page = int(params.get("page", 0) or 0)
+                limit = max(1, int(params.get("limit", 10_000) or 10_000))
+                max_pages = 1000
+                for _ in range(max_pages):
+                    page_params = dict(params)
+                    page_params["page"] = page
+                    raw = client.get_json(path, params=page_params)
+                    rows = _to_records(raw)
+                    if not rows:
+                        break
+                    all_records.extend(rows)
+                    if len(rows) < limit:
+                        break
+                    page += 1
+                return all_records
+
+            # Internal chunking mode for endpoints that support from/to date filters
+            # and may truncate large ranges in a single call.
+            if "from" in params and "to" in params:
+                chunk_years = int(params.pop("__chunk_years", 10) or 10)
+                try:
+                    cur = timezone.datetime.strptime(str(params["from"])[:10], "%Y-%m-%d").date()
+                    end = timezone.datetime.strptime(str(params["to"])[:10], "%Y-%m-%d").date()
+                except Exception:
+                    cur = None
+                    end = None
+
+                if cur and end and cur <= end:
+                    while cur <= end:
+                        nxt = min(end, cur + timedelta(days=365 * chunk_years))
+                        chunk_params = dict(params)
+                        chunk_params["from"] = cur.isoformat()
+                        chunk_params["to"] = nxt.isoformat()
+                        raw = client.get_json(path, params=chunk_params)
+                        rows = _to_records(raw)
+                        if rows:
+                            all_records.extend(rows)
+                        cur = nxt + timedelta(days=1)
+                    return all_records
+
+            # Some endpoints support only a limit parameter.
+            if "limit" in params and "page" not in params:
+                params["limit"] = 10_000
+
+            raw = client.get_json(path, params=params)
+            return _to_records(raw)
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No endpoint candidates provided.")
+
+
+def _filter_records_for_symbol(records: list[dict], symbol: str) -> list[dict]:
+    sym = str(symbol).strip().upper()
+    if not sym:
+        return records
+    symbol_keys = ("symbol", "ticker")
+    has_symbol_key = any(isinstance(r, dict) and any(k in r for k in symbol_keys) for r in records)
+    if not has_symbol_key:
+        return records
+    out: list[dict] = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        v = None
+        for k in symbol_keys:
+            if r.get(k):
+                v = str(r.get(k)).strip().upper()
+                break
+        if v == sym:
+            out.append(r)
+    return out
+
+
+def _prepare_payload_for_storage(payload: Any) -> Any:
+    if payload is None:
+        return {}
+    try:
+        json.dumps(payload, allow_nan=False, separators=(",", ":"))
+        return payload
+    except (TypeError, ValueError):
+        return _json_safe(payload)
+
+
+def _stable_record_key(record: Any) -> str:
+    blob = json.dumps(_prepare_payload_for_storage(record), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _extract_record_date(record: Any):
+    if not isinstance(record, dict):
+        return None
+    for key in (
+        "date",
+        "publishedDate",
+        "publishedAt",
+        "published",
+        "filingDate",
+        "acceptedDate",
+        "recordDate",
+        "periodOfReport",
+        "calendarYear",
+    ):
+        v = record.get(key)
+        if v in (None, ""):
+            continue
+        try:
+            dt = timezone.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            return dt.date()
+        except Exception:
+            try:
+                return timezone.datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+            except Exception:
+                pass
+    return None
+
+
+def _dedupe_records_by_record_date(records: list[dict]) -> list[dict]:
+    by_date: dict[str, dict] = {}
+    undated: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            record = {"value": record}
+        record_date = _extract_record_date(record)
+        if record_date is None:
+            undated.append(record)
+            continue
+        by_date[record_date.isoformat()] = record
+    dated = [by_date[key] for key in sorted(by_date.keys())]
+    return dated + undated
+
+
+def _repair_missing_record_dates(symbol_obj: Symbol, section_key: str):
+    qs = SymbolSectionHistorical.objects.filter(
+        symbol=symbol_obj,
+        section_key=section_key,
+        record_date__isnull=True,
+    )
+    for obj in qs.iterator():
+        payload = obj.payload if isinstance(obj.payload, dict) else {}
+        parsed = _extract_record_date(payload)
+        if parsed is not None:
+            obj.record_date = parsed
+            obj.save(update_fields=["record_date"])
+
+
+def _is_section_stale(
+    symbol_obj: Symbol,
+    section_key: str,
+    threshold_days: int,
+    *,
+    state: SymbolSectionState | None = None,
+) -> bool:
+    if state is None:
+        state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+    if not state or not state.last_fetched_at:
+        return True
+    return state.last_fetched_at < (timezone.now() - timedelta(days=threshold_days))
+
+
+def _is_historical_section_stale_from_coverage(
+    symbol_obj: Symbol,
+    section_key: str,
+    threshold_days: int,
+    target_min_date=None,
+    *,
+    state: SymbolSectionState | None = None,
+) -> bool:
+    ranges = symbol_obj.historical_date_ranges or {}
+    section_range = ranges.get(section_key) if isinstance(ranges, dict) else None
+    if not section_range or not section_range.get("max_date"):
+        return True
+
+    now = timezone.now()
+    today = now.date()
+    threshold_cutoff = today - timedelta(days=threshold_days)
+
+    try:
+        max_date = timezone.datetime.strptime(str(section_range.get("max_date"))[:10], "%Y-%m-%d").date()
+    except Exception:
+        return True
+    if max_date < threshold_cutoff:
+        return True
+
+    # If the oldest stored point is too recent, request a deeper backfill.
+    # Guard with last_fetched_at so we don't refetch on every page load.
+    if target_min_date is not None:
+        min_date_raw = section_range.get("min_date")
+        try:
+            min_date = (
+                timezone.datetime.strptime(str(min_date_raw)[:10], "%Y-%m-%d").date()
+                if min_date_raw
+                else None
+            )
+        except Exception:
+            min_date = None
+
+        if min_date is None or min_date > target_min_date:
+            if state is None:
+                state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+            if not state or not state.last_fetched_at:
+                return True
+            return state.last_fetched_at < (now - timedelta(days=threshold_days))
+
+    return False
+
+
+def _mark_section_fetched(symbol_obj: Symbol, section_key: str, kind: str):
+    SymbolSectionState.objects.update_or_create(
+        symbol=symbol_obj,
+        section_key=section_key,
+        defaults={
+            "kind": kind,
+            "last_fetched_at": timezone.now(),
+        },
+    )
+
+
+def _save_snapshot_section(symbol_obj: Symbol, section_key: str, payload: Any):
+    payload = _prepare_payload_for_storage(payload)
+    SymbolSectionSnapshot.objects.update_or_create(
+        symbol=symbol_obj,
+        section_key=section_key,
+        defaults={"payload": payload},
+    )
+
+
+def _save_historical_section(symbol_obj: Symbol, section_key: str, records: list[Any]):
+    for record in records:
+        payload = _prepare_payload_for_storage(record)
+        SymbolSectionHistorical.objects.update_or_create(
+            symbol=symbol_obj,
+            section_key=section_key,
+            record_key=_stable_record_key(record),
+            defaults={
+                "record_date": _extract_record_date(record),
+                "payload": payload,
+            },
+        )
+
+
+def _update_symbol_historical_range(symbol_obj: Symbol, section_key: str):
+    agg = SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key).aggregate(
+        min_date=Min("record_date"),
+        max_date=Max("record_date"),
+        count=Count("id"),
+    )
+    min_date = agg.get("min_date")
+    max_date = agg.get("max_date")
+
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    ranges[section_key] = {
+        "min_date": min_date.isoformat() if min_date else None,
+        "max_date": max_date.isoformat() if max_date else None,
+        "count": int(agg.get("count") or 0),
+    }
+    symbol_obj.historical_date_ranges = ranges
+    symbol_obj.save(update_fields=["historical_date_ranges"])
+
+
+def _sync_symbol_historical_ranges_from_db(symbol_obj: Symbol, section_keys: list[str]):
+    if not section_keys:
+        return
+    for key in section_keys:
+        _repair_missing_record_dates(symbol_obj, key)
+    qs = (
+        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key__in=section_keys)
+        .values("section_key")
+        .annotate(min_date=Min("record_date"), max_date=Max("record_date"), count=Count("id"))
+    )
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    changed = False
+    for row in qs:
+        key = row["section_key"]
+        min_date = row.get("min_date")
+        max_date = row.get("max_date")
+        payload = {
+            "min_date": min_date.isoformat() if min_date else None,
+            "max_date": max_date.isoformat() if max_date else None,
+            "count": int(row.get("count") or 0),
+        }
+        if ranges.get(key) != payload:
+            ranges[key] = payload
+            changed = True
+    if changed:
+        symbol_obj.historical_date_ranges = ranges
+        symbol_obj.save(update_fields=["historical_date_ranges"])
+
+
+def _load_snapshot_section(symbol_obj: Symbol, section_key: str, *, max_rows: int = 1):
+    obj = SymbolSectionSnapshot.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+    records = _to_records(obj.payload) if obj else []
+    _, header_labels, rows = _records_to_table(records, max_rows=max_rows)
+    return header_labels, rows
+
+
+def _load_snapshot_pairs(symbol_obj: Symbol, section_key: str) -> list[dict[str, str]]:
+    obj = SymbolSectionSnapshot.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+    records = _to_records(obj.payload) if obj else []
+    payload = records[0] if records and isinstance(records[0], dict) else {}
+    items: list[dict[str, str]] = []
+    for key, value in payload.items():
+        items.append(
+            {
+                "label": _prettify_header(str(key)),
+                "value": _format_cell_for_column(str(key), _normalize_cell(value)),
+            }
+        )
+    return items
+
+
+def _load_historical_section(symbol_obj: Symbol, section_key: str, *, max_rows: int = 50):
+    qs = SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key).order_by("-record_date", "-updated_at")[:max_rows]
+    records = [obj.payload for obj in qs]
+    _, header_labels, rows = _records_to_table(records, max_rows=max_rows)
+    return header_labels, rows
+
+
+def _load_cached_section_states(symbol_obj: Symbol) -> dict[str, SymbolSectionState]:
+    rows = SymbolSectionState.objects.filter(symbol=symbol_obj)
+    return {row.section_key: row for row in rows}
+
+
+def _load_cached_snapshots(symbol_obj: Symbol) -> dict[str, Any]:
+    rows = SymbolSectionSnapshot.objects.filter(symbol=symbol_obj).only("section_key", "payload")
+    out: dict[str, Any] = {}
+    for row in rows:
+        out[row.section_key] = row.payload
+    return out
+
+
+def _load_cached_history_rows(symbol_obj: Symbol, section_limits: dict[str, int]) -> dict[str, list[dict]]:
+    if not section_limits:
+        return {}
+    rows = (
+        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key__in=list(section_limits.keys()))
+        .only("section_key", "payload", "record_date", "updated_at")
+        .order_by("section_key", "-record_date", "-updated_at")
+    )
+    out: dict[str, list[dict]] = {key: [] for key in section_limits}
+    for row in rows.iterator():
+        section_key = row.section_key
+        bucket = out.get(section_key)
+        if bucket is None or len(bucket) >= int(section_limits.get(section_key, 0) or 0):
+            continue
+        records = _to_records(row.payload)
+        if records:
+            bucket.append(records[0])
+    return out
+
+
+_FILTER_CHOICES_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
+_FILTER_TTL_SECONDS = 21600
+_LOOKUP_MAX_AGE_DAYS = 30
+
+
+def _dedupe_choice_tuples(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for value, label in items:
+        v = str(value).strip()
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        out.append((v, str(label).strip() or v))
+    return sorted(out, key=lambda x: x[1].lower())
+
+
+def _extract_choices(
+    payload: Any,
+    *,
+    value_keys: tuple[str, ...],
+    label_keys: tuple[str, ...],
+) -> list[tuple[str, str]]:
+    records = _to_records(payload)
+    choices: list[tuple[str, str]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            v = str(rec).strip()
+            if v:
+                choices.append((v, v))
+            continue
+        value = None
+        for k in value_keys:
+            if rec.get(k) not in (None, ""):
+                value = rec.get(k)
+                break
+        if value is None and len(rec) == 1:
+            value = list(rec.values())[0]
+        if value is None:
+            continue
+        label = None
+        for k in label_keys:
+            if rec.get(k) not in (None, ""):
+                label = rec.get(k)
+                break
+        if label is None:
+            label = value
+        choices.append((str(value), str(label)))
+    return _dedupe_choice_tuples(choices)
+
+
+def _fetch_filter_choices(api_key: str | None) -> dict[str, list[tuple[str, str]]]:
+    # 6h in-process cache to avoid repeated calls on every page load.
+    now = time.time()
+    cached = _FILTER_CHOICES_CACHE.get("data")
+    if cached and (now - float(_FILTER_CHOICES_CACHE.get("ts", 0.0)) < _FILTER_TTL_SECONDS):
+        return cached
+
+    fallback = {
+        "industry_choices": list(INDUSTRY_CHOICES),
+        "sector_choices": list(SECTOR_CHOICES),
+        "exchange_choices": list(EXCHANGE_CHOICES[1:]),
+        "country_choices": list(COUNTRY_CHOICES),
+    }
+
+    def _db_choices() -> dict[str, list[tuple[str, str]]]:
+        industries_db = [(obj.name, obj.name) for obj in Industry.objects.all()]
+        sectors_db = [(obj.name, obj.name) for obj in Sector.objects.all()]
+        exchanges_db = [(obj.code, obj.name or obj.code) for obj in Exchange.objects.all()]
+        countries_db = [(obj.code, obj.name or obj.code) for obj in Country.objects.all()]
+        industries_db = sorted(industries_db, key=lambda x: x[1].lower())
+        sectors_db = sorted(sectors_db, key=lambda x: x[1].lower())
+        exchanges_db = sorted(exchanges_db, key=lambda x: x[1].lower())
+        countries_db = sorted(countries_db, key=lambda x: x[1].lower())
+        return {
+            "industry_choices": [("", "Any")] + (industries_db or list(INDUSTRY_CHOICES[1:])),
+            "sector_choices": [("", "Any")] + (sectors_db or list(SECTOR_CHOICES[1:])),
+            "exchange_choices": exchanges_db or list(EXCHANGE_CHOICES[1:]),
+            "country_choices": [("", "Any")] + (countries_db or list(COUNTRY_CHOICES[1:])),
+        }
+
+    def _latest_updated(model) -> Any:
+        return model.objects.order_by("-last_updated").values_list("last_updated", flat=True).first()
+
+    def _is_stale(model) -> bool:
+        latest = _latest_updated(model)
+        if latest is None:
+            return True
+        return latest < (timezone.now() - timedelta(days=_LOOKUP_MAX_AGE_DAYS))
+
+    needs_refresh = _is_stale(Industry) or _is_stale(Sector) or _is_stale(Exchange) or _is_stale(Country)
+
+    if needs_refresh and api_key:
+        try:
+            client = FMPClient(api_key=api_key, timeout_s=15.0, max_retries=1)
+            industries = _extract_choices(
+                client.get_json("/stable/available-industries"),
+                value_keys=("industry", "name", "value"),
+                label_keys=("industry", "name", "value"),
+            )
+            sectors = _extract_choices(
+                client.get_json("/stable/available-sectors"),
+                value_keys=("sector", "name", "value"),
+                label_keys=("sector", "name", "value"),
+            )
+            exchanges = _extract_choices(
+                client.get_json("/stable/available-exchanges"),
+                value_keys=("exchangeShortName", "exchange", "symbol", "name", "value"),
+                label_keys=("exchangeShortName", "name", "exchange", "symbol", "value"),
+            )
+            countries = _extract_choices(
+                client.get_json("/stable/available-countries"),
+                value_keys=("country", "countryCode", "code", "name", "value"),
+                label_keys=("name", "country", "countryCode", "code", "value"),
+            )
+
+            for value, _label in industries:
+                Industry.objects.update_or_create(name=value, defaults={})
+            for value, _label in sectors:
+                Sector.objects.update_or_create(name=value, defaults={})
+            for code, label in exchanges:
+                Exchange.objects.update_or_create(code=code, defaults={"name": label or code})
+            for code, label in countries:
+                Country.objects.update_or_create(code=code, defaults={"name": label or code})
+        except Exception:
+            pass
+
+    try:
+        data = _db_choices()
+    except Exception:
+        data = fallback
+
+    _FILTER_CHOICES_CACHE["data"] = data
+    _FILTER_CHOICES_CACHE["ts"] = now
+    return data
+
+
+@require_GET
+def universe_screener(request: HttpRequest) -> JsonResponse:
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return JsonResponse(
+            {
+                "error": "Missing FMP_API_KEY in environment/.env.",
+            },
+            status=400,
+        )
+
+    try:
+        symbols, records = screen_companies_fmp(
+            api_key=api_key,
+            limit=_parse_int(request.GET.get("limit"), "limit", 1000),
+            marketCapMoreThan=_parse_float(request.GET.get("marketCapMoreThan"), "marketCapMoreThan"),
+            marketCapLowerThan=_parse_float(request.GET.get("marketCapLowerThan"), "marketCapLowerThan"),
+            sector=request.GET.get("sector") or None,
+            industry=request.GET.get("industry") or None,
+            betaMoreThan=_parse_float(request.GET.get("betaMoreThan"), "betaMoreThan"),
+            betaLowerThan=_parse_float(request.GET.get("betaLowerThan"), "betaLowerThan"),
+            priceMoreThan=_parse_float(request.GET.get("priceMoreThan"), "priceMoreThan"),
+            priceLowerThan=_parse_float(request.GET.get("priceLowerThan"), "priceLowerThan"),
+            dividendMoreThan=_parse_float(request.GET.get("dividendMoreThan"), "dividendMoreThan"),
+            dividendLowerThan=_parse_float(request.GET.get("dividendLowerThan"), "dividendLowerThan"),
+            volumeMoreThan=_parse_float(request.GET.get("volumeMoreThan"), "volumeMoreThan"),
+            volumeLowerThan=_parse_float(request.GET.get("volumeLowerThan"), "volumeLowerThan"),
+            exchange=request.GET.get("exchange") or None,
+            country=request.GET.get("country") or None,
+            isEtf=_parse_bool(request.GET.get("isEtf")),
+            isFund=_parse_bool(request.GET.get("isFund")),
+            isActivelyTrading=_parse_bool(request.GET.get("isActivelyTrading")),
+            includeAllShareClasses=_parse_bool(request.GET.get("includeAllShareClasses")),
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+
+    saved_count = _save_symbols(records)
+
+    return JsonResponse(
+        {
+            "count": len(symbols),
+            "saved_count": saved_count,
+            "symbols": list(symbols),
+            "records": records,
+        }
+    )
+
+
+def universe_screener_form(request: HttpRequest):
+    api_key = os.getenv("FMP_API_KEY")
+    dynamic_choices = _fetch_filter_choices(api_key)
+    records: list[dict] = []
+    columns: list[str] = []
+    header_labels: list[str] = []
+    symbol_col_index = -1
+    display_rows: list[list] = []
+    error: str | None = None
+
+    if request.method == "POST":
+        form = UniverseScreenerForm(request.POST, **dynamic_choices)
+        if form.is_valid():
+            if not api_key:
+                error = "Missing FMP_API_KEY in environment/.env."
+            else:
+                data = form.cleaned_data
+                selected_exchanges = data.get("exchange") or []
+                exchange_param = ",".join(selected_exchanges) if selected_exchanges else None
+                try:
+                    _, records = screen_companies_fmp(
+                        api_key=api_key,
+                        limit=data.get("limit") or 1000,
+                        marketCapMoreThan=data.get("marketCapMoreThan"),
+                        marketCapLowerThan=data.get("marketCapLowerThan"),
+                        sector=data.get("sector") or None,
+                        industry=data.get("industry") or None,
+                        betaMoreThan=data.get("betaMoreThan"),
+                        betaLowerThan=data.get("betaLowerThan"),
+                        priceMoreThan=data.get("priceMoreThan"),
+                        priceLowerThan=data.get("priceLowerThan"),
+                        dividendMoreThan=data.get("dividendMoreThan"),
+                        dividendLowerThan=data.get("dividendLowerThan"),
+                        volumeMoreThan=data.get("volumeMoreThan"),
+                        volumeLowerThan=data.get("volumeLowerThan"),
+                        exchange=exchange_param,
+                        country=data.get("country") or None,
+                        isEtf=_parse_bool(data.get("isEtf")),
+                        isFund=_parse_bool(data.get("isFund")),
+                        isActivelyTrading=_parse_bool(data.get("isActivelyTrading")),
+                        includeAllShareClasses=_parse_bool(data.get("includeAllShareClasses")),
+                    )
+                    _save_symbols(records)
+                    if records:
+                        columns = _collect_columns(records)
+                        header_labels = [_prettify_header(col) for col in columns]
+                        symbol_col_index = columns.index("symbol") if "symbol" in columns else -1
+                        display_rows = [[_format_cell_for_column(col, row.get(col)) for col in columns] for row in records]
+                except Exception as exc:
+                    error = str(exc)
+    else:
+        form = UniverseScreenerForm(initial={"limit": 1000}, **dynamic_choices)
+
+    return render(
+        request,
+        "fmp/universe_screener_form.html",
+        {
+            "form": form,
+            "records": records,
+            "columns": columns,
+            "header_labels": header_labels,
+            "symbol_col_index": symbol_col_index,
+            "display_rows": display_rows,
+            "count": len(records),
+            "error": error,
+        },
+    )
+
+
+def _render_macro_endpoint_form(
+    request: HttpRequest,
+    *,
+    form,
+    page_title: str,
+    submit_label: str,
+    series_summaries: list[dict],
+    count: int,
+    points_count: int,
+    data_source: str,
+    error: str | None,
+):
+    return render(
+        request,
+        "fmp/macro_form.html",
+        {
+            "form": form,
+            "page_title": page_title,
+            "submit_label": submit_label,
+            "series_summaries": series_summaries,
+            "count": count,
+            "points_count": points_count,
+            "data_source": data_source,
+            "error": error,
+        },
+    )
+
+
+def economic_indicators_form(request: HttpRequest):
+    series_summaries: list[dict] = []
+    error: str | None = None
+    data_source = ""
+    points_count = 0
+
+    if request.method == "POST":
+        form = EconomicIndicatorsForm(request.POST)
+        if form.is_valid():
+            api_key = os.getenv("FMP_API_KEY")
+            if not api_key:
+                error = "Missing FMP_API_KEY in environment/.env."
+            else:
+                data = form.cleaned_data
+                series = tuple(data.get("economic_series") or [])
+                try:
+                    requested_codes = list(dict.fromkeys(series))
+                    df_sparse = pd.DataFrame()
+                    if requested_codes:
+                        df_sparse = _load_series_dataframe_from_db(
+                            requested_codes,
+                            data["start_date"],
+                            data["end_date"],
+                            series_model=EconomicIndicatorSeries,
+                            observation_model=EconomicIndicatorObservation,
+                            threshold_days=30,
+                        )
+                    if df_sparse.empty:
+                        df_sparse = _fetch_economic_indicators_from_api(
+                            api_key=api_key,
+                            start_date=data["start_date"].isoformat(),
+                            end_date=data["end_date"].isoformat(),
+                            series=series,
+                        )
+                        _store_series_dataframe(
+                            df_sparse,
+                            series_model=EconomicIndicatorSeries,
+                            observation_model=EconomicIndicatorObservation,
+                        )
+                        data_source = "FMP API"
+                    else:
+                        data_source = "DB cache"
+                    df = df_sparse
+                    if not df.empty:
+                        points_count = len(df)
+                        df = df.sort_index(ascending=False)
+                        series_summaries = _build_series_summaries(
+                            list(df.columns),
+                            series_model=EconomicIndicatorSeries,
+                        )
+                except Exception as exc:
+                    error = str(exc)
+    else:
+        form = EconomicIndicatorsForm()
+
+    return _render_macro_endpoint_form(
+        request,
+        form=form,
+        page_title="Economic Indicators",
+        submit_label="Fetch Economic Indicators",
+        series_summaries=series_summaries,
+        count=len(series_summaries),
+        points_count=points_count,
+        data_source=data_source,
+        error=error,
+    )
+
+
+def treasury_rates_form(request: HttpRequest):
+    series_summaries: list[dict] = []
+    error: str | None = None
+    data_source = ""
+    points_count = 0
+
+    if request.method == "POST":
+        form = TreasuryRatesForm(request.POST)
+        if form.is_valid():
+            api_key = os.getenv("FMP_API_KEY")
+            if not api_key:
+                error = "Missing FMP_API_KEY in environment/.env."
+            else:
+                data = form.cleaned_data
+                requested_codes = list(TreasuryRateSeries.objects.order_by("code").values_list("code", flat=True))
+                try:
+                    df_sparse = pd.DataFrame()
+                    if requested_codes:
+                        df_sparse = _load_series_dataframe_from_db(
+                            requested_codes,
+                            data["start_date"],
+                            data["end_date"],
+                            series_model=TreasuryRateSeries,
+                            observation_model=TreasuryRateObservation,
+                            threshold_days=1,
+                        )
+                    if df_sparse.empty:
+                        df_sparse = _fetch_treasury_rates_from_api(
+                            api_key=api_key,
+                            start_date=data["start_date"].isoformat(),
+                            end_date=data["end_date"].isoformat(),
+                        )
+                        _store_series_dataframe(
+                            df_sparse,
+                            series_model=TreasuryRateSeries,
+                            observation_model=TreasuryRateObservation,
+                        )
+                        data_source = "FMP API"
+                    else:
+                        data_source = "DB cache"
+                    if not df_sparse.empty:
+                        points_count = len(df_sparse)
+                        series_summaries = _build_series_summaries(
+                            list(df_sparse.columns),
+                            series_model=TreasuryRateSeries,
+                        )
+                except Exception as exc:
+                    error = str(exc)
+    else:
+        form = TreasuryRatesForm()
+
+    return _render_macro_endpoint_form(
+        request,
+        form=form,
+        page_title="Treasury Rates",
+        submit_label="Fetch Treasury Rates",
+        series_summaries=series_summaries,
+        count=len(series_summaries),
+        points_count=points_count,
+        data_source=data_source,
+        error=error,
+    )
+
+
+def macro_series_detail(request: HttpRequest, code: str):
+    series_obj = EconomicIndicatorSeries.objects.filter(code=code).first()
+    observation_model = EconomicIndicatorObservation
+    back_href = reverse("economic-indicators-form")
+    back_label = "Back to Economic Indicators"
+    category_label = "economic"
+    if series_obj is None:
+        series_obj = TreasuryRateSeries.objects.filter(code=code).first()
+        observation_model = TreasuryRateObservation
+        back_href = reverse("treasury-rates-form")
+        back_label = "Back to Treasury Rates"
+        category_label = "treasury"
+    if series_obj is None:
+        raise Http404()
+    obs_qs = (
+        observation_model.objects.filter(series=series_obj)
+        .order_by("observation_date")
+        .only("observation_date", "value")
+    )
+    labels: list[str] = []
+    values: list[float | None] = []
+    display_rows: list[list] = []
+    for obs in obs_qs.iterator():
+        date_str = obs.observation_date.isoformat()
+        labels.append(date_str)
+        values.append(obs.value if obs.value is None else float(obs.value))
+        display_rows.append([date_str, _format_cell(obs.value)])
+
+    return render(
+        request,
+        "fmp/macro_series_detail.html",
+        {
+            "series_obj": series_obj,
+            "category_label": category_label,
+            "back_href": back_href,
+            "back_label": back_label,
+            "labels_json": json.dumps(labels),
+            "values_json": json.dumps(_json_safe(values)),
+            "display_rows": display_rows,
+            "points_count": len(labels),
+        },
+    )
+
+
+def symbol_chart(request: HttpRequest, symbol: str):
+    symbol_obj = get_object_or_404(Symbol, symbol__iexact=symbol)
+    mode = str(request.GET.get("price_mode") or "adjusted").strip().lower()
+    if mode not in {"adjusted", "unadjusted"}:
+        mode = "adjusted"
+    section_key = "prices_div_adj" if mode == "adjusted" else "prices_unadjusted"
+    mode_label = "Adjusted" if mode == "adjusted" else "Unadjusted"
+
+    price_qs = (
+        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
+        .order_by("record_date", "updated_at")
+        .only("record_date", "payload")
+    )
+
+    labels: list[str] = []
+    opens: list[float | None] = []
+    highs: list[float | None] = []
+    lows: list[float | None] = []
+    closes: list[float | None] = []
+    volumes: list[float | None] = []
+
+    for row in price_qs.iterator():
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        date_str = str(payload.get("date") or row.record_date or "").strip()[:10]
+        if not date_str:
+            continue
+
+        if mode == "adjusted":
+            open_v = _safe_float(payload.get("adjOpen"))
+            high_v = _safe_float(payload.get("adjHigh"))
+            low_v = _safe_float(payload.get("adjLow"))
+            close_v = _safe_float(payload.get("adjClose"))
+        else:
+            open_v = _safe_float(payload.get("open"))
+            high_v = _safe_float(payload.get("high"))
+            low_v = _safe_float(payload.get("low"))
+            close_v = _safe_float(payload.get("close"))
+        volume_v = _safe_float(payload.get("volume"))
+
+        # Cross-mode fallback if keys differ in payload.
+        if open_v is None:
+            open_v = _safe_float(payload.get("adjOpen")) or _safe_float(payload.get("open"))
+        if high_v is None:
+            high_v = _safe_float(payload.get("adjHigh")) or _safe_float(payload.get("high"))
+        if low_v is None:
+            low_v = _safe_float(payload.get("adjLow")) or _safe_float(payload.get("low"))
+        if close_v is None:
+            close_v = _safe_float(payload.get("adjClose")) or _safe_float(payload.get("close"))
+
+        labels.append(date_str)
+        opens.append(open_v)
+        highs.append(high_v)
+        lows.append(low_v)
+        closes.append(close_v)
+        volumes.append(volume_v)
+
+    close_by_date = {d: c for d, c in zip(labels, closes) if c is not None}
+
+    def _all_event_points() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        event_sections = [
+            ("dividends", "Dividend"),
+            ("splits", "Split"),
+            ("earnings", "Earnings"),
+            ("sec_filings", "SEC Filing"),
+            ("ratings_historical", "Rating"),
+            ("insider_trading", "Insider Trade"),
+        ]
+        for section, event_type in event_sections:
+            qs = (
+                SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section)
+                .order_by("record_date", "updated_at")
+                .only("record_date", "payload")
+            )
+            for r in qs.iterator():
+                payload = r.payload if isinstance(r.payload, dict) else {}
+                d = _extract_record_date(payload) or r.record_date
+                if not d:
+                    continue
+                date_str = d.isoformat()
+                close_val = close_by_date.get(date_str)
+                if close_val is None:
+                    continue
+                details: list[str] = []
+                if section == "dividends":
+                    amount = _safe_float(payload.get("dividend"))
+                    if amount is None:
+                        amount = _safe_float(payload.get("adjDividend"))
+                    if amount is not None:
+                        details.append(f"Amount: ${amount:,.4f}".rstrip("0").rstrip("."))
+                    frequency = payload.get("frequency")
+                    if frequency:
+                        details.append(f"Frequency: {frequency}")
+                elif section == "splits":
+                    ratio = payload.get("splitRatio")
+                    numerator = payload.get("numerator")
+                    denominator = payload.get("denominator")
+                    if ratio:
+                        details.append(f"Ratio: {ratio}")
+                    elif numerator and denominator:
+                        details.append(f"Ratio: {numerator}:{denominator}")
+                elif section == "earnings":
+                    eps = _safe_float(payload.get("eps") or payload.get("epsActual"))
+                    if eps is not None:
+                        details.append(f"EPS: {eps:,.4f}".rstrip("0").rstrip("."))
+                    revenue = _safe_float(payload.get("revenue") or payload.get("revenueActual"))
+                    if revenue is not None:
+                        details.append(f"Revenue: {_abbrev_number(revenue)}")
+                    period = payload.get("period")
+                    if period:
+                        details.append(f"Period: {period}")
+                elif section == "sec_filings":
+                    form_type = payload.get("type") or payload.get("formType") or payload.get("form")
+                    if form_type:
+                        details.append(f"Form: {form_type}")
+                    title = payload.get("finalLink") or payload.get("link") or payload.get("title")
+                    if title:
+                        details.append(f"Ref: {str(title)[:120]}")
+                elif section == "ratings_historical":
+                    new_rating = payload.get("newGrade") or payload.get("rating")
+                    prev_rating = payload.get("previousGrade")
+                    analyst = payload.get("gradingCompany") or payload.get("analystCompany")
+                    if new_rating:
+                        details.append(f"New: {new_rating}")
+                    if prev_rating:
+                        details.append(f"Prev: {prev_rating}")
+                    if analyst:
+                        details.append(f"Firm: {analyst}")
+                elif section == "insider_trading":
+                    person = payload.get("reportingName") or payload.get("name")
+                    txn_type = payload.get("transactionType")
+                    securities = payload.get("securitiesTransacted")
+                    if person:
+                        details.append(f"Person: {person}")
+                    if txn_type:
+                        details.append(f"Type: {txn_type}")
+                    if securities is not None:
+                        try:
+                            details.append(f"Qty: {int(float(securities)):,}")
+                        except Exception:
+                            details.append(f"Qty: {securities}")
+                out.append({"x": date_str, "y": close_val, "type": event_type, "details": details})
+        return out
+
+    events = _all_event_points()
+
+    return render(
+        request,
+        "fmp/symbol_chart.html",
+        {
+            "symbol_obj": symbol_obj,
+            "labels_json": json.dumps(labels),
+            "opens_json": json.dumps(opens),
+            "highs_json": json.dumps(highs),
+            "lows_json": json.dumps(lows),
+            "closes_json": json.dumps(closes),
+            "volumes_json": json.dumps(volumes),
+            "points_count": len(labels),
+            "price_mode": mode,
+            "mode_label": mode_label,
+            "events_json": json.dumps(events),
+            "events_count": len(events),
+        },
+    )
+
+
+def symbol_detail(request: HttpRequest, symbol: str):
+    symbol_obj = get_object_or_404(Symbol, symbol__iexact=symbol)
+    force_refresh_section = ""
+    force_refresh_all_historical = False
+    if request.method == "POST":
+        force_refresh_section = str(request.POST.get("force_refresh_section") or "").strip()
+        force_refresh_all_historical = str(request.POST.get("force_refresh_all_historical") or "").strip() in {"1", "true", "True"}
+    payload_pretty = json.dumps(symbol_obj.payload or {}, indent=2, sort_keys=True)
+    price_header_labels: list[str] = []
+    price_rows: list[list] = []
+    price_error: str | None = None
+    price_unadj_header_labels: list[str] = []
+    price_unadj_rows: list[list] = []
+    price_unadj_error: str | None = None
+    metrics_header_labels: list[str] = []
+    metrics_rows: list[list] = []
+    ratios_header_labels: list[str] = []
+    ratios_rows: list[list] = []
+    extra_sections: list[dict] = []
+    data_error: str | None = None
+    price_source_label = "FMP stable historical-price-eod/dividend-adjusted (chunked by date range)"
+    historical_ranges = dict(symbol_obj.historical_date_ranges or {})
+
+    api_key = os.getenv("FMP_API_KEY")
+    section_defs = get_symbol_endpoint_definitions(symbol_obj)
+
+    # Trust cached coverage on normal page loads; syncing every request is expensive.
+    historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
+    if request.method == "POST" or not historical_ranges:
+        _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
+        symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
+        historical_ranges = dict(symbol_obj.historical_date_ranges or {})
+
+    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2) if api_key else None
+    if not api_key:
+        data_error = "Missing FMP_API_KEY in environment/.env."
+
+    cached_states = _load_cached_section_states(symbol_obj)
+    refresh_requested = bool(force_refresh_all_historical or force_refresh_section)
+    refreshed_historical = False
+    section_errors: dict[str, str] = {}
+
+    for section in section_defs:
+        section_key = section.key
+        title = section.title
+        kind = section.kind
+        threshold_days = int(section.threshold_days)
+        max_rows = min(int(section.max_rows), 10) if kind == "historical" else int(section.max_rows)
+        candidates = section.candidates
+        filter_symbol = bool(section.filter_symbol)
+        error_msg = None
+        state = cached_states.get(section_key)
+
+        if refresh_requested:
+            should_refresh = bool(force_refresh_all_historical or force_refresh_section == section_key)
+        elif kind == "historical":
+            section_range = historical_ranges.get(section_key) if isinstance(historical_ranges, dict) else None
+            should_refresh = not section_range or not section_range.get("count")
+        else:
+            should_refresh = not state or not state.last_fetched_at
+        if should_refresh and client is not None:
+            try:
+                if kind == "historical":
+                    records = _fetch_all_historical_records(client, candidates)
+                else:
+                    raw = _fetch_first_success(client, candidates)
+                    records = _to_records(raw)
+                if section_key == "peer_symbols":
+                    peer_records: list[dict] = []
+                    if isinstance(raw, list):
+                        if raw and isinstance(raw[0], dict):
+                            peer_records = raw
+                        else:
+                            peer_records = [{"peerSymbol": p} for p in raw]
+                    elif isinstance(raw, dict):
+                        peers_list = raw.get("peersList") or raw.get("peers") or []
+                        if isinstance(peers_list, list):
+                            peer_records = [{"peerSymbol": p} for p in peers_list]
+                        else:
+                            peer_records = _to_records(raw)
+                    records = peer_records
+
+                if filter_symbol:
+                    records = _filter_records_for_symbol(records, symbol_obj.symbol)
+
+                if kind == "snapshot":
+                    _save_snapshot_section(symbol_obj, section_key, raw)
+                else:
+                    _save_historical_section(symbol_obj, section_key, records)
+                    _update_symbol_historical_range(symbol_obj, section_key)
+                    refreshed_historical = True
+                _mark_section_fetched(symbol_obj, section_key, kind)
+                cached_states[section_key] = SymbolSectionState(
+                    symbol=symbol_obj,
+                    section_key=section_key,
+                    kind=kind,
+                    last_fetched_at=timezone.now(),
+                )
+            except Exception as exc:
+                if "HTTP 404" not in str(exc):
+                    error_msg = str(exc)
+                    section_errors[section_key] = error_msg
+
+    snapshot_payloads = _load_cached_snapshots(symbol_obj)
+    history_rows_by_section = _load_cached_history_rows(
+        symbol_obj,
+        {section.key: min(int(section.max_rows), 10) for section in section_defs if section.kind == "historical"},
+    )
+
+    for section in section_defs:
+        section_key = section.key
+        title = section.title
+        kind = section.kind
+        error_msg = section_errors.get(section_key)
+
+        if kind == "snapshot":
+            payload = snapshot_payloads.get(section_key)
+            records = _to_records(payload)
+            _, header_labels, rows = _records_to_table(records, max_rows=1)
+            first_row = records[0] if records and isinstance(records[0], dict) else {}
+            snapshot_items = [
+                {
+                    "label": _prettify_header(str(key)),
+                    "value": _format_cell_for_column(str(key), _normalize_cell(value)),
+                }
+                for key, value in first_row.items()
+            ]
+        else:
+            records = history_rows_by_section.get(section_key, [])
+            _, header_labels, rows = _records_to_table(records, max_rows=min(int(section.max_rows), 10))
+            snapshot_items = []
+
+        if section_key == "prices_div_adj":
+            price_header_labels, price_rows = header_labels, rows
+            price_error = error_msg
+            continue
+        if section_key == "prices_unadjusted":
+            price_unadj_header_labels, price_unadj_rows = header_labels, rows
+            price_unadj_error = error_msg
+            continue
+        if section_key == "key_metrics":
+            metrics_header_labels, metrics_rows = header_labels, rows
+            continue
+        if section_key == "ratios":
+            ratios_header_labels, ratios_rows = header_labels, rows
+            continue
+
+        extra_sections.append(
+            {
+                "title": title,
+                "section_key": section_key,
+                "kind": kind,
+                "header_labels": header_labels,
+                "rows": rows,
+                "snapshot_items": snapshot_items,
+                "error": error_msg,
+                "date_range": historical_ranges.get(section_key),
+            }
+        )
+
+    if refreshed_historical:
+        symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
+        historical_ranges = dict(symbol_obj.historical_date_ranges or {})
+    historical_coverage_rows = [
+        {
+            "section_key": k,
+            "section_label": _prettify_header(k),
+            "min_date": (v or {}).get("min_date"),
+            "max_date": (v or {}).get("max_date"),
+            "count": (v or {}).get("count") or 0,
+        }
+        for k, v in sorted(historical_ranges.items(), key=lambda kv: kv[0])
+        if k in historical_section_keys
+    ]
+
+    return render(
+        request,
+        "fmp/symbol_detail.html",
+        {
+            "symbol_obj": symbol_obj,
+            "payload_pretty": payload_pretty,
+            "price_header_labels": price_header_labels,
+            "price_rows": price_rows,
+            "price_error": price_error,
+            "price_unadj_header_labels": price_unadj_header_labels,
+            "price_unadj_rows": price_unadj_rows,
+            "price_unadj_error": price_unadj_error,
+            "metrics_header_labels": metrics_header_labels,
+            "metrics_rows": metrics_rows,
+            "ratios_header_labels": ratios_header_labels,
+            "ratios_rows": ratios_rows,
+            "extra_sections": extra_sections,
+            "data_error": data_error,
+            "price_source_label": price_source_label,
+            "price_date_range": historical_ranges.get("prices_div_adj"),
+            "price_unadj_date_range": historical_ranges.get("prices_unadjusted"),
+            "metrics_date_range": historical_ranges.get("key_metrics"),
+            "ratios_date_range": historical_ranges.get("ratios"),
+            "historical_coverage_rows": historical_coverage_rows,
+        },
+    )

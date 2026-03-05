@@ -5,7 +5,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
-from modules.labels.trades import labels_panel_to_trades_df
+from labels.trades import labels_panel_to_trades_df
 from modules.models.transformers.seq2seq import prepare_entry2exit_dataset as _prepare_entry2exit_dataset
 
 

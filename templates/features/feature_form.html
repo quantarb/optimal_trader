@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Feature Preview</title>
+  <style>
+    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
+    .card { max-width: 1440px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .layout { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+    .panel { border: 1px solid #e2e8ef; border-radius: 12px; padding: 12px; background: #fcfdff; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .field { border: 1px solid #e2e8ef; border-radius: 10px; padding: 10px; background: #fbfdff; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.92rem; }
+    input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #ccd6e2; border-radius: 8px; padding: 8px; font-size: 0.92rem; }
+    .help { color: #5b6777; font-size: 0.8rem; margin-top: 6px; }
+    .errorlist { color: #a31515; margin: 0 0 6px; padding-left: 16px; }
+    .btn { border: 1px solid #0d6a6d; background: #0d6a6d; color: #fff; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    .error { margin-top: 10px; padding: 10px; border: 1px solid #f3c4c4; background: #fff1f1; color: #9e2020; border-radius: 8px; }
+    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
+    th { background: #f3f7fb; position: sticky; top: 0; }
+    pre { margin-top: 14px; padding: 12px; border-radius: 10px; border: 1px solid #dde3ea; background: #0f1722; color: #d8ecff; overflow: auto; }
+    .summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+    .stat { border: 1px solid #e2e8ef; border-radius: 10px; padding: 10px; background: #fbfdff; }
+    .stat-k { font-size: 0.78rem; color: #5b6777; text-transform: uppercase; letter-spacing: 0.03em; }
+    .stat-v { font-size: 1rem; font-weight: 700; margin-top: 4px; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .chip { border: 1px solid #d7dee7; background: #f7fafc; border-radius: 999px; padding: 4px 8px; font-size: 0.78rem; }
+    @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .summary { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Feature Preview</h1>
+    <div class="layout">
+      <div class="panel">
+        <form method="post">
+          {% csrf_token %}
+          <div class="grid">
+            {% for field in form %}
+              <div class="field">
+                {{ field.errors }}
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+              </div>
+            {% endfor %}
+          </div>
+          <p><button class="btn" type="submit">Build Feature Preview</button></p>
+        </form>
+      </div>
+      <div class="panel">
+        <h2>Normalized Config</h2>
+        {% if normalized %}
+          <pre>{{ normalized }}</pre>
+        {% else %}
+          <p>Submit the form to preview the feature inputs.</p>
+        {% endif %}
+        {% if error %}
+          <div class="error">{{ error }}</div>
+        {% endif %}
+        {% if summary %}
+          <h2>Summary</h2>
+          <div class="summary">
+            <div class="stat"><div class="stat-k">Symbol</div><div class="stat-v">{{ summary.symbol }}</div></div>
+            <div class="stat"><div class="stat-k">Computed Start</div><div class="stat-v">{{ summary.computed_start_date }}</div></div>
+            <div class="stat"><div class="stat-k">Computed End</div><div class="stat-v">{{ summary.computed_end_date }}</div></div>
+            <div class="stat"><div class="stat-k">Price Rows</div><div class="stat-v">{{ summary.price_rows }}</div></div>
+            <div class="stat"><div class="stat-k">Feature Count</div><div class="stat-v">{{ summary.feature_count }}</div></div>
+          </div>
+          <div class="chips">
+            <div class="chip">Prices Div Adj: {{ summary.source_counts.prices_div_adj }}</div>
+            <div class="chip">Key Metrics: {{ summary.source_counts.key_metrics }}</div>
+            <div class="chip">Ratios: {{ summary.source_counts.ratios }}</div>
+            <div class="chip">Income Statement: {{ summary.source_counts.income_statement }}</div>
+            <div class="chip">Cash Flow: {{ summary.source_counts.cash_flow }}</div>
+            <div class="chip">Balance Sheet: {{ summary.source_counts.balance_sheet }}</div>
+            <div class="chip">Earnings: {{ summary.source_counts.earnings }}</div>
+            <div class="chip">Analyst Estimates: {{ summary.source_counts.analyst_estimates }}</div>
+            <div class="chip">Ratings Historical: {{ summary.source_counts.ratings_historical }}</div>
+            <div class="chip">Grades Historical: {{ summary.source_counts.grades_historical }}</div>
+            <div class="chip">Historical Market Cap: {{ summary.source_counts.historical_market_cap }}</div>
+            <div class="chip">Historical Shares Float: {{ summary.source_counts.historical_shares_float }}</div>
+            <div class="chip">Insider Trading: {{ summary.source_counts.insider_trading }}</div>
+            <div class="chip">Macro: {{ summary.source_counts.macro }}</div>
+            <div class="chip">Preview Rows: {{ summary.preview_rows }}</div>
+          </div>
+        {% endif %}
+        {% if coverage_rows %}
+          <h2>Feature Coverage Summary</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Feature Family</th>
+                  <th>Min Date</th>
+                  <th>Max Date</th>
+                  <th>Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in coverage_rows %}
+                  <tr>
+                    <td>{{ row.section_label }}</td>
+                    <td>{{ row.min_date|default:"-" }}</td>
+                    <td>{{ row.max_date|default:"-" }}</td>
+                    <td>{{ row.count }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% for section in feature_sections %}
+          <h2>{{ section.label }}</h2>
+          <div class="chips">
+            {% for col, sample in section.samples %}
+              <div class="chip">{{ col }} = {{ sample }}</div>
+            {% endfor %}
+          </div>
+          {% if section.table.columns %}
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    {% for col in section.table.columns %}
+                      <th>{{ col }}</th>
+                    {% endfor %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in section.table.rows %}
+                    <tr>
+                      {% for cell in row %}
+                        <td>{{ cell }}</td>
+                      {% endfor %}
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

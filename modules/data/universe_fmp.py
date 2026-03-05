@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from modules.data.fmp_client import FMPClient
+from .fmp_client import FMPClient
 
 
 def _to_df(raw: Any) -> pd.DataFrame:
@@ -49,6 +49,54 @@ def build_large_liquid_universe_single_call(
     Returns:
       Tuple of symbols sorted alphabetically.
     """
+    symbols, _ = screen_companies_fmp(
+        api_key=api_key,
+        marketCapMoreThan=marketCapMoreThan,
+        marketCapLowerThan=marketCapLowerThan,
+        sector=sector,
+        industry=industry,
+        betaMoreThan=betaMoreThan,
+        betaLowerThan=betaLowerThan,
+        priceMoreThan=priceMoreThan,
+        priceLowerThan=priceLowerThan,
+        dividendMoreThan=dividendMoreThan,
+        dividendLowerThan=dividendLowerThan,
+        volumeMoreThan=volumeMoreThan,
+        volumeLowerThan=volumeLowerThan,
+        exchange=exchange,
+        country=country,
+        isEtf=isEtf,
+        isFund=isFund,
+        isActivelyTrading=isActivelyTrading,
+        limit=limit,
+        includeAllShareClasses=includeAllShareClasses,
+    )
+    return symbols
+
+
+def screen_companies_fmp(
+    *,
+    api_key: str,
+    marketCapMoreThan: Optional[float] = None,
+    marketCapLowerThan: Optional[float] = None,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    betaMoreThan: Optional[float] = None,
+    betaLowerThan: Optional[float] = None,
+    priceMoreThan: Optional[float] = None,
+    priceLowerThan: Optional[float] = None,
+    dividendMoreThan: Optional[float] = None,
+    dividendLowerThan: Optional[float] = None,
+    volumeMoreThan: Optional[float] = None,
+    volumeLowerThan: Optional[float] = None,
+    exchange: Optional[str] = None,
+    country: Optional[str] = None,
+    isEtf: Optional[bool] = None,
+    isFund: Optional[bool] = None,
+    isActivelyTrading: Optional[bool] = None,
+    limit: int = 10_000,
+    includeAllShareClasses: Optional[bool] = None,
+) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     client = FMPClient(api_key=api_key)
 
     params: dict[str, Any] = {"limit": int(limit)}
@@ -76,17 +124,15 @@ def build_large_liquid_universe_single_call(
         if v is not None:
             params[k] = v
 
-    payload = client.get_json(
-        "/stable/company-screener",
-        params=params,
-    )
+    payload = client.get_json("/stable/company-screener", params=params)
     df = _to_df(payload)
     if df.empty:
-        return tuple()
+        return tuple(), []
 
+    records = df.where(pd.notnull(df), None).to_dict(orient="records")
     symbol_col = "symbol" if "symbol" in df.columns else None
     if symbol_col is None:
-        return tuple()
+        return tuple(), records
 
     syms = (
         df[symbol_col]
@@ -97,4 +143,4 @@ def build_large_liquid_universe_single_call(
         .unique()
         .tolist()
     )
-    return tuple(sorted(syms))
+    return tuple(sorted(syms)), records

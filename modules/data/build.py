@@ -34,18 +34,18 @@ from modules.schema import (
 from modules.data.context import DataContext
 from modules.data.prices_sqlite import load_or_fetch_prices_daily, load_or_fetch_prices_daily_fast
 from modules.data.quality import DataQualityConfig, assess_and_clean_prices_daily
-from modules.features.technical import load_or_compute_features_daily
+from features.technical import load_or_compute_features_daily
 from modules.data.dataset_rows import build_event_training_dataset
 
-from modules.labels.strategy_solver import solve_longs_by_frequency, solve_shorts_by_frequency
-from modules.labels.events import generate_optimal_events
+from labels.strategy_solver import solve_joint_trades_by_frequency, solve_longs_by_frequency, solve_shorts_by_frequency
+from labels.events import generate_optimal_events
 
 # IMPORTANT:
 # Your pasted modules/labeler.py contains add_rank_regression_labels,
 # but pipeline.py currently imports from modules.ml.labeler.
 # To preserve behavior, we mirror pipeline.py here.
-from modules.labels.directional import add_binary_classification_labels
-from modules.labels.ranking import add_rank_regression_labels
+from labels.directional import add_binary_classification_labels
+from labels.ranking import add_rank_regression_labels
 
 
 # --------------------------
@@ -235,6 +235,7 @@ def process_symbol(
             df_daily=df_daily,
             solve_longs_by_frequency_fn=solve_longs_by_frequency,
             solve_shorts_by_frequency_fn=solve_shorts_by_frequency,
+            solve_joint_by_frequency_fn=solve_joint_trades_by_frequency,
             k_params=k_params,
             price_col=execution_params["price_col"],
             fee_bps=execution_params["fee_bps"],

@@ -50,8 +50,7 @@ class SklearnRFRegressor(Model):
         X = df[self._used_features]
 
         if X.empty:
-            print(f"! ERROR: No numeric features found for regression.")
-            return self
+            raise ValueError("No numeric features found for regression.")
 
         # 2. Target Processing
         y = pd.to_numeric(df[spec.target_col], errors="coerce").fillna(0.0).astype(float)

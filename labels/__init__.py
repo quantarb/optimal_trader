@@ -1,0 +1,1 @@
+"""Labeling app package."""

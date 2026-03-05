@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Labeling Config Form</title>
+  <style>
+    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
+    .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .layout { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; align-items: start; }
+    .panel { border: 1px solid #e2e8ef; border-radius: 12px; padding: 12px; background: #fcfdff; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .field { border: 1px solid #e2e8ef; border-radius: 10px; padding: 10px; background: #fbfdff; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.92rem; }
+    input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #ccd6e2; border-radius: 8px; padding: 8px; font-size: 0.92rem; }
+    .help { color: #5b6777; font-size: 0.8rem; margin-top: 6px; }
+    .errorlist { color: #a31515; margin: 0 0 6px; padding-left: 16px; }
+    .btn { border: 1px solid #0d6a6d; background: #0d6a6d; color: #fff; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    .search { margin-bottom: 8px; }
+    .error { margin-top: 10px; padding: 10px; border: 1px solid #f3c4c4; background: #fff1f1; color: #9e2020; border-radius: 8px; }
+    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
+    th { background: #f3f7fb; position: sticky; top: 0; }
+    a { color: #0d6a6d; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .symbol-section { margin-top: 18px; }
+    pre { margin-top: 14px; padding: 12px; border-radius: 10px; border: 1px solid #dde3ea; background: #0f1722; color: #d8ecff; overflow: auto; }
+    @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Labeling Parameters</h1>
+    <div class="layout">
+      <div class="panel">
+        <form method="post">
+          {% csrf_token %}
+          <div class="grid">
+            {% for field in form %}
+              <div class="field">
+                {{ field.errors }}
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {% if field.name == 'symbols' %}
+                  <input id="symbol-search" class="search" type="text" placeholder="Type to filter symbols...">
+                {% endif %}
+                {{ field }}
+                {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+              </div>
+            {% endfor %}
+          </div>
+          <p><button class="btn" type="submit">Build Config</button></p>
+        </form>
+      </div>
+      <div class="panel">
+        <h2>Normalized Config</h2>
+        {% if normalized %}
+          <pre>{{ normalized }}</pre>
+        {% else %}
+          <p>Submit the form to preview normalized labeling parameters.</p>
+        {% endif %}
+        <h2>Optimal Trades</h2>
+        {% if trades_error %}
+          <div class="error">{{ trades_error }}</div>
+        {% endif %}
+        {% if trade_stats %}
+          <h3>Trade Summary</h3>
+          <div class="table-wrap">
+            <table>
+              <tbody>
+                <tr><th>Total Trades</th><td>{{ trade_stats.total_trades }}</td><th>Long / Short</th><td>{{ trade_stats.long_trades }} / {{ trade_stats.short_trades }}</td></tr>
+                <tr><th>Wins / Losses / Flat</th><td>{{ trade_stats.winning_trades }} / {{ trade_stats.losing_trades }} / {{ trade_stats.breakeven_trades }}</td><th>Win Rate</th><td>{{ trade_stats.win_rate_pct|floatformat:2 }}%</td></tr>
+                <tr><th>Avg Return</th><td>{{ trade_stats.avg_return_pct|floatformat:2 }}%</td><th>Median Return</th><td>{{ trade_stats.median_return_pct|floatformat:2 }}%</td></tr>
+                <tr><th>Avg Win</th><td>{% if trade_stats.avg_win_pct is not None %}{{ trade_stats.avg_win_pct|floatformat:2 }}%{% else %}-{% endif %}</td><th>Avg Loss</th><td>{% if trade_stats.avg_loss_pct is not None %}{{ trade_stats.avg_loss_pct|floatformat:2 }}%{% else %}-{% endif %}</td></tr>
+                <tr><th>Profit Factor</th><td>{% if trade_stats.profit_factor is not None %}{{ trade_stats.profit_factor|floatformat:2 }}{% else %}N/A (no losing trades){% endif %}</td><th>Avg Holding Days</th><td>{% if trade_stats.avg_holding_days is not None %}{{ trade_stats.avg_holding_days|floatformat:2 }}{% else %}-{% endif %}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if grouped_trade_stats %}
+          <h3>Grouped Trade Stats (Side / Freq / k)</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Side</th>
+                  <th>Freq</th>
+                  <th>k</th>
+                  <th>Trades</th>
+                  <th>Trade Return Mean %</th>
+                  <th>Trade Return Std %</th>
+                  <th>Trade Duration Mean</th>
+                  <th>Trade Duration Std</th>
+                  <th>Sharpe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for s in grouped_trade_stats %}
+                  <tr>
+                    <td>{{ s.side }}</td>
+                    <td>{{ s.freq }}</td>
+                    <td>{{ s.k }}</td>
+                    <td>{{ s.trades }}</td>
+                    <td>{{ s.trade_return_mean_pct|floatformat:2 }}%</td>
+                    <td>{% if s.trade_return_std_pct is not None %}{{ s.trade_return_std_pct|floatformat:2 }}%{% else %}-{% endif %}</td>
+                    <td>{{ s.trade_duration_mean|floatformat:2 }}</td>
+                    <td>{% if s.trade_duration_std is not None %}{{ s.trade_duration_std|floatformat:2 }}{% else %}-{% endif %}</td>
+                    <td>{% if s.sharpe is not None %}{{ s.sharpe|floatformat:2 }}{% else %}-{% endif %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if symbol_grouped_trade_stats %}
+          <h3>Grouped Trade Stats (Symbol)</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Trades</th>
+                  <th>Trade Return Mean %</th>
+                  <th>Trade Return Std %</th>
+                  <th>Trade Duration Mean</th>
+                  <th>Trade Duration Std</th>
+                  <th>Sharpe</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for s in symbol_grouped_trade_stats %}
+                  <tr>
+                    <td><a href="{{ s.detail_href }}">{{ s.symbol }}</a></td>
+                    <td>{{ s.trades }}</td>
+                    <td>{{ s.trade_return_mean_pct|floatformat:2 }}%</td>
+                    <td>{% if s.trade_return_std_pct is not None %}{{ s.trade_return_std_pct|floatformat:2 }}%{% else %}-{% endif %}</td>
+                    <td>{{ s.trade_duration_mean|floatformat:2 }}</td>
+                    <td>{% if s.trade_duration_std is not None %}{{ s.trade_duration_std|floatformat:2 }}{% else %}-{% endif %}</td>
+                    <td>{% if s.sharpe is not None %}{{ s.sharpe|floatformat:2 }}{% else %}-{% endif %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        {% if trades_rows %}
+          <h3>All Trades</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Freq</th>
+                  <th>k</th>
+                  <th>Entry Date</th>
+                  <th>Exit Date</th>
+                  <th>Entry Price</th>
+                  <th>Exit Price</th>
+                  <th>Return %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in trades_rows %}
+                  <tr>
+                    <td>{{ r.symbol }}</td>
+                    <td>{{ r.side }}</td>
+                    <td>{{ r.freq }}</td>
+                    <td>{{ r.k }}</td>
+                    <td>{{ r.entry_date }}</td>
+                    <td>{{ r.exit_date }}</td>
+                    <td>{{ r.entry_px }}</td>
+                    <td>{{ r.exit_px }}</td>
+                    <td>{{ r.ret_pct }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p>No trades generated yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const search = document.getElementById("symbol-search");
+      const select = document.getElementById("id_symbols");
+      if (!search || !select) return;
+
+      // Toggle selection on single click so users don't need Cmd/Ctrl.
+      select.addEventListener("mousedown", function (e) {
+        const target = e.target;
+        if (target && target.tagName === "OPTION") {
+          e.preventDefault();
+          target.selected = !target.selected;
+        }
+      });
+
+      search.addEventListener("input", function () {
+        const q = String(search.value || "").trim().toLowerCase();
+        for (const opt of Array.from(select.options)) {
+          const txt = String(opt.text || "").toLowerCase();
+          const match = !q || txt.includes(q);
+          opt.hidden = !match;
+        }
+      });
+    })();
+
+    (function () {
+      const forceDefaults = {{ force_default_exec|yesno:"true,false" }};
+      if (!forceDefaults) return;
+      const defaults = {
+        id_buy_execution: "adj_high",
+        id_sell_execution: "adj_low",
+        id_short_execution: "adj_low",
+        id_cover_execution: "adj_high",
+      };
+      Object.keys(defaults).forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = defaults[id];
+      });
+    })();
+  </script>
+</body>
+</html>

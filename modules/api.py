@@ -25,16 +25,16 @@ from modules.data.preparation import (
     prepare_entry2exit_dataset as _prepare_entry2exit_dataset_unified,
     prepare_ml_dataset as _prepare_ml_dataset_unified,
 )
-from modules.features.fundamentals_fmp import fetch_fundamentals_data, broadcast_fundamentals_to_daily
+from features.fundamentals import fetch_fundamentals_data, broadcast_fundamentals_to_daily
 from modules.qcore.contracts import DatasetArtifacts, ModelArtifact, PredictionsArtifact
 from modules.qcore.window import TimeWindow
 from modules.utils.panel import ensure_panel_index
 from modules.engine.backtest import run_backtest
-from modules.features.macro_fmp import fetch_macro_series, broadcast_macro_to_daily, MacroFeatureConfig
-from modules.features.time_features import build_time_features, TimeFeatureConfig
-from modules.labels.events import build_label_panel, deduplicate_labels
-from modules.labels.ranking import add_rank_regression_labels
-from modules.labels.strategy_solver import solve_longs_by_frequency, solve_shorts_by_frequency
+from features.macro import fetch_macro_series, broadcast_macro_to_daily, MacroFeatureConfig
+from features.time_features import build_time_features, TimeFeatureConfig
+from labels.events import build_label_panel, deduplicate_labels
+from labels.ranking import add_rank_regression_labels
+from labels.strategy_solver import solve_joint_trades_by_frequency, solve_longs_by_frequency, solve_shorts_by_frequency
 
 _ACRONYM_TOKENS: dict[str, str] = {
     "atr": "ATR",
@@ -1184,6 +1184,7 @@ def build_label_dataframe(
         daily_by_symbol=daily_by_symbol,
         solve_longs_by_frequency_fn=solve_longs_by_frequency,
         solve_shorts_by_frequency_fn=solve_shorts_by_frequency,
+        solve_joint_by_frequency_fn=solve_joint_trades_by_frequency,
         k_params=k_params,
         execution_params=execution_params,
         weighting=weighting,

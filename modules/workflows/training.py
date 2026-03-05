@@ -143,7 +143,7 @@ def train_rf_models(
     )
 
 
-def train_ae(train_df: pd.DataFrame, feature_list: Sequence[str]):
+def train_ae(train_df: pd.DataFrame, feature_list: Sequence[str], *, verbose: bool = True):
     """Train numeric-only AE used by the raw stack notebook."""
     numeric_cols = [c for c in list(feature_list) if pd.api.types.is_numeric_dtype(train_df[c])]
 
@@ -167,7 +167,7 @@ def train_ae(train_df: pd.DataFrame, feature_list: Sequence[str]):
         spec_ae,
         numeric_cols=numeric_cols,
         categorical_cols=[],
-        verbose=True,
+        verbose=verbose,
     )
     return ae, numeric_cols
 
@@ -217,3 +217,71 @@ def save_raw_stack_artifacts(
         json.dump(meta, f, indent=2)
 
     return out_dir
+
+
+def save_raw_stack_artifacts_to_db(
+    *,
+    clf_raw: Any,
+    reg_trade_return_raw: Any | None = None,
+    reg_raw: Any | None = None,
+    reg_duration_raw: Any | None = None,
+    ae_raw: Any,
+    raw_feature_list: Sequence[str],
+    ae_raw_numeric_cols: Sequence[str],
+    model_prefix: str = "raw_stack",
+) -> dict[str, Any]:
+    """Persist raw-stack artifacts into the Django ModelArtifact table."""
+    from ml.store import save_model_artifact
+
+    primary_reg = reg_trade_return_raw if reg_trade_return_raw is not None else reg_raw
+    if primary_reg is None:
+        raise ValueError("save_raw_stack_artifacts_to_db requires a trade-return regressor.")
+
+    shared_metadata = {
+        "stack": "raw",
+        "feature_list": list(raw_feature_list),
+        "ae_numeric_cols": list(ae_raw_numeric_cols),
+    }
+
+    saved = {
+        "classifier": save_model_artifact(
+            name=f"{model_prefix}_classifier",
+            model_obj=clf_raw,
+            framework="sklearn",
+            task_type="classification",
+            target_col="label",
+            feature_cols=raw_feature_list,
+            metadata=shared_metadata,
+        ),
+        "trade_return_regressor": save_model_artifact(
+            name=f"{model_prefix}_trade_return_regressor",
+            model_obj=primary_reg,
+            framework="sklearn",
+            task_type="regression",
+            target_col="trade_return",
+            feature_cols=raw_feature_list,
+            metadata=shared_metadata,
+        ),
+        "autoencoder": save_model_artifact(
+            name=f"{model_prefix}_autoencoder",
+            model_obj=ae_raw,
+            framework="torch",
+            task_type="embedding",
+            target_col="",
+            feature_cols=ae_raw_numeric_cols,
+            metadata=shared_metadata,
+        ),
+    }
+
+    if reg_duration_raw is not None:
+        saved["duration_regressor"] = save_model_artifact(
+            name=f"{model_prefix}_duration_regressor",
+            model_obj=reg_duration_raw,
+            framework="sklearn",
+            task_type="regression",
+            target_col="trade_duration_days",
+            feature_cols=raw_feature_list,
+            metadata=shared_metadata,
+        )
+
+    return saved

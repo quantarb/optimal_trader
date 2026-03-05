@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, Sequence
 
 import numpy as np
@@ -9,7 +8,13 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix
 
-from modules.models.base import FitSpec, Model, print_model_section
+from modules.models.base import (
+    FitSpec,
+    Model,
+    copy_feature_importance,
+    metrics_with_feature_importance,
+    print_model_section,
+)
 from modules.models.metrics import binary_classifier_metrics_from_scores, classification_metrics
 
 
@@ -45,8 +50,7 @@ class SklearnRFClassifier(Model):
         X = df[self._used_features]
 
         if X.empty:
-            print(f"! ERROR: No numeric features found. Check your feature_cols.")
-            return self
+            raise ValueError("No numeric features found. Check your feature_cols.")
 
         # 2. Target Processing (Fixed: Uses factorize to prevent string-drop)
         target_series = df[spec.target_col]
@@ -63,8 +67,9 @@ class SklearnRFClassifier(Model):
         n_classes = len(unique_classes)
 
         if n_classes < 2:
-            print(f"\n! ERROR: Target '{spec.target_col}' has only one class: {unique_classes}.")
-            return self
+            raise ValueError(
+                f"Target '{spec.target_col}' has only one class: {unique_classes.tolist()}."
+            )
 
         # 3. Random Shuffle Split (optional in no-holdout mode)
         split_ratio = getattr(spec, "split_ratio", 0.8)
@@ -191,4 +196,7 @@ class SklearnRFClassifier(Model):
         print("=" * 60)
 
     def metrics_report(self) -> Dict[str, Any]:
-        return dict(self._metrics)
+        return metrics_with_feature_importance(self._metrics, self._feature_importance, top_n=30)
+
+    def feature_importance(self) -> Dict[str, float]:
+        return copy_feature_importance(self._feature_importance)

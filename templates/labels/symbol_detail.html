@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ symbol }} Labeling Trades</title>
+  <style>
+    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
+    .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .panel { border: 1px solid #e2e8ef; border-radius: 12px; padding: 12px; background: #fcfdff; }
+    .chart-wrap { border: 1px solid #e2e8ef; border-radius: 10px; padding: 12px; margin-top: 10px; background: #fbfdff; }
+    .chart-wrap canvas { width: 100%; max-height: 420px; }
+    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
+    th { background: #f3f7fb; position: sticky; top: 0; }
+    pre { margin-top: 14px; padding: 12px; border-radius: 10px; border: 1px solid #dde3ea; background: #0f1722; color: #d8ecff; overflow: auto; }
+    a { color: #0d6a6d; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .error { margin-top: 10px; padding: 10px; border: 1px solid #f3c4c4; background: #fff1f1; color: #9e2020; border-radius: 8px; }
+    .range-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 10px; }
+    .range-btn { border: 1px solid #8795a5; background: #fff; color: #2d3b4b; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; }
+    .range-btn.active { border-color: #0d6a6d; background: #0d6a6d; color: #fff; }
+    .zoom-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+    .zoom-btn { border: 1px solid #8795a5; background: #fff; color: #2d3b4b; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; }
+    .chart-hint { margin: 0 0 8px; color: #5b6777; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p><a href="/labels/form/">Back to Labeling Form</a></p>
+    <h1>{{ symbol }} Trades</h1>
+    <div class="panel">
+      <h2>Normalized Config</h2>
+      <pre>{{ normalized }}</pre>
+      {% if trades_error %}
+        <div class="error">{{ trades_error }}</div>
+      {% endif %}
+      {% if points_count %}
+        <h2>Price Chart</h2>
+        <p>Adjusted OHLCV points: {{ points_count }} | Trade markers: {{ trade_markers_count }}</p>
+        <div class="range-row">
+          <button class="range-btn" data-range="5d" type="button">5D</button>
+          <button class="range-btn" data-range="1m" type="button">1M</button>
+          <button class="range-btn" data-range="6m" type="button">6M</button>
+          <button class="range-btn" data-range="ytd" type="button">YTD</button>
+          <button class="range-btn" data-range="1y" type="button">1Y</button>
+          <button class="range-btn active" data-range="5y" type="button">5Y</button>
+          <button class="range-btn" data-range="max" type="button">Max</button>
+        </div>
+        <div class="zoom-row">
+          <button class="zoom-btn" id="zoomInBtn" type="button">Zoom In</button>
+          <button class="zoom-btn" id="zoomOutBtn" type="button">Zoom Out</button>
+          <button class="zoom-btn" id="zoomResetBtn" type="button">Reset Zoom</button>
+        </div>
+        <p class="chart-hint">Use the mouse wheel to zoom and drag left/right on the price chart to pan.</p>
+        <div class="chart-wrap">
+          <canvas id="ohlcChart"></canvas>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="volumeChart"></canvas>
+        </div>
+      {% else %}
+        <p>No adjusted price data found for charting.</p>
+      {% endif %}
+      {% if trade_stats %}
+        <h2>Trade Summary</h2>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>Total Trades</th><td>{{ trade_stats.total_trades }}</td><th>Long / Short</th><td>{{ trade_stats.long_trades }} / {{ trade_stats.short_trades }}</td></tr>
+              <tr><th>Wins / Losses / Flat</th><td>{{ trade_stats.winning_trades }} / {{ trade_stats.losing_trades }} / {{ trade_stats.breakeven_trades }}</td><th>Win Rate</th><td>{{ trade_stats.win_rate_pct|floatformat:2 }}%</td></tr>
+              <tr><th>Avg Return</th><td>{{ trade_stats.avg_return_pct|floatformat:2 }}%</td><th>Median Return</th><td>{{ trade_stats.median_return_pct|floatformat:2 }}%</td></tr>
+              <tr><th>Avg Win</th><td>{% if trade_stats.avg_win_pct is not None %}{{ trade_stats.avg_win_pct|floatformat:2 }}%{% else %}-{% endif %}</td><th>Avg Loss</th><td>{% if trade_stats.avg_loss_pct is not None %}{{ trade_stats.avg_loss_pct|floatformat:2 }}%{% else %}-{% endif %}</td></tr>
+              <tr><th>Profit Factor</th><td>{% if trade_stats.profit_factor is not None %}{{ trade_stats.profit_factor|floatformat:2 }}{% else %}N/A (no losing trades){% endif %}</td><th>Avg Holding Days</th><td>{% if trade_stats.avg_holding_days is not None %}{{ trade_stats.avg_holding_days|floatformat:2 }}{% else %}-{% endif %}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+      {% if grouped_trade_stats %}
+        <h2>Grouped Trade Stats (Side / Freq / k)</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Side</th>
+                <th>Freq</th>
+                <th>k</th>
+                <th>Trades</th>
+                <th>Trade Return Mean %</th>
+                <th>Trade Return Std %</th>
+                <th>Trade Duration Mean</th>
+                <th>Trade Duration Std</th>
+                <th>Sharpe</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in grouped_trade_stats %}
+                <tr>
+                  <td>{{ s.side }}</td>
+                  <td>{{ s.freq }}</td>
+                  <td>{{ s.k }}</td>
+                  <td>{{ s.trades }}</td>
+                  <td>{{ s.trade_return_mean_pct|floatformat:2 }}%</td>
+                  <td>{% if s.trade_return_std_pct is not None %}{{ s.trade_return_std_pct|floatformat:2 }}%{% else %}-{% endif %}</td>
+                  <td>{{ s.trade_duration_mean|floatformat:2 }}</td>
+                  <td>{% if s.trade_duration_std is not None %}{{ s.trade_duration_std|floatformat:2 }}{% else %}-{% endif %}</td>
+                  <td>{% if s.sharpe is not None %}{{ s.sharpe|floatformat:2 }}{% else %}-{% endif %}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+      {% if trades_rows %}
+        <h2>Trades</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Freq</th>
+                <th>k</th>
+                <th>Entry Date</th>
+                <th>Exit Date</th>
+                <th>Entry Price</th>
+                <th>Exit Price</th>
+                <th>Return %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in trades_rows %}
+                <tr>
+                  <td>{{ r.symbol }}</td>
+                  <td>{{ r.side }}</td>
+                  <td>{{ r.freq }}</td>
+                  <td>{{ r.k }}</td>
+                  <td>{{ r.entry_date }}</td>
+                  <td>{{ r.exit_date }}</td>
+                  <td>{{ r.entry_px }}</td>
+                  <td>{{ r.exit_px }}</td>
+                  <td>{{ r.ret_pct }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p>No trades generated for this symbol.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% if points_count %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      const labels = {{ labels_json|safe }};
+      const opens = {{ opens_json|safe }};
+      const highs = {{ highs_json|safe }};
+      const lows = {{ lows_json|safe }};
+      const closes = {{ closes_json|safe }};
+      const volumes = {{ volumes_json|safe }};
+      const entryMarkers = {{ entry_markers_json|safe }};
+      const exitMarkers = {{ exit_markers_json|safe }};
+      const full = {
+        labels: labels.slice(),
+        opens: opens.slice(),
+        highs: highs.slice(),
+        lows: lows.slice(),
+        closes: closes.slice(),
+        volumes: volumes.slice(),
+        entryMarkers: entryMarkers.slice(),
+        exitMarkers: exitMarkers.slice(),
+      };
+      let currentStartIdx = 0;
+      let currentEndIdx = full.labels.length;
+      const markersByDate = {};
+      for (const m of [...full.entryMarkers, ...full.exitMarkers]) {
+        if (!m || !m.x) continue;
+        if (!markersByDate[m.x]) markersByDate[m.x] = [];
+        markersByDate[m.x].push(m);
+      }
+
+      const tooltipCallbacks = {
+        label: function(context) {
+          const raw = context.raw || {};
+          if (raw.type) {
+            const lines = [raw.type + ": " + context.parsed.y];
+            if (Array.isArray(raw.details)) {
+              for (const d of raw.details) lines.push(d);
+            }
+            return lines;
+          }
+          return context.dataset.label + ": " + context.parsed.y;
+        },
+        afterBody: function(items) {
+          if (!items || !items.length) return [];
+          const first = items[0];
+          const idx = Number.isInteger(first.dataIndex) ? first.dataIndex : -1;
+          const labelFromIndex = idx >= 0 ? String(ohlcChart.data.labels[idx] || "") : "";
+          const raw = first.raw || {};
+          const parsed = first.parsed || {};
+          const date = String(labelFromIndex || raw.x || parsed.x || first.label || "").slice(0, 10);
+          if (!date) return [];
+          const markers = markersByDate[date] || [];
+          if (!markers.length) return [];
+          const lines = ["Trades:"];
+          for (const marker of markers) {
+            let line = "- " + (marker.type || "Trade");
+            if (Array.isArray(marker.details) && marker.details.length) {
+              line += " | " + marker.details.join(" | ");
+            }
+            lines.push(line);
+          }
+          return lines;
+        }
+      };
+
+      const ohlcChart = new Chart(document.getElementById("ohlcChart"), {
+        type: "line",
+        data: {
+          labels: full.labels.slice(),
+          datasets: [
+            { label: "Open", data: full.opens.slice(), borderColor: "#4a84f5", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "High", data: full.highs.slice(), borderColor: "#2e9f5d", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "Low", data: full.lows.slice(), borderColor: "#d44d3a", pointRadius: 0, borderWidth: 1.25, tension: 0 },
+            { label: "Close", data: full.closes.slice(), borderColor: "#7e57c2", pointRadius: 0, borderWidth: 1.5, tension: 0 },
+            {
+              label: "Entries",
+              data: full.entryMarkers.slice(),
+              type: "scatter",
+              showLine: false,
+              pointRadius: 4,
+              pointHoverRadius: 6,
+              pointStyle: "triangle",
+              pointBackgroundColor: "#15803d",
+              pointBorderColor: "#166534",
+            },
+            {
+              label: "Exits",
+              data: full.exitMarkers.slice(),
+              type: "scatter",
+              showLine: false,
+              pointRadius: 4,
+              pointHoverRadius: 6,
+              pointStyle: "rectRot",
+              pointBackgroundColor: "#b91c1c",
+              pointBorderColor: "#7f1d1d",
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: "index", intersect: false },
+          plugins: { tooltip: { callbacks: tooltipCallbacks } },
+          scales: {
+            x: { ticks: { maxTicksLimit: 12 } },
+            y: { title: { display: true, text: "Price" } },
+          },
+        },
+      });
+
+      const volumeChart = new Chart(document.getElementById("volumeChart"), {
+        type: "bar",
+        data: {
+          labels: full.labels.slice(),
+          datasets: [
+            { label: "Volume", data: full.volumes.slice(), backgroundColor: "rgba(13,106,109,0.45)", borderColor: "#0d6a6d", borderWidth: 1 },
+          ],
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: { ticks: { maxTicksLimit: 12 } },
+            y: { title: { display: true, text: "Volume" } },
+          },
+        },
+      });
+
+      function parseDate(s) {
+        return new Date(s + "T00:00:00");
+      }
+
+      function cutoffDate(rangeKey, lastDate) {
+        const d = new Date(lastDate.getTime());
+        if (rangeKey === "1m") d.setMonth(d.getMonth() - 1);
+        else if (rangeKey === "6m") d.setMonth(d.getMonth() - 6);
+        else if (rangeKey === "1y") d.setFullYear(d.getFullYear() - 1);
+        else if (rangeKey === "5y") d.setFullYear(d.getFullYear() - 5);
+        else if (rangeKey === "ytd") return new Date(lastDate.getFullYear(), 0, 1);
+        return d;
+      }
+
+      function applyRange(rangeKey) {
+        if (!full.labels.length) return;
+        let startIdx = 0;
+        let endIdx = full.labels.length;
+        if (rangeKey === "5d") {
+          startIdx = Math.max(0, full.labels.length - 5);
+        } else if (rangeKey !== "max") {
+          const lastDate = parseDate(full.labels[full.labels.length - 1]);
+          const cutoff = cutoffDate(rangeKey, lastDate);
+          startIdx = full.labels.findIndex((d) => parseDate(d) >= cutoff);
+          if (startIdx < 0) startIdx = 0;
+        }
+        applyWindow(startIdx, endIdx);
+      }
+
+      function applyWindow(startIdx, endIdx) {
+        if (!full.labels.length) return;
+        currentStartIdx = Math.max(0, Math.min(startIdx, full.labels.length - 1));
+        currentEndIdx = Math.max(currentStartIdx + 1, Math.min(endIdx, full.labels.length));
+        const rangeLabels = full.labels.slice(currentStartIdx, currentEndIdx);
+        const inRange = new Set(rangeLabels);
+        ohlcChart.data.labels = rangeLabels;
+        ohlcChart.data.datasets[0].data = full.opens.slice(currentStartIdx, currentEndIdx);
+        ohlcChart.data.datasets[1].data = full.highs.slice(currentStartIdx, currentEndIdx);
+        ohlcChart.data.datasets[2].data = full.lows.slice(currentStartIdx, currentEndIdx);
+        ohlcChart.data.datasets[3].data = full.closes.slice(currentStartIdx, currentEndIdx);
+        ohlcChart.data.datasets[4].data = full.entryMarkers.filter((m) => inRange.has(m.x));
+        ohlcChart.data.datasets[5].data = full.exitMarkers.filter((m) => inRange.has(m.x));
+        ohlcChart.update();
+
+        volumeChart.data.labels = rangeLabels;
+        volumeChart.data.datasets[0].data = full.volumes.slice(currentStartIdx, currentEndIdx);
+        volumeChart.update();
+      }
+
+      function zoom(factor) {
+        const currentLen = currentEndIdx - currentStartIdx;
+        if (currentLen <= 1) return;
+        let nextLen = Math.round(currentLen * factor);
+        nextLen = Math.max(10, Math.min(full.labels.length, nextLen));
+        if (nextLen === currentLen) return;
+        const center = Math.floor((currentStartIdx + currentEndIdx) / 2);
+        let nextStart = center - Math.floor(nextLen / 2);
+        let nextEnd = nextStart + nextLen;
+        if (nextStart < 0) {
+          nextStart = 0;
+          nextEnd = nextLen;
+        }
+        if (nextEnd > full.labels.length) {
+          nextEnd = full.labels.length;
+          nextStart = Math.max(0, nextEnd - nextLen);
+        }
+        applyWindow(nextStart, nextEnd);
+        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+      }
+
+      function zoomAroundIndex(center, factor) {
+        if (!full.labels.length) return;
+        const currentLen = currentEndIdx - currentStartIdx;
+        let nextLen = Math.round(currentLen * factor);
+        nextLen = Math.max(10, Math.min(full.labels.length, nextLen));
+        if (nextLen === currentLen) return;
+        const clampedCenter = Math.max(0, Math.min(full.labels.length - 1, center));
+        let nextStart = clampedCenter - Math.floor(nextLen / 2);
+        let nextEnd = nextStart + nextLen;
+        if (nextStart < 0) {
+          nextStart = 0;
+          nextEnd = nextLen;
+        }
+        if (nextEnd > full.labels.length) {
+          nextEnd = full.labels.length;
+          nextStart = Math.max(0, nextEnd - nextLen);
+        }
+        applyWindow(nextStart, nextEnd);
+        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+      }
+
+      function panWindow(shift) {
+        if (!full.labels.length || !shift) return;
+        const windowLen = currentEndIdx - currentStartIdx;
+        let nextStart = currentStartIdx + shift;
+        let nextEnd = currentEndIdx + shift;
+        if (nextStart < 0) {
+          nextStart = 0;
+          nextEnd = windowLen;
+        }
+        if (nextEnd > full.labels.length) {
+          nextEnd = full.labels.length;
+          nextStart = Math.max(0, nextEnd - windowLen);
+        }
+        if (nextStart === currentStartIdx && nextEnd === currentEndIdx) return;
+        applyWindow(nextStart, nextEnd);
+        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+      }
+
+      document.querySelectorAll(".range-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          applyRange(btn.dataset.range || "max");
+        });
+      });
+      const zoomInBtn = document.getElementById("zoomInBtn");
+      const zoomOutBtn = document.getElementById("zoomOutBtn");
+      const zoomResetBtn = document.getElementById("zoomResetBtn");
+      if (zoomInBtn) zoomInBtn.addEventListener("click", () => zoom(0.5));
+      if (zoomOutBtn) zoomOutBtn.addEventListener("click", () => zoom(2.0));
+      if (zoomResetBtn) {
+        zoomResetBtn.addEventListener("click", () => {
+          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+          const defaultBtn = document.querySelector('.range-btn[data-range="5y"]');
+          if (defaultBtn) defaultBtn.classList.add("active");
+          applyRange("5y");
+        });
+      }
+
+      let isPanning = false;
+      let panStartX = 0;
+      let panStartIdx = 0;
+      const ohlcCanvas = document.getElementById("ohlcChart");
+      if (ohlcCanvas) {
+        ohlcCanvas.addEventListener("wheel", (event) => {
+          event.preventDefault();
+          const rect = ohlcCanvas.getBoundingClientRect();
+          const width = Math.max(1, rect.width);
+          const relativeX = Math.max(0, Math.min(width, event.clientX - rect.left));
+          const visibleLen = Math.max(1, currentEndIdx - currentStartIdx);
+          const ratio = relativeX / width;
+          const center = currentStartIdx + Math.round((visibleLen - 1) * ratio);
+          zoomAroundIndex(center, event.deltaY < 0 ? 0.8 : 1.25);
+        }, { passive: false });
+
+        ohlcCanvas.addEventListener("mousedown", (event) => {
+          isPanning = true;
+          panStartX = event.clientX;
+          panStartIdx = currentStartIdx;
+          ohlcCanvas.style.cursor = "grabbing";
+        });
+
+        window.addEventListener("mousemove", (event) => {
+          if (!isPanning) return;
+          const rect = ohlcCanvas.getBoundingClientRect();
+          const width = Math.max(1, rect.width);
+          const visibleLen = Math.max(1, currentEndIdx - currentStartIdx);
+          const pixelsPerPoint = width / visibleLen;
+          const deltaX = event.clientX - panStartX;
+          const shift = Math.round(-deltaX / Math.max(1, pixelsPerPoint));
+          const nextStart = panStartIdx + shift;
+          const nextEnd = nextStart + visibleLen;
+          if (nextStart === currentStartIdx && nextEnd === currentEndIdx) return;
+          if (nextStart < 0 || nextEnd > full.labels.length) {
+            panWindow(shift);
+            return;
+          }
+          applyWindow(nextStart, nextEnd);
+          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+        });
+
+        window.addEventListener("mouseup", () => {
+          if (!isPanning) return;
+          isPanning = false;
+          ohlcCanvas.style.cursor = "";
+        });
+
+        ohlcCanvas.addEventListener("mouseleave", () => {
+          if (!isPanning) return;
+          isPanning = false;
+          ohlcCanvas.style.cursor = "";
+        });
+      }
+
+      applyRange("5y");
+    </script>
+  {% endif %}
+</body>
+</html>

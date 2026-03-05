@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ series_obj.display_name|default:series_obj.code }}</title>
+  <style>
+    body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
+    .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .chart-wrap { border: 1px solid #e2e8ef; border-radius: 10px; padding: 12px; margin-top: 12px; background: #fbfdff; }
+    .chart-wrap canvas { width: 100%; max-height: 460px; }
+    .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
+    th { background: #f3f7fb; position: sticky; top: 0; }
+    a { color: #0d6a6d; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p><a href="{{ back_href }}">&larr; {{ back_label }}</a></p>
+    <h1>{{ series_obj.display_name|default:series_obj.code }}</h1>
+    <p>Code: {{ series_obj.code }} | Category: {{ category_label }} | Points: {{ points_count }}</p>
+    {% if points_count %}
+      <div class="chart-wrap">
+        <canvas id="seriesChart"></canvas>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in display_rows %}
+              <tr>
+                <td>{{ row.0 }}</td>
+                <td>{{ row.1 }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No stored observations for this series.</p>
+    {% endif %}
+  </div>
+  {% if points_count %}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      new Chart(document.getElementById("seriesChart"), {
+        type: "line",
+        data: {
+          labels: {{ labels_json|safe }},
+          datasets: [
+            {
+              label: "{{ series_obj.display_name|default:series_obj.code|escapejs }}",
+              data: {{ values_json|safe }},
+              borderColor: "#0d6a6d",
+              backgroundColor: "#0d6a6d",
+              pointRadius: 0,
+              borderWidth: 1.5,
+              tension: 0,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: "index", intersect: false },
+          scales: {
+            x: { ticks: { maxTicksLimit: 12 } },
+            y: { title: { display: true, text: "Value" } },
+          },
+        },
+      });
+    </script>
+  {% endif %}
+</body>
+</html>
