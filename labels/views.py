@@ -436,6 +436,7 @@ def _build_labeling_chart_context(symbol_obj: Symbol | None, trades_rows: list[d
         "volumes_json": "[]",
         "entry_markers_json": "[]",
         "exit_markers_json": "[]",
+        "trade_lines_json": "[]",
         "points_count": 0,
         "trade_markers_count": 0,
     }
@@ -454,11 +455,16 @@ def _build_labeling_chart_context(symbol_obj: Symbol | None, trades_rows: list[d
 
     entry_markers: list[dict] = []
     exit_markers: list[dict] = []
+    trade_lines: list[dict] = []
     for row in trades_rows:
         try:
             entry_px = float(str(row.get("entry_px") or "").replace(",", ""))
             exit_px = float(str(row.get("exit_px") or "").replace(",", ""))
         except Exception:
+            continue
+        entry_date = str(row.get("entry_date") or "")[:10]
+        exit_date = str(row.get("exit_date") or "")[:10]
+        if not entry_date or not exit_date:
             continue
         side = str(row.get("side") or "").strip().lower()
         freq = str(row.get("freq") or "")
@@ -466,7 +472,7 @@ def _build_labeling_chart_context(symbol_obj: Symbol | None, trades_rows: list[d
         ret_pct = str(row.get("ret_pct") or "")
         entry_markers.append(
             {
-                "x": str(row.get("entry_date") or "")[:10],
+                "x": entry_date,
                 "y": entry_px,
                 "type": "Long Entry" if side == "long" else "Short Entry",
                 "details": [f"Freq: {freq}", f"k: {k}", f"Return: {ret_pct}"],
@@ -474,10 +480,20 @@ def _build_labeling_chart_context(symbol_obj: Symbol | None, trades_rows: list[d
         )
         exit_markers.append(
             {
-                "x": str(row.get("exit_date") or "")[:10],
+                "x": exit_date,
                 "y": exit_px,
                 "type": "Long Exit" if side == "long" else "Cover",
                 "details": [f"Freq: {freq}", f"k: {k}", f"Return: {ret_pct}"],
+            }
+        )
+        trade_lines.append(
+            {
+                "entry_x": entry_date,
+                "entry_y": entry_px,
+                "exit_x": exit_date,
+                "exit_y": exit_px,
+                "side": "Long" if side == "long" else "Short",
+                "ret_pct": ret_pct,
             }
         )
 
@@ -490,6 +506,7 @@ def _build_labeling_chart_context(symbol_obj: Symbol | None, trades_rows: list[d
         "volumes_json": json.dumps(volumes),
         "entry_markers_json": json.dumps(entry_markers),
         "exit_markers_json": json.dumps(exit_markers),
+        "trade_lines_json": json.dumps(trade_lines),
         "points_count": len(labels),
         "trade_markers_count": len(entry_markers) + len(exit_markers),
     }

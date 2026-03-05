@@ -149,6 +149,7 @@
       const volumes = {{ volumes_json|safe }};
       const entryMarkers = {{ entry_markers_json|safe }};
       const exitMarkers = {{ exit_markers_json|safe }};
+      const tradeLines = {{ trade_lines_json|safe }};
 
       function toTs(dateStr) {
         return Date.parse(String(dateStr || "") + "T00:00:00Z");
@@ -176,6 +177,38 @@
       const exitPts = exitMarkers
         .map((m) => ({ x: toTs(m.x), y: Number(m.y), custom: { type: m.type, details: m.details || [] } }))
         .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const tradeLineSeries = [];
+      for (const t of tradeLines || []) {
+        const x1 = toTs(t.entry_x);
+        const y1 = Number(t.entry_y);
+        const x2 = toTs(t.exit_x);
+        const y2 = Number(t.exit_y);
+        if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) continue;
+        const isLong = String(t.side || "").toLowerCase() === "long";
+        tradeLineSeries.push({
+          type: "line",
+          name: "Trade Line",
+          yAxis: 0,
+          data: [
+            { x: x1, y: y1 },
+            {
+              x: x2,
+              y: y2,
+              custom: {
+                type: (t.side || "Trade") + " Trade",
+                details: [t.ret_pct ? ("Return: " + t.ret_pct) : ""].filter(Boolean),
+              },
+            },
+          ],
+          color: isLong ? "rgba(22, 163, 74, 0.8)" : "rgba(220, 38, 38, 0.8)",
+          lineWidth: 1.6,
+          marker: { enabled: false },
+          enableMouseTracking: false,
+          showInLegend: false,
+          zIndex: 2,
+        });
+      }
 
       function showChartError(msg) {
         const el = document.getElementById("chartError");
@@ -280,7 +313,8 @@
             yAxis: 1,
             data: volume,
             color: "rgba(13,106,109,0.45)"
-          }
+          },
+          ...tradeLineSeries
         ]
           });
 
