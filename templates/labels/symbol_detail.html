@@ -9,7 +9,7 @@
     .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
     .panel { border: 1px solid #e2e8ef; border-radius: 12px; padding: 12px; background: #fcfdff; }
     .chart-wrap { border: 1px solid #e2e8ef; border-radius: 10px; padding: 12px; margin-top: 10px; background: #fbfdff; }
-    .chart-wrap canvas { width: 100%; max-height: 420px; }
+    .hc-chart { width: 100%; height: 560px; }
     .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 10px; }
     table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
     th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
@@ -18,12 +18,9 @@
     a { color: #0d6a6d; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .error { margin-top: 10px; padding: 10px; border: 1px solid #f3c4c4; background: #fff1f1; color: #9e2020; border-radius: 8px; }
-    .range-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 10px; }
-    .range-btn { border: 1px solid #8795a5; background: #fff; color: #2d3b4b; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; }
-    .range-btn.active { border-color: #0d6a6d; background: #0d6a6d; color: #fff; }
-    .zoom-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
-    .zoom-btn { border: 1px solid #8795a5; background: #fff; color: #2d3b4b; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; }
-    .chart-hint { margin: 0 0 8px; color: #5b6777; font-size: 0.8rem; }
+    .chart-controls { display: flex; gap: 8px; align-items: center; margin: 8px 0 6px; }
+    .chart-controls label { font-size: 0.86rem; color: #425062; }
+    .chart-controls select { border: 1px solid #c7d2df; border-radius: 6px; padding: 4px 8px; background: #fff; }
   </style>
 </head>
 <body>
@@ -39,26 +36,17 @@
       {% if points_count %}
         <h2>Price Chart</h2>
         <p>Adjusted OHLCV points: {{ points_count }} | Trade markers: {{ trade_markers_count }}</p>
-        <div class="range-row">
-          <button class="range-btn" data-range="5d" type="button">5D</button>
-          <button class="range-btn" data-range="1m" type="button">1M</button>
-          <button class="range-btn" data-range="6m" type="button">6M</button>
-          <button class="range-btn" data-range="ytd" type="button">YTD</button>
-          <button class="range-btn" data-range="1y" type="button">1Y</button>
-          <button class="range-btn active" data-range="5y" type="button">5Y</button>
-          <button class="range-btn" data-range="max" type="button">Max</button>
-        </div>
-        <div class="zoom-row">
-          <button class="zoom-btn" id="zoomInBtn" type="button">Zoom In</button>
-          <button class="zoom-btn" id="zoomOutBtn" type="button">Zoom Out</button>
-          <button class="zoom-btn" id="zoomResetBtn" type="button">Reset Zoom</button>
-        </div>
-        <p class="chart-hint">Use the mouse wheel to zoom and drag left/right on the price chart to pan.</p>
-        <div class="chart-wrap">
-          <canvas id="ohlcChart"></canvas>
+        <div class="chart-controls">
+          <label for="priceChartType">Price Type</label>
+          <select id="priceChartType">
+            <option value="candlestick" selected>Candlestick</option>
+            <option value="ohlc">OHLC</option>
+            <option value="line">Line (Close)</option>
+          </select>
         </div>
         <div class="chart-wrap">
-          <canvas id="volumeChart"></canvas>
+          <div id="ohlcStockChart" class="hc-chart"></div>
+          <div id="chartError" class="error" style="display:none; margin-top:10px;"></div>
         </div>
       {% else %}
         <p>No adjusted price data found for charting.</p>
@@ -152,7 +140,6 @@
     </div>
   </div>
   {% if points_count %}
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
       const labels = {{ labels_json|safe }};
       const opens = {{ opens_json|safe }};
@@ -162,307 +149,188 @@
       const volumes = {{ volumes_json|safe }};
       const entryMarkers = {{ entry_markers_json|safe }};
       const exitMarkers = {{ exit_markers_json|safe }};
-      const full = {
-        labels: labels.slice(),
-        opens: opens.slice(),
-        highs: highs.slice(),
-        lows: lows.slice(),
-        closes: closes.slice(),
-        volumes: volumes.slice(),
-        entryMarkers: entryMarkers.slice(),
-        exitMarkers: exitMarkers.slice(),
-      };
-      let currentStartIdx = 0;
-      let currentEndIdx = full.labels.length;
-      const markersByDate = {};
-      for (const m of [...full.entryMarkers, ...full.exitMarkers]) {
-        if (!m || !m.x) continue;
-        if (!markersByDate[m.x]) markersByDate[m.x] = [];
-        markersByDate[m.x].push(m);
+
+      function toTs(dateStr) {
+        return Date.parse(String(dateStr || "") + "T00:00:00Z");
       }
 
-      const tooltipCallbacks = {
-        label: function(context) {
-          const raw = context.raw || {};
-          if (raw.type) {
-            const lines = [raw.type + ": " + context.parsed.y];
-            if (Array.isArray(raw.details)) {
-              for (const d of raw.details) lines.push(d);
+      const ohlc = [];
+      const closeLine = [];
+      const volume = [];
+      for (let i = 0; i < labels.length; i += 1) {
+        const ts = toTs(labels[i]);
+        const o = opens[i];
+        const h = highs[i];
+        const l = lows[i];
+        const c = closes[i];
+        if (!Number.isFinite(ts) || o == null || h == null || l == null || c == null) continue;
+        ohlc.push([ts, Number(o), Number(h), Number(l), Number(c)]);
+        closeLine.push([ts, Number(c)]);
+        if (volumes[i] != null) volume.push([ts, Number(volumes[i])]);
+      }
+
+      const entryPts = entryMarkers
+        .map((m) => ({ x: toTs(m.x), y: Number(m.y), custom: { type: m.type, details: m.details || [] } }))
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const exitPts = exitMarkers
+        .map((m) => ({ x: toTs(m.x), y: Number(m.y), custom: { type: m.type, details: m.details || [] } }))
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      function showChartError(msg) {
+        const el = document.getElementById("chartError");
+        if (!el) return;
+        el.style.display = "block";
+        el.textContent = msg;
+      }
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error("Failed to load " + src));
+          document.head.appendChild(s);
+        });
+      }
+
+      async function ensureHighchartsLoaded() {
+        if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+        const urls = [
+          "https://code.highcharts.com/stock/highstock.js",
+          "https://cdn.jsdelivr.net/npm/highcharts@12.4.0/highstock.js",
+          "https://unpkg.com/highcharts@12.4.0/highstock.js"
+        ];
+        for (const u of urls) {
+          try {
+            await loadScript(u);
+            if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+          } catch (_) {}
+        }
+        return false;
+      }
+
+      function renderChart() {
+        try {
+          const chart = Highcharts.stockChart("ohlcStockChart", {
+        chart: { backgroundColor: "#fbfdff" },
+        rangeSelector: {
+          selected: 4,
+          buttons: [
+            { type: "month", count: 1, text: "1M" },
+            { type: "month", count: 6, text: "6M" },
+            { type: "ytd", text: "YTD" },
+            { type: "year", count: 1, text: "1Y" },
+            { type: "year", count: 5, text: "5Y" },
+            { type: "all", text: "Max" }
+          ]
+        },
+        navigator: { enabled: true },
+        scrollbar: { enabled: true },
+        title: { text: "{{ symbol }} OHLC" },
+        yAxis: [
+          { title: { text: "Price" }, height: "72%", resize: { enabled: true } },
+          { title: { text: "Volume" }, top: "76%", height: "24%", offset: 0 }
+        ],
+        tooltip: { split: true, xDateFormat: "%Y-%m-%d" },
+        plotOptions: {
+          series: { dataGrouping: { enabled: false } },
+          scatter: {
+            tooltip: {
+              pointFormatter: function () {
+                const details = (this.custom && this.custom.details) ? this.custom.details.join(" | ") : "";
+                const t = (this.custom && this.custom.type) ? this.custom.type : this.series.name;
+                return "<span style=\"color:" + this.color + "\">●</span> " + t +
+                  ": <b>" + Highcharts.numberFormat(this.y, 4) + "</b>" + (details ? " | " + details : "") + "<br/>";
+              }
             }
-            return lines;
           }
-          return context.dataset.label + ": " + context.parsed.y;
         },
-        afterBody: function(items) {
-          if (!items || !items.length) return [];
-          const first = items[0];
-          const idx = Number.isInteger(first.dataIndex) ? first.dataIndex : -1;
-          const labelFromIndex = idx >= 0 ? String(ohlcChart.data.labels[idx] || "") : "";
-          const raw = first.raw || {};
-          const parsed = first.parsed || {};
-          const date = String(labelFromIndex || raw.x || parsed.x || first.label || "").slice(0, 10);
-          if (!date) return [];
-          const markers = markersByDate[date] || [];
-          if (!markers.length) return [];
-          const lines = ["Trades:"];
-          for (const marker of markers) {
-            let line = "- " + (marker.type || "Trade");
-            if (Array.isArray(marker.details) && marker.details.length) {
-              line += " | " + marker.details.join(" | ");
-            }
-            lines.push(line);
-          }
-          return lines;
-        }
-      };
-
-      const ohlcChart = new Chart(document.getElementById("ohlcChart"), {
-        type: "line",
-        data: {
-          labels: full.labels.slice(),
-          datasets: [
-            { label: "Open", data: full.opens.slice(), borderColor: "#4a84f5", pointRadius: 0, borderWidth: 1.25, tension: 0 },
-            { label: "High", data: full.highs.slice(), borderColor: "#2e9f5d", pointRadius: 0, borderWidth: 1.25, tension: 0 },
-            { label: "Low", data: full.lows.slice(), borderColor: "#d44d3a", pointRadius: 0, borderWidth: 1.25, tension: 0 },
-            { label: "Close", data: full.closes.slice(), borderColor: "#7e57c2", pointRadius: 0, borderWidth: 1.5, tension: 0 },
-            {
-              label: "Entries",
-              data: full.entryMarkers.slice(),
-              type: "scatter",
-              showLine: false,
-              pointRadius: 4,
-              pointHoverRadius: 6,
-              pointStyle: "triangle",
-              pointBackgroundColor: "#15803d",
-              pointBorderColor: "#166534",
-            },
-            {
-              label: "Exits",
-              data: full.exitMarkers.slice(),
-              type: "scatter",
-              showLine: false,
-              pointRadius: 4,
-              pointHoverRadius: 6,
-              pointStyle: "rectRot",
-              pointBackgroundColor: "#b91c1c",
-              pointBorderColor: "#7f1d1d",
-            },
-          ],
-        },
-        options: {
-          responsive: true,
-          interaction: { mode: "index", intersect: false },
-          plugins: { tooltip: { callbacks: tooltipCallbacks } },
-          scales: {
-            x: { ticks: { maxTicksLimit: 12 } },
-            y: { title: { display: true, text: "Price" } },
+        series: [
+          {
+            type: "candlestick",
+            name: "OHLC",
+            id: "price",
+            data: ohlc,
+            upColor: "#0f9d58",
+            color: "#d44d3a",
+            lineColor: "#d44d3a",
+            upLineColor: "#0f9d58"
           },
-        },
-      });
-
-      const volumeChart = new Chart(document.getElementById("volumeChart"), {
-        type: "bar",
-        data: {
-          labels: full.labels.slice(),
-          datasets: [
-            { label: "Volume", data: full.volumes.slice(), backgroundColor: "rgba(13,106,109,0.45)", borderColor: "#0d6a6d", borderWidth: 1 },
-          ],
-        },
-        options: {
-          responsive: true,
-          scales: {
-            x: { ticks: { maxTicksLimit: 12 } },
-            y: { title: { display: true, text: "Volume" } },
+          {
+            type: "scatter",
+            name: "Entries",
+            yAxis: 0,
+            data: entryPts,
+            color: "#15803d",
+            marker: { symbol: "triangle", radius: 4 }
           },
-        },
-      });
-
-      function parseDate(s) {
-        return new Date(s + "T00:00:00");
-      }
-
-      function cutoffDate(rangeKey, lastDate) {
-        const d = new Date(lastDate.getTime());
-        if (rangeKey === "1m") d.setMonth(d.getMonth() - 1);
-        else if (rangeKey === "6m") d.setMonth(d.getMonth() - 6);
-        else if (rangeKey === "1y") d.setFullYear(d.getFullYear() - 1);
-        else if (rangeKey === "5y") d.setFullYear(d.getFullYear() - 5);
-        else if (rangeKey === "ytd") return new Date(lastDate.getFullYear(), 0, 1);
-        return d;
-      }
-
-      function applyRange(rangeKey) {
-        if (!full.labels.length) return;
-        let startIdx = 0;
-        let endIdx = full.labels.length;
-        if (rangeKey === "5d") {
-          startIdx = Math.max(0, full.labels.length - 5);
-        } else if (rangeKey !== "max") {
-          const lastDate = parseDate(full.labels[full.labels.length - 1]);
-          const cutoff = cutoffDate(rangeKey, lastDate);
-          startIdx = full.labels.findIndex((d) => parseDate(d) >= cutoff);
-          if (startIdx < 0) startIdx = 0;
-        }
-        applyWindow(startIdx, endIdx);
-      }
-
-      function applyWindow(startIdx, endIdx) {
-        if (!full.labels.length) return;
-        currentStartIdx = Math.max(0, Math.min(startIdx, full.labels.length - 1));
-        currentEndIdx = Math.max(currentStartIdx + 1, Math.min(endIdx, full.labels.length));
-        const rangeLabels = full.labels.slice(currentStartIdx, currentEndIdx);
-        const inRange = new Set(rangeLabels);
-        ohlcChart.data.labels = rangeLabels;
-        ohlcChart.data.datasets[0].data = full.opens.slice(currentStartIdx, currentEndIdx);
-        ohlcChart.data.datasets[1].data = full.highs.slice(currentStartIdx, currentEndIdx);
-        ohlcChart.data.datasets[2].data = full.lows.slice(currentStartIdx, currentEndIdx);
-        ohlcChart.data.datasets[3].data = full.closes.slice(currentStartIdx, currentEndIdx);
-        ohlcChart.data.datasets[4].data = full.entryMarkers.filter((m) => inRange.has(m.x));
-        ohlcChart.data.datasets[5].data = full.exitMarkers.filter((m) => inRange.has(m.x));
-        ohlcChart.update();
-
-        volumeChart.data.labels = rangeLabels;
-        volumeChart.data.datasets[0].data = full.volumes.slice(currentStartIdx, currentEndIdx);
-        volumeChart.update();
-      }
-
-      function zoom(factor) {
-        const currentLen = currentEndIdx - currentStartIdx;
-        if (currentLen <= 1) return;
-        let nextLen = Math.round(currentLen * factor);
-        nextLen = Math.max(10, Math.min(full.labels.length, nextLen));
-        if (nextLen === currentLen) return;
-        const center = Math.floor((currentStartIdx + currentEndIdx) / 2);
-        let nextStart = center - Math.floor(nextLen / 2);
-        let nextEnd = nextStart + nextLen;
-        if (nextStart < 0) {
-          nextStart = 0;
-          nextEnd = nextLen;
-        }
-        if (nextEnd > full.labels.length) {
-          nextEnd = full.labels.length;
-          nextStart = Math.max(0, nextEnd - nextLen);
-        }
-        applyWindow(nextStart, nextEnd);
-        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-      }
-
-      function zoomAroundIndex(center, factor) {
-        if (!full.labels.length) return;
-        const currentLen = currentEndIdx - currentStartIdx;
-        let nextLen = Math.round(currentLen * factor);
-        nextLen = Math.max(10, Math.min(full.labels.length, nextLen));
-        if (nextLen === currentLen) return;
-        const clampedCenter = Math.max(0, Math.min(full.labels.length - 1, center));
-        let nextStart = clampedCenter - Math.floor(nextLen / 2);
-        let nextEnd = nextStart + nextLen;
-        if (nextStart < 0) {
-          nextStart = 0;
-          nextEnd = nextLen;
-        }
-        if (nextEnd > full.labels.length) {
-          nextEnd = full.labels.length;
-          nextStart = Math.max(0, nextEnd - nextLen);
-        }
-        applyWindow(nextStart, nextEnd);
-        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-      }
-
-      function panWindow(shift) {
-        if (!full.labels.length || !shift) return;
-        const windowLen = currentEndIdx - currentStartIdx;
-        let nextStart = currentStartIdx + shift;
-        let nextEnd = currentEndIdx + shift;
-        if (nextStart < 0) {
-          nextStart = 0;
-          nextEnd = windowLen;
-        }
-        if (nextEnd > full.labels.length) {
-          nextEnd = full.labels.length;
-          nextStart = Math.max(0, nextEnd - windowLen);
-        }
-        if (nextStart === currentStartIdx && nextEnd === currentEndIdx) return;
-        applyWindow(nextStart, nextEnd);
-        document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-      }
-
-      document.querySelectorAll(".range-btn").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-          btn.classList.add("active");
-          applyRange(btn.dataset.range || "max");
-        });
-      });
-      const zoomInBtn = document.getElementById("zoomInBtn");
-      const zoomOutBtn = document.getElementById("zoomOutBtn");
-      const zoomResetBtn = document.getElementById("zoomResetBtn");
-      if (zoomInBtn) zoomInBtn.addEventListener("click", () => zoom(0.5));
-      if (zoomOutBtn) zoomOutBtn.addEventListener("click", () => zoom(2.0));
-      if (zoomResetBtn) {
-        zoomResetBtn.addEventListener("click", () => {
-          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-          const defaultBtn = document.querySelector('.range-btn[data-range="5y"]');
-          if (defaultBtn) defaultBtn.classList.add("active");
-          applyRange("5y");
-        });
-      }
-
-      let isPanning = false;
-      let panStartX = 0;
-      let panStartIdx = 0;
-      const ohlcCanvas = document.getElementById("ohlcChart");
-      if (ohlcCanvas) {
-        ohlcCanvas.addEventListener("wheel", (event) => {
-          event.preventDefault();
-          const rect = ohlcCanvas.getBoundingClientRect();
-          const width = Math.max(1, rect.width);
-          const relativeX = Math.max(0, Math.min(width, event.clientX - rect.left));
-          const visibleLen = Math.max(1, currentEndIdx - currentStartIdx);
-          const ratio = relativeX / width;
-          const center = currentStartIdx + Math.round((visibleLen - 1) * ratio);
-          zoomAroundIndex(center, event.deltaY < 0 ? 0.8 : 1.25);
-        }, { passive: false });
-
-        ohlcCanvas.addEventListener("mousedown", (event) => {
-          isPanning = true;
-          panStartX = event.clientX;
-          panStartIdx = currentStartIdx;
-          ohlcCanvas.style.cursor = "grabbing";
-        });
-
-        window.addEventListener("mousemove", (event) => {
-          if (!isPanning) return;
-          const rect = ohlcCanvas.getBoundingClientRect();
-          const width = Math.max(1, rect.width);
-          const visibleLen = Math.max(1, currentEndIdx - currentStartIdx);
-          const pixelsPerPoint = width / visibleLen;
-          const deltaX = event.clientX - panStartX;
-          const shift = Math.round(-deltaX / Math.max(1, pixelsPerPoint));
-          const nextStart = panStartIdx + shift;
-          const nextEnd = nextStart + visibleLen;
-          if (nextStart === currentStartIdx && nextEnd === currentEndIdx) return;
-          if (nextStart < 0 || nextEnd > full.labels.length) {
-            panWindow(shift);
-            return;
+          {
+            type: "scatter",
+            name: "Exits",
+            yAxis: 0,
+            data: exitPts,
+            color: "#b91c1c",
+            marker: { symbol: "diamond", radius: 4 }
+          },
+          {
+            type: "column",
+            name: "Volume",
+            yAxis: 1,
+            data: volume,
+            color: "rgba(13,106,109,0.45)"
           }
-          applyWindow(nextStart, nextEnd);
-          document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
-        });
+        ]
+          });
 
-        window.addEventListener("mouseup", () => {
-          if (!isPanning) return;
-          isPanning = false;
-          ohlcCanvas.style.cursor = "";
-        });
-
-        ohlcCanvas.addEventListener("mouseleave", () => {
-          if (!isPanning) return;
-          isPanning = false;
-          ohlcCanvas.style.cursor = "";
-        });
+          const typeSelect = document.getElementById("priceChartType");
+          if (typeSelect) {
+            typeSelect.addEventListener("change", function () {
+              const nextType = String(typeSelect.value || "candlestick");
+              const priceSeries = chart.get("price");
+              if (!priceSeries) return;
+              if (nextType === "line") {
+                priceSeries.update({
+                  type: "line",
+                  name: "Close",
+                  data: closeLine,
+                  color: "#3366cc",
+                  lineWidth: 1.5
+                }, true);
+              } else if (nextType === "ohlc") {
+                priceSeries.update({
+                  type: "ohlc",
+                  name: "OHLC",
+                  data: ohlc,
+                  color: "#224f8f",
+                  lineWidth: 1.2
+                }, true);
+              } else {
+                priceSeries.update({
+                  type: "candlestick",
+                  name: "OHLC",
+                  data: ohlc,
+                  upColor: "#0f9d58",
+                  color: "#d44d3a",
+                  lineColor: "#d44d3a",
+                  upLineColor: "#0f9d58"
+                }, true);
+              }
+            });
+          }
+        } catch (e) {
+          showChartError("Chart render failed: " + (e && e.message ? e.message : "unknown error"));
+        }
       }
 
-      applyRange("5y");
+      ensureHighchartsLoaded().then((ok) => {
+        if (!ok) {
+          showChartError("Highcharts failed to load from all CDNs. Network or CSP is blocking external scripts.");
+          return;
+        }
+        renderChart();
+      });
     </script>
   {% endif %}
 </body>
