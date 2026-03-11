@@ -1,9 +1,13 @@
 from django.urls import path
 
-from .views import labeling_config_form, labeling_symbol_detail
+from .views import (
+    labeling_config_form,
+    labeling_symbol_detail,
+)
 
 
 urlpatterns = [
     path("form/", labeling_config_form, name="labels-config-form"),
     path("symbol/<str:symbol>/", labeling_symbol_detail, name="labels-symbol-detail"),
+    path("symbol/<int:label_run_id>/<str:symbol>/", labeling_symbol_detail, name="labels-symbol-detail-run"),
 ]

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template import engines
+from django.views.decorators.clickjacking import xframe_options_exempt
 
 from fmp.models import EconomicIndicatorSeries, Symbol, SymbolSectionHistorical, TreasuryRateSeries
+from pipeline.models import PipelineRun
 from features.feature_builders import (
     build_event_features,
     build_fundamental_change_features,
@@ -18,6 +22,17 @@ from features.feature_builders import (
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.naming import feature_display_name
+from utils.workflow import (
+    default_feature_symbol,
+    latest_universe_artifact_id,
+    selected_universe_artifact_id,
+    universe_artifact_choices,
+    universe_artifact_name,
+    universe_symbols_from_artifact_id,
+    workflow_symbols_from_request,
+)
+
+from .forms import FeaturePreviewForm
 
 
 def _load_adjusted_prices(symbol_obj: Symbol, start_date, end_date) -> pd.DataFrame:
@@ -75,6 +90,299 @@ def _default_feature_preview_data(symbol: str) -> dict[str, Any]:
         "include_treasury_rates": True,
         "preview_rows": 100,
     }
+
+
+def _default_feature_form_data() -> dict[str, Any]:
+    return {
+        "job_name": "",
+        "include_price_technicals": True,
+        "include_fundamental_change": True,
+        "include_statement_quality": True,
+        "include_event_features": True,
+        "include_ownership_features": True,
+        "include_economic_indicators": True,
+        "include_treasury_rates": True,
+        "preview_rows": 100,
+    }
+
+
+def _feature_form_toggle_data(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = dict(source or {})
+
+    def _as_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    defaults = _default_feature_form_data()
+    return {
+        "include_price_technicals": _as_bool(raw.get("include_price_technicals"), bool(defaults["include_price_technicals"])),
+        "include_fundamental_change": _as_bool(raw.get("include_fundamental_change"), bool(defaults["include_fundamental_change"])),
+        "include_statement_quality": _as_bool(raw.get("include_statement_quality"), bool(defaults["include_statement_quality"])),
+        "include_event_features": _as_bool(raw.get("include_event_features"), bool(defaults["include_event_features"])),
+        "include_ownership_features": _as_bool(raw.get("include_ownership_features"), bool(defaults["include_ownership_features"])),
+        "include_economic_indicators": _as_bool(raw.get("include_economic_indicators"), bool(defaults["include_economic_indicators"])),
+        "include_treasury_rates": _as_bool(raw.get("include_treasury_rates"), bool(defaults["include_treasury_rates"])),
+        "preview_rows": int(raw.get("preview_rows") or defaults["preview_rows"]),
+    }
+
+
+def _empty_feature_preview_result(section_order: list[str]) -> dict[str, Any]:
+    return {
+        "error": "",
+        "summary": {},
+        "feature_columns": [],
+        "grouped_feature_columns": {key: [] for key in section_order},
+        "grouped_feature_samples": {key: [] for key in section_order},
+        "grouped_feature_tables": {key: {"columns": [], "labels": [], "rows": []} for key in section_order},
+        "coverage_rows": [],
+        "feature_sections": [],
+    }
+
+
+def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
+    section_order = [
+        "prices_div_adj",
+        "key_metrics",
+        "ratios",
+        "income_statement",
+        "income_statement_growth",
+        "cash_flow",
+        "cash_flow_growth",
+        "balance_sheet",
+        "balance_sheet_growth",
+        "financial_growth",
+        "earnings",
+        "analyst_estimates",
+        "ratings_historical",
+        "grades_historical",
+        "insider_trading",
+        "economic_indicators",
+        "treasury_rates",
+    ]
+    section_labels = {
+        "prices_div_adj": "Prices Div Adj",
+        "key_metrics": "Key Metrics",
+        "ratios": "Ratios",
+        "income_statement": "Income Statement",
+        "income_statement_growth": "Income Statement Growth",
+        "cash_flow": "Cash Flow",
+        "cash_flow_growth": "Cash Flow Growth",
+        "balance_sheet": "Balance Sheet",
+        "balance_sheet_growth": "Balance Sheet Growth",
+        "financial_growth": "Financial Growth",
+        "earnings": "Earnings",
+        "analyst_estimates": "Analyst Estimates",
+        "ratings_historical": "Ratings Historical",
+        "grades_historical": "Grades Historical",
+        "insider_trading": "Insider Trading",
+        "economic_indicators": "Economic Indicators",
+        "treasury_rates": "Treasury Rates",
+    }
+    return section_order, section_labels
+
+
+def _build_symbol_table_rows(
+    *,
+    symbols: list[str],
+    data: dict[str, Any],
+    section_order: list[str],
+    section_labels: dict[str, str],
+    limit: int = 10,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    columns = [section_labels[key] for key in section_order if bool(data.get(_section_toggle_name(key), True))]
+    rows: list[dict[str, Any]] = []
+    for symbol in list(symbols or [])[:limit]:
+        symbol_obj = Symbol.objects.filter(symbol__iexact=symbol).first()
+        if symbol_obj is None:
+            continue
+        result = _build_feature_preview_result(
+            symbol_obj=symbol_obj,
+            data=data,
+            section_order=section_order,
+            section_labels=section_labels,
+        )
+        coverage_map = {
+            str(row.get("section_label") or ""): int(row.get("count") or 0)
+            for row in list(result.get("coverage_rows") or [])
+        }
+        count_values = [int(coverage_map.get(label) or 0) for label in columns]
+        rows.append(
+            {
+                "symbol": str(symbol_obj.symbol).strip().upper(),
+                "count_values": count_values,
+            }
+        )
+    return columns, rows
+
+
+def _section_toggle_name(section_key: str) -> str:
+    mapping = {
+        "prices_div_adj": "include_price_technicals",
+        "key_metrics": "include_fundamental_change",
+        "ratios": "include_fundamental_change",
+        "income_statement": "include_statement_quality",
+        "income_statement_growth": "include_statement_quality",
+        "cash_flow": "include_statement_quality",
+        "cash_flow_growth": "include_statement_quality",
+        "balance_sheet": "include_statement_quality",
+        "balance_sheet_growth": "include_statement_quality",
+        "financial_growth": "include_statement_quality",
+        "earnings": "include_event_features",
+        "analyst_estimates": "include_event_features",
+        "ratings_historical": "include_event_features",
+        "grades_historical": "include_event_features",
+        "insider_trading": "include_ownership_features",
+        "economic_indicators": "include_economic_indicators",
+        "treasury_rates": "include_treasury_rates",
+    }
+    return mapping.get(section_key, "")
+
+
+def _feature_artifact_statistics(uri: str) -> dict[str, Any]:
+    path = Path(str(uri or "").strip())
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".csv":
+        return {
+            "min_date": None,
+            "max_date": None,
+            "column_count": 0,
+            "feature_column_count": 0,
+            "avg_rows_per_symbol": 0.0,
+            "sample_symbols": [],
+        }
+
+    min_date = None
+    max_date = None
+    fieldnames: list[str] = []
+    per_symbol: dict[str, dict[str, Any]] = {}
+    total_rows = 0
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = list(reader.fieldnames or [])
+        for row in reader:
+            total_rows += 1
+            symbol = str(row.get("symbol") or "").strip().upper()
+            date_value = str(row.get("date") or "").strip()
+            if date_value:
+                min_date = date_value if min_date is None or date_value < min_date else min_date
+                max_date = date_value if max_date is None or date_value > max_date else max_date
+            if not symbol:
+                continue
+            bucket = per_symbol.setdefault(
+                symbol,
+                {"symbol": symbol, "rows": 0, "min_date": None, "max_date": None},
+            )
+            bucket["rows"] += 1
+            if date_value:
+                bucket["min_date"] = date_value if bucket["min_date"] is None or date_value < bucket["min_date"] else bucket["min_date"]
+                bucket["max_date"] = date_value if bucket["max_date"] is None or date_value > bucket["max_date"] else bucket["max_date"]
+
+    feature_columns = [name for name in fieldnames if name not in {"date", "symbol"}]
+    sample_symbols = sorted(
+        per_symbol.values(),
+        key=lambda row: (-int(row["rows"]), str(row["symbol"])),
+    )[:20]
+    avg_rows_per_symbol = (float(total_rows) / float(len(per_symbol))) if per_symbol else 0.0
+    return {
+        "min_date": min_date,
+        "max_date": max_date,
+        "column_count": len(fieldnames),
+        "feature_column_count": len(feature_columns),
+        "avg_rows_per_symbol": avg_rows_per_symbol,
+        "sample_symbols": sample_symbols,
+    }
+
+
+def _recent_feature_job_rows(limit: int = 20, *, include_statistics: bool = True) -> list[dict[str, Any]]:
+    runs = (
+        PipelineRun.objects.filter(requested_job="features")
+        .prefetch_related("artifacts", "job_runs__input_artifacts")
+        .order_by("-created_at", "-id")[:limit]
+    )
+    rows: list[dict[str, Any]] = []
+    for run in runs:
+        artifact = None
+        for candidate in run.artifacts.all():
+            if str(candidate.artifact_type) == "FEATURES":
+                artifact = candidate
+        content = dict((artifact.content if artifact is not None else {}) or {})
+        metadata = dict((artifact.metadata if artifact is not None else {}) or {})
+        universe_artifact_id = int(metadata.get("source_universe_artifact_id") or 0)
+        if not universe_artifact_id:
+            for job_run in run.job_runs.all():
+                input_ids = [int(v) for v in job_run.input_artifacts.values_list("id", flat=True)]
+                if input_ids:
+                    universe_artifact_id = input_ids[0]
+                    break
+        symbols = universe_symbols_from_artifact_id(universe_artifact_id)
+        rows.append(
+            {
+                "pipeline_run_id": int(run.id),
+                "name": str(run.name or ""),
+                "status": str(run.status or ""),
+                "config": dict(run.config or {}),
+                "source_universe_artifact_id": universe_artifact_id,
+                "features_artifact_id": int(artifact.id) if artifact is not None else 0,
+                "rows": int(content.get("rows") or 0),
+                "symbols": int(content.get("symbols") or 0),
+                "symbol_list": symbols,
+                "statistics": (
+                    _feature_artifact_statistics(str((artifact.uri if artifact is not None else "") or ""))
+                    if include_statistics
+                    else {}
+                ),
+                "uri": str((artifact.uri if artifact is not None else "") or ""),
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "error": str(run.error or ""),
+            }
+        )
+    return rows
+
+
+def _universe_job_name_defaults(artifact_choices: list[tuple[str, str]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for artifact_id, _label in artifact_choices:
+        name = universe_artifact_name(int(artifact_id))
+        if name:
+            out[str(artifact_id)] = f"{name} + Features"
+    return out
+
+
+def feature_job_rows_json(request):
+    try:
+        limit = int(request.GET.get("limit") or 20)
+    except Exception:
+        limit = 20
+    limit = max(1, min(100, limit))
+    return JsonResponse({"rows": _recent_feature_job_rows(limit=limit, include_statistics=True)})
+
+
+def feature_symbol_table_json(request):
+    section_order, section_labels = _feature_section_metadata()
+    artifact_id = selected_universe_artifact_id(request)
+    if artifact_id <= 0:
+        artifact_id = latest_universe_artifact_id()
+    symbols = universe_symbols_from_artifact_id(artifact_id)
+    data = _feature_form_toggle_data(request.GET)
+    columns, rows = _build_symbol_table_rows(
+        symbols=symbols,
+        data=data,
+        section_order=section_order,
+        section_labels=section_labels,
+    )
+    return JsonResponse(
+        {
+            "columns": columns,
+            "rows": rows,
+            "universe_artifact_id": artifact_id,
+        }
+    )
 
 
 def _build_feature_preview_result(
@@ -294,49 +602,69 @@ def _build_feature_preview_result(
     }
 
 
-def feature_preview_symbol(request, symbol: str):
-    symbol_obj = get_object_or_404(Symbol, symbol__iexact=symbol)
-    section_order = [
-        "prices_div_adj",
-        "key_metrics",
-        "ratios",
-        "income_statement",
-        "income_statement_growth",
-        "cash_flow",
-        "cash_flow_growth",
-        "balance_sheet",
-        "balance_sheet_growth",
-        "financial_growth",
-        "earnings",
-        "analyst_estimates",
-        "ratings_historical",
-        "grades_historical",
-        "insider_trading",
-        "economic_indicators",
-        "treasury_rates",
-    ]
-    section_labels = {
-        "prices_div_adj": "Prices Div Adj",
-        "key_metrics": "Key Metrics",
-        "ratios": "Ratios",
-        "income_statement": "Income Statement",
-        "income_statement_growth": "Income Statement Growth",
-        "cash_flow": "Cash Flow",
-        "cash_flow_growth": "Cash Flow Growth",
-        "balance_sheet": "Balance Sheet",
-        "balance_sheet_growth": "Balance Sheet Growth",
-        "financial_growth": "Financial Growth",
-        "earnings": "Earnings",
-        "analyst_estimates": "Analyst Estimates",
-        "ratings_historical": "Ratings Historical",
-        "grades_historical": "Grades Historical",
-        "insider_trading": "Insider Trading",
-        "economic_indicators": "Economic Indicators",
-        "treasury_rates": "Treasury Rates",
+@xframe_options_exempt
+def feature_preview_form(request):
+    section_order, section_labels = _feature_section_metadata()
+    artifact_choices = universe_artifact_choices()
+    selected_artifact_id = selected_universe_artifact_id(request)
+    if selected_artifact_id <= 0:
+        selected_artifact_id = latest_universe_artifact_id()
+
+    preferred_symbols = universe_symbols_from_artifact_id(selected_artifact_id)
+    if not preferred_symbols:
+        preferred_symbols = workflow_symbols_from_request(request)
+    initial_symbol = preferred_symbols[0] if preferred_symbols else default_feature_symbol(request)
+    default_universe_name = universe_artifact_name(selected_artifact_id)
+    initial_data = {
+        **_default_feature_form_data(),
+        "job_name": f"{default_universe_name} + Features" if default_universe_name else "",
+        "universe_artifact_id": str(selected_artifact_id) if selected_artifact_id > 0 else "",
     }
-    results = _build_feature_preview_result(
-        symbol_obj=symbol_obj,
-        data=_default_feature_preview_data(symbol_obj.symbol),
+    selected_universe_symbols = preferred_symbols[:200]
+    symbol_table_data = _feature_form_toggle_data(initial_data)
+
+    if request.method == "POST":
+        form = FeaturePreviewForm(
+            request.POST,
+            universe_artifact_choices=artifact_choices,
+        )
+        results = _empty_feature_preview_result(section_order)
+        normalized = ""
+        if form.is_valid():
+            cleaned_data = dict(form.cleaned_data)
+            selected_symbols = universe_symbols_from_artifact_id(int(cleaned_data["universe_artifact_id"]))
+            preview_symbol = selected_symbols[0] if selected_symbols else default_feature_symbol(request)
+            symbol_obj = get_object_or_404(Symbol, symbol__iexact=preview_symbol)
+            cleaned_data["preview_symbol"] = preview_symbol
+            symbol_table_data = _feature_form_toggle_data(cleaned_data)
+            results = _build_feature_preview_result(
+                symbol_obj=symbol_obj,
+                data=cleaned_data,
+                section_order=section_order,
+                section_labels=section_labels,
+            )
+            normalized = json.dumps(cleaned_data, indent=2, sort_keys=True, default=str)
+    else:
+        form = FeaturePreviewForm(
+            initial=initial_data,
+            universe_artifact_choices=artifact_choices,
+        )
+        normalized = json.dumps(initial_data, indent=2, sort_keys=True, default=str)
+        symbol_obj = Symbol.objects.filter(symbol__iexact=initial_symbol).first()
+        results = (
+            _build_feature_preview_result(
+                symbol_obj=symbol_obj,
+                data=initial_data,
+                section_order=section_order,
+                section_labels=section_labels,
+            )
+            if symbol_obj is not None
+            else _empty_feature_preview_result(section_order)
+        )
+
+    symbol_table_columns, symbol_table_rows = _build_symbol_table_rows(
+        symbols=preferred_symbols,
+        data=symbol_table_data,
         section_order=section_order,
         section_labels=section_labels,
     )
@@ -344,6 +672,69 @@ def feature_preview_symbol(request, symbol: str):
     return _render_feature_template(
         request,
         {
+            "form": form,
+            "normalized": normalized,
+            "is_symbol_detail": False,
+            "current_feature_job_id": 0,
+            "universe_missing": not artifact_choices,
+            "universe_job_name_defaults_json": json.dumps(_universe_job_name_defaults(artifact_choices), sort_keys=True),
+            "selected_universe_symbols": selected_universe_symbols,
+            "symbol_table_columns": symbol_table_columns,
+            "symbol_table_rows": symbol_table_rows,
+            "recent_feature_jobs": _recent_feature_job_rows(),
+            **results,
+        },
+    )
+
+
+@xframe_options_exempt
+def feature_preview_symbol(request, symbol: str, feature_run_id: int | None = None):
+    symbol_obj = get_object_or_404(Symbol, symbol__iexact=symbol)
+    section_order, section_labels = _feature_section_metadata()
+    artifact_choices = universe_artifact_choices()
+    run = None
+    if feature_run_id is not None:
+        run = PipelineRun.objects.filter(pk=int(feature_run_id), requested_job="features").first()
+
+    selected_artifact_id = 0
+    initial_data = _default_feature_form_data()
+    if run is not None:
+        initial_data.update(dict(run.config or {}))
+        selected_artifact_id = int(str((run.config or {}).get("universe_artifact_id") or "0").strip() or 0)
+        if selected_artifact_id <= 0:
+            rows = _recent_feature_job_rows(limit=100, include_statistics=False)
+            matched = next((row for row in rows if int(row["pipeline_run_id"]) == int(run.id)), None)
+            selected_artifact_id = int((matched or {}).get("source_universe_artifact_id") or 0)
+    if selected_artifact_id <= 0:
+        selected_artifact_id = selected_universe_artifact_id(request)
+    if selected_artifact_id <= 0:
+        selected_artifact_id = latest_universe_artifact_id()
+
+    initial_data["universe_artifact_id"] = str(selected_artifact_id) if selected_artifact_id > 0 else ""
+    results = _build_feature_preview_result(
+        symbol_obj=symbol_obj,
+        data=initial_data,
+        section_order=section_order,
+        section_labels=section_labels,
+    )
+
+    return _render_feature_template(
+        request,
+        {
+            "form": FeaturePreviewForm(
+                initial=initial_data,
+                universe_artifact_choices=artifact_choices,
+            ),
+            "normalized": json.dumps(initial_data, indent=2, sort_keys=True, default=str),
+            "is_symbol_detail": True,
+            "symbol_detail_title": str(symbol_obj.symbol).strip().upper(),
+            "current_feature_job_id": int(run.id) if run is not None else 0,
+            "universe_missing": not artifact_choices,
+            "universe_job_name_defaults_json": json.dumps(_universe_job_name_defaults(artifact_choices), sort_keys=True),
+            "selected_universe_symbols": [],
+            "symbol_table_columns": [],
+            "symbol_table_rows": [],
+            "recent_feature_jobs": [],
             **results,
         },
     )

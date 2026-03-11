@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from .base import EndpointDefinition
+from .base import build_symbol_endpoint
 
-
-def build(symbol_obj) -> EndpointDefinition:
-    return EndpointDefinition(
-        key="peer_symbols",
-        title="Peer Symbols",
-        kind="snapshot",
-        threshold_days=30,
-        max_rows=100,
-        candidates=[("/stable/stock-peers", {"symbol": symbol_obj.symbol})],
-    )
+build = build_symbol_endpoint(
+    key="peer_symbols",
+    title="Peer Symbols",
+    kind="snapshot",
+    threshold_days=30,
+    max_rows=100,
+    candidate_path="/stable/stock-peers",
+)

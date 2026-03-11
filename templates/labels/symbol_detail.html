@@ -21,15 +21,17 @@
     .chart-controls { display: flex; gap: 8px; align-items: center; margin: 8px 0 6px; }
     .chart-controls label { font-size: 0.86rem; color: #425062; }
     .chart-controls select { border: 1px solid #c7d2df; border-radius: 6px; padding: 4px 8px; background: #fff; }
+    .pager { display: flex; gap: 10px; align-items: center; margin-top: 10px; font-size: 0.88rem; color: #3f4d5d; }
+    .pager a { border: 1px solid #c7d2df; border-radius: 6px; padding: 4px 8px; background: #fff; }
   </style>
 </head>
 <body>
   <div class="card">
+    <h2>Normalized Config</h2>
+    <pre>{{ normalized }}</pre>
     <p><a href="/labels/form/">Back to Labeling Form</a></p>
     <h1>{{ symbol }} Trades</h1>
     <div class="panel">
-      <h2>Normalized Config</h2>
-      <pre>{{ normalized }}</pre>
       {% if trades_error %}
         <div class="error">{{ trades_error }}</div>
       {% endif %}
@@ -102,6 +104,12 @@
       {% endif %}
       {% if trades_rows %}
         <h2>Trades</h2>
+        <div class="pager">
+          <span>Showing {{ trades_rows|length }} of {{ trades_total_count }} trades</span>
+          <span>Page {{ trades_page }} / {{ trades_total_pages }}</span>
+          {% if trades_has_prev %}<a href="{{ trades_prev_href }}">Previous</a>{% endif %}
+          {% if trades_has_next %}<a href="{{ trades_next_href }}">Next</a>{% endif %}
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -133,6 +141,11 @@
               {% endfor %}
             </tbody>
           </table>
+        </div>
+        <div class="pager">
+          <span>Page {{ trades_page }} / {{ trades_total_pages }}</span>
+          {% if trades_has_prev %}<a href="{{ trades_prev_href }}">Previous</a>{% endif %}
+          {% if trades_has_next %}<a href="{{ trades_next_href }}">Next</a>{% endif %}
         </div>
       {% else %}
         <p>No trades generated for this symbol.</p>

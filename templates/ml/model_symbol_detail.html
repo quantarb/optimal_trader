@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ artifact.name }} | {{ symbol }}</title>
+  <style>
+    :root {
+      --bg: #f3f6f2;
+      --panel: #ffffff;
+      --ink: #1f2b24;
+      --muted: #5f7066;
+      --line: #cfdbd0;
+      --accent: #1c6b4a;
+    }
+    body { margin: 0; font-family: "Avenir Next", "Trebuchet MS", sans-serif; background: linear-gradient(160deg, #f7faf6, var(--bg)); color: var(--ink); }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 28px 20px 40px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+    .link { color: var(--accent); text-decoration: none; font-weight: 700; }
+    .link:hover { text-decoration: underline; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 12px 30px rgba(25, 44, 28, 0.06); }
+    h1 { margin: 0 0 8px; font-size: 2rem; }
+    p { color: var(--muted); }
+    .hc-chart { width: 100%; height: 620px; margin-top: 10px; }
+    .table-wrap { margin-top: 16px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #e7efe8; white-space: nowrap; }
+    th { background: #f4f8f4; position: sticky; top: 0; }
+    .empty { color: var(--muted); font-style: italic; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="link" href="{% url 'model_artifact_detail' artifact.id %}">Back to Model</a>
+      <a class="link" href="/pipeline/research/symbol/{{ symbol }}/">Open Research Workspace</a>
+    </div>
+    <div class="panel">
+      <h1>{{ artifact.name }} v{{ artifact.version }} | {{ symbol }}</h1>
+      <p>Saved model predictions overlaid on adjusted price history for this symbol.</p>
+      {% if price_points_count %}
+        <div id="predictionChart" class="hc-chart"></div>
+        <div id="chartError" class="empty" style="display:none; margin-top:10px;"></div>
+      {% else %}
+        <p class="empty">No adjusted price history is available for charting.</p>
+      {% endif %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Prediction</th>
+              <th>Prediction Score</th>
+              <th>Label</th>
+              <th>Market Position</th>
+              <th>Trade Return</th>
+              <th>Hold Days</th>
+              <th>Side</th>
+              <th>Freq</th>
+              <th>k</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in prediction_rows %}
+              <tr>
+                <td>{{ row.date|default:"-" }}</td>
+                <td>{{ row.prediction|default:"-" }}</td>
+                <td>{{ row.prediction_score|default:"-" }}</td>
+                <td>{{ row.label|default:"-" }}</td>
+                <td>{{ row.market_position|default:"-" }}</td>
+                <td>{{ row.trade_return|default:"-" }}</td>
+                <td>{{ row.hold_days|default:"-" }}</td>
+                <td>{{ row.side|default:"-" }}</td>
+                <td>{{ row.freq|default:"-" }}</td>
+                <td>{{ row.k|default:"-" }}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="10" class="empty">No saved prediction rows are available for this symbol.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% if price_points_count %}
+    <script>
+      const labels = {{ labels_json|safe }};
+      const opens = {{ opens_json|safe }};
+      const highs = {{ highs_json|safe }};
+      const lows = {{ lows_json|safe }};
+      const closes = {{ closes_json|safe }};
+      const predictionSeries = {{ prediction_series_json|safe }};
+
+      function toTs(dateStr) {
+        return Date.parse(String(dateStr || "") + "T00:00:00Z");
+      }
+
+      const ohlc = [];
+      for (let i = 0; i < labels.length; i += 1) {
+        const ts = toTs(labels[i]);
+        const o = opens[i];
+        const h = highs[i];
+        const l = lows[i];
+        const c = closes[i];
+        if (!Number.isFinite(ts) || o == null || h == null || l == null || c == null) continue;
+        ohlc.push([ts, Number(o), Number(h), Number(l), Number(c)]);
+      }
+
+      const predictionPts = predictionSeries.map((row) => ({
+        x: toTs(row.x),
+        y: Number(row.score),
+        custom: row
+      })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      function showChartError(msg) {
+        const el = document.getElementById("chartError");
+        if (!el) return;
+        el.style.display = "block";
+        el.textContent = msg;
+      }
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error("Failed to load " + src));
+          document.head.appendChild(s);
+        });
+      }
+
+      async function ensureHighchartsLoaded() {
+        if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+        const urls = [
+          "https://code.highcharts.com/stock/highstock.js",
+          "https://cdn.jsdelivr.net/npm/highcharts@12.4.0/highstock.js",
+          "https://unpkg.com/highcharts@12.4.0/highstock.js"
+        ];
+        for (const u of urls) {
+          try {
+            await loadScript(u);
+            if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+          } catch (_) {}
+        }
+        return false;
+      }
+
+      function renderChart() {
+        Highcharts.stockChart("predictionChart", {
+          chart: { backgroundColor: "#fbfefb" },
+          rangeSelector: { selected: 4 },
+          legend: { enabled: true },
+          yAxis: [
+            { title: { text: "Price" }, height: "70%" },
+            { title: { text: "Prediction Score" }, top: "74%", height: "26%", min: 0, max: 1 }
+          ],
+          tooltip: {
+            formatter: function () {
+              const c = (this.point && this.point.custom) || {};
+              let text = Highcharts.dateFormat("%Y-%m-%d", this.x) + "<br/>";
+              text += "<b>" + Highcharts.numberFormat(this.y, 4) + "</b><br/>";
+              if (c.prediction !== null && c.prediction !== undefined) text += "Prediction: " + c.prediction + "<br/>";
+              if (c.label !== null && c.label !== undefined) text += "Label: " + c.label + "<br/>";
+              if (c.trade_return !== null && c.trade_return !== undefined) text += "Trade Return: " + Highcharts.numberFormat(c.trade_return * 100.0, 2) + "%<br/>";
+              return text;
+            }
+          },
+          series: [
+            { type: "candlestick", name: "Adjusted Price", yAxis: 0, data: ohlc },
+            { type: "line", name: "Prediction Score", yAxis: 1, data: predictionPts, color: "#1d4ed8", lineWidth: 2.2 }
+          ]
+        });
+      }
+
+      ensureHighchartsLoaded().then((ok) => {
+        if (!ok) {
+          showChartError("Highcharts failed to load from all CDNs. Network or CSP is blocking external scripts.");
+          return;
+        }
+        renderChart();
+      });
+    </script>
+  {% endif %}
+</body>
+</html>

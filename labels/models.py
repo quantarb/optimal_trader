@@ -1,4 +1,1 @@
-from django.db import models
-
-# Labeling logic currently lives in pure-python modules under this app.
-# Add ORM models here when/if you persist labeling artifacts.
+"""Labels app has no standalone Django models in the pipeline-only workflow."""

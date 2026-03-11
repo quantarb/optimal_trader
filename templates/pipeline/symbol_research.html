@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ symbol }} Research</title>
+  <style>
+    :root {
+      --bg: #f4f7f2;
+      --panel: #ffffff;
+      --ink: #16231c;
+      --muted: #617267;
+      --line: #d4ddd3;
+      --accent: #1d6b55;
+      --accent-soft: #e4f1eb;
+    }
+    body { margin: 0; font-family: "Avenir Next", "Trebuchet MS", sans-serif; background: radial-gradient(circle at top, #f9fcf7, var(--bg)); color: var(--ink); }
+    .shell { max-width: 1380px; margin: 0 auto; padding: 28px 18px 40px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+    .link { color: var(--accent); text-decoration: none; font-weight: 700; }
+    .link:hover { text-decoration: underline; }
+    .hero { background: linear-gradient(145deg, #fbfffc, #f1f7f2); border: 1px solid var(--line); border-radius: 20px; padding: 20px; box-shadow: 0 14px 34px rgba(21, 42, 29, 0.06); }
+    h1 { margin: 0 0 6px; font-size: 2.3rem; }
+    p { color: var(--muted); }
+    .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 16px; }
+    .field { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+    .field label { display: block; font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+    .field select { width: 100%; border: 1px solid #c3d0c6; border-radius: 8px; padding: 8px 10px; background: #fff; color: var(--ink); }
+    .btn-row { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 10px; padding: 9px 14px; cursor: pointer; font-weight: 700; }
+    .btn.secondary { background: #fff; color: var(--accent); }
+    .grid { display: grid; grid-template-columns: 2.2fr 1fr; gap: 16px; margin-top: 18px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 16px; box-shadow: 0 10px 24px rgba(21, 42, 29, 0.04); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 14px; }
+    .stat { border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: var(--accent-soft); }
+    .stat strong { display: block; font-size: 1.1rem; }
+    .hc-chart { width: 100%; height: 620px; }
+    .subgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 12px; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e6eee6; white-space: nowrap; }
+    th { background: #f3f8f3; position: sticky; top: 0; }
+    .muted-small { font-size: 0.84rem; color: var(--muted); }
+    .empty { color: var(--muted); font-style: italic; }
+    @media (max-width: 1024px) {
+      .grid, .subgrid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="link" href="/pipeline/ui/">Back to Pipeline</a>
+      <a class="link" href="/pipeline/stock/{{ symbol }}/">Stock Intelligence</a>
+      <a class="link" href="/pipeline/opportunities/">Opportunities</a>
+      <a class="link" href="/pipeline/market-situations/">Market Situations</a>
+      <a class="link" href="/fmp/symbol/{{ symbol }}/chart/">Price Chart</a>
+    </div>
+
+    <div class="hero">
+      <h1>{{ symbol }} Research Workspace</h1>
+      <p>Overlay saved label runs, feature rows, and prediction artifacts on top of adjusted price history.</p>
+      <form method="get">
+        <div class="filters">
+          <div class="field">
+            <label for="label_artifact_id">Label Artifact</label>
+            <select id="label_artifact_id" name="label_artifact_id">
+              <option value="">Latest LABELS artifact</option>
+              {% for artifact in label_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if label_artifact and artifact.id == label_artifact.id %} selected{% endif %}>#{{ artifact.id }} | run #{{ artifact.pipeline_run_id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="feature_artifact_id">Feature Artifact</label>
+            <select id="feature_artifact_id" name="feature_artifact_id">
+              <option value="">Latest FEATURES artifact</option>
+              {% for artifact in feature_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if feature_artifact and artifact.id == feature_artifact.id %} selected{% endif %}>#{{ artifact.id }} | run #{{ artifact.pipeline_run_id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="strategy_artifact_id">Strategy Artifact</label>
+            <select id="strategy_artifact_id" name="strategy_artifact_id">
+              <option value="">Latest STRATEGY_DATASET artifact</option>
+              {% for artifact in strategy_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if strategy_artifact and artifact.id == strategy_artifact.id %} selected{% endif %}>#{{ artifact.id }} | run #{{ artifact.pipeline_run_id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="backtest_artifact_id">Backtest Artifact</label>
+            <select id="backtest_artifact_id" name="backtest_artifact_id">
+              <option value="">Latest BACKTEST_RESULT artifact</option>
+              {% for artifact in backtest_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if backtest_artifact and artifact.id == backtest_artifact.id %} selected{% endif %}>#{{ artifact.id }} | run #{{ artifact.pipeline_run_id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field">
+            <label for="prediction_artifact_id">Prediction Artifact</label>
+            <select id="prediction_artifact_id" name="prediction_artifact_id" multiple size="6">
+              {% for artifact in prediction_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if artifact.id in selected_prediction_artifact_ids %} selected{% endif %}>#{{ artifact.id }} | run #{{ artifact.pipeline_run_id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+            <p class="muted-small">Hold command/control to select multiple models.</p>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" type="submit">Load Workspace</button>
+          <a class="btn secondary" href="/pipeline/research/symbol/{{ symbol }}/">Reset</a>
+        </div>
+      </form>
+      <div class="stats">
+        <div class="stat"><span class="muted-small">Price Points</span><strong>{{ price_points_count }}</strong></div>
+        <div class="stat"><span class="muted-small">Label Rows</span><strong>{{ label_rows_count }}</strong></div>
+        <div class="stat"><span class="muted-small">Prediction Rows</span><strong>{{ prediction_rows_count }}</strong></div>
+        <div class="stat"><span class="muted-small">Strategy Rows</span><strong>{{ strategy_rows_count }}</strong></div>
+        <div class="stat"><span class="muted-small">Backtest Rows</span><strong>{{ backtest_rows_count }}</strong></div>
+        <div class="stat"><span class="muted-small">Feature Rows</span><strong>{{ feature_rows_count }}</strong></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Price + Overlays</h2>
+        {% if price_points_count %}
+          <div id="researchChart" class="hc-chart"></div>
+          <div id="chartError" class="empty" style="display:none; margin-top:12px;"></div>
+        {% else %}
+          <p class="empty">No adjusted price history is available for this symbol.</p>
+        {% endif %}
+      </div>
+      <div class="panel">
+        <h2>Selected Artifacts</h2>
+        <p class="muted-small">Label: {% if label_artifact %}#{{ label_artifact.id }} from run #{{ label_artifact.pipeline_run_id }}{% else %}none{% endif %}</p>
+        <p class="muted-small">Features: {% if feature_artifact %}#{{ feature_artifact.id }} from run #{{ feature_artifact.pipeline_run_id }}{% else %}none{% endif %}</p>
+        <p class="muted-small">Strategy: {% if strategy_artifact %}#{{ strategy_artifact.id }} from run #{{ strategy_artifact.pipeline_run_id }}{% else %}none{% endif %}</p>
+        <p class="muted-small">Backtest: {% if backtest_artifact %}#{{ backtest_artifact.id }} from run #{{ backtest_artifact.pipeline_run_id }}{% else %}none{% endif %}</p>
+        <p class="muted-small">Predictions:
+          {% if prediction_artifacts %}
+            {% for artifact in prediction_artifacts %}
+              #{{ artifact.id }} from run #{{ artifact.pipeline_run_id }}{% if not forloop.last %}, {% endif %}
+            {% endfor %}
+          {% else %}
+            none
+          {% endif %}
+        </p>
+        {% if label_artifact %}
+          <p><a class="link" href="/pipeline/artifacts/{{ label_artifact.id }}/">Open label artifact</a> | <a class="link" href="/pipeline/artifacts/{{ label_artifact.id }}/preview/">JSON preview</a></p>
+        {% endif %}
+        {% if feature_artifact %}
+          <p><a class="link" href="/pipeline/artifacts/{{ feature_artifact.id }}/">Open feature artifact</a> | <a class="link" href="/pipeline/artifacts/{{ feature_artifact.id }}/preview/">JSON preview</a></p>
+        {% endif %}
+        {% if strategy_artifact %}
+          <p><a class="link" href="/pipeline/artifacts/{{ strategy_artifact.id }}/">Open strategy artifact</a> | <a class="link" href="/pipeline/artifacts/{{ strategy_artifact.id }}/preview/">JSON preview</a></p>
+        {% endif %}
+        {% if backtest_artifact %}
+          <p><a class="link" href="/pipeline/artifacts/{{ backtest_artifact.id }}/">Open backtest artifact</a> | <a class="link" href="/pipeline/artifacts/{{ backtest_artifact.id }}/preview/">JSON preview</a></p>
+        {% endif %}
+        {% for artifact in prediction_artifacts %}
+          <p><a class="link" href="/pipeline/artifacts/{{ artifact.id }}/">Open prediction artifact #{{ artifact.id }}</a> | <a class="link" href="/pipeline/artifacts/{{ artifact.id }}/preview/">JSON preview</a></p>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="subgrid">
+      <div class="panel">
+        <h2>Prediction Rows</h2>
+        {% if prediction_rows %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Source</th>
+                  <th>Score</th>
+                  <th>Prediction</th>
+                  <th>Label</th>
+                  <th>Return</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in prediction_rows %}
+                  <tr>
+                    <td>{{ row.date|default:"-" }}</td>
+                    <td>{{ row.source_artifact_type|default:"-" }} #{{ row.source_artifact_id|default:"-" }}</td>
+                    <td>{{ row.prediction_score|default:"-" }}</td>
+                    <td>{{ row.prediction|default:"-" }}</td>
+                    <td>{{ row.label|default:"-" }}</td>
+                    <td>{{ row.trade_return|default:"-" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No saved prediction rows were found for the selected artifact.</p>
+        {% endif %}
+      </div>
+      <div class="panel">
+        <h2>Feature Preview</h2>
+        {% if feature_rows %}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  {% for col in feature_display_columns %}
+                    <th>{{ col }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row_values in feature_rendered_values %}
+                  <tr>
+                    {% for value in row_values %}
+                      <td>{{ value|default:"-" }}</td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="empty">No saved feature rows were found for the selected artifact.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if price_points_count %}
+    <script>
+      const labels = {{ labels_json|safe }};
+      const opens = {{ opens_json|safe }};
+      const highs = {{ highs_json|safe }};
+      const lows = {{ lows_json|safe }};
+      const closes = {{ closes_json|safe }};
+      const volumes = {{ volumes_json|safe }};
+      const entryMarkers = {{ entry_markers_json|safe }};
+      const exitMarkers = {{ exit_markers_json|safe }};
+      const tradeLines = {{ trade_lines_json|safe }};
+      const predictionSeriesCollection = {{ prediction_series_collection_json|safe }};
+      const strategyMarkers = {{ strategy_markers_json|safe }};
+      const strategyScoreSeries = {{ strategy_score_series_json|safe }};
+      const backtestMarkers = {{ backtest_markers_json|safe }};
+
+      function toTs(dateStr) {
+        return Date.parse(String(dateStr || "") + "T00:00:00Z");
+      }
+
+      const ohlc = [];
+      const closeLine = [];
+      const volume = [];
+      for (let i = 0; i < labels.length; i += 1) {
+        const ts = toTs(labels[i]);
+        const o = opens[i];
+        const h = highs[i];
+        const l = lows[i];
+        const c = closes[i];
+        if (!Number.isFinite(ts) || o == null || h == null || l == null || c == null) continue;
+        ohlc.push([ts, Number(o), Number(h), Number(l), Number(c)]);
+        closeLine.push([ts, Number(c)]);
+        if (volumes[i] != null) volume.push([ts, Number(volumes[i])]);
+      }
+
+      const entryPts = entryMarkers.map((m) => ({
+        x: toTs(m.x),
+        y: Number(m.y),
+        custom: { type: m.type, details: m.details || [] }
+      })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const exitPts = exitMarkers.map((m) => ({
+        x: toTs(m.x),
+        y: Number(m.y),
+        custom: { type: m.type, details: m.details || [] }
+      })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const strategyPts = strategyMarkers.map((m) => {
+        const ts = toTs(m.x);
+        const y = closes[labels.indexOf(m.x)];
+        return {
+          x: ts,
+          y: Number(y),
+          custom: { type: m.type, details: m.details || [], signal: m.signal }
+        };
+      }).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const backtestPts = backtestMarkers.map((m) => {
+        const ts = toTs(m.x);
+        const y = closes[labels.indexOf(m.x)];
+        return {
+          x: ts,
+          y: Number(y),
+          custom: { type: m.type, details: m.details || [], signal: m.signal, realized_return: m.realized_return }
+        };
+      }).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      const tradeLineSeries = [];
+      for (const t of tradeLines || []) {
+        const x1 = toTs(t.entry_x);
+        const y1 = Number(t.entry_y);
+        const x2 = toTs(t.exit_x);
+        const y2 = Number(t.exit_y);
+        if (!Number.isFinite(x1) || !Number.isFinite(y1) || !Number.isFinite(x2) || !Number.isFinite(y2)) continue;
+        const isLong = String(t.side || "").toLowerCase() === "long";
+        tradeLineSeries.push({
+          type: "line",
+          name: "Trade",
+          yAxis: 0,
+          data: [{ x: x1, y: y1 }, { x: x2, y: y2 }],
+          color: isLong ? "rgba(22, 163, 74, 0.8)" : "rgba(220, 38, 38, 0.8)",
+          lineWidth: 1.6,
+          marker: { enabled: false },
+          enableMouseTracking: false,
+          showInLegend: false,
+          zIndex: 2,
+        });
+      }
+
+      const predictionLineSeries = (predictionSeriesCollection || []).map((group, idx) => {
+        const points = (group.series || []).map((row) => {
+          const ts = toTs(row.x);
+          const rawScore = Number(row.score);
+          if (!Number.isFinite(ts) || !Number.isFinite(rawScore)) return null;
+          return {
+            x: ts,
+            y: rawScore,
+            custom: {
+              ...row,
+              source_name: group.name,
+              source_artifact_id: group.artifact_id,
+              source_artifact_type: group.artifact_type,
+            }
+          };
+        }).filter(Boolean);
+        return {
+          type: "line",
+          name: group.name || `Prediction ${idx + 1}`,
+          yAxis: 1,
+          data: points,
+          lineWidth: 2.2,
+          dashStyle: idx % 2 === 0 ? "Solid" : "ShortDash",
+          tooltip: { valueDecimals: 4 }
+        };
+      }).filter((s) => Array.isArray(s.data) && s.data.length);
+
+      const strategyScorePts = (strategyScoreSeries || []).map((row) => ({
+        x: toTs(row.x),
+        y: Number(row.score),
+        custom: row
+      })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+      function showChartError(msg) {
+        const el = document.getElementById("chartError");
+        if (!el) return;
+        el.style.display = "block";
+        el.textContent = msg;
+      }
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          s.onload = () => resolve(true);
+          s.onerror = () => reject(new Error("Failed to load " + src));
+          document.head.appendChild(s);
+        });
+      }
+
+      async function ensureHighchartsLoaded() {
+        if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+        const urls = [
+          "https://code.highcharts.com/stock/highstock.js",
+          "https://cdn.jsdelivr.net/npm/highcharts@12.4.0/highstock.js",
+          "https://unpkg.com/highcharts@12.4.0/highstock.js"
+        ];
+        for (const u of urls) {
+          try {
+            await loadScript(u);
+            if (typeof Highcharts !== "undefined" && typeof Highcharts.stockChart === "function") return true;
+          } catch (_) {}
+        }
+        return false;
+      }
+
+      function renderChart() {
+        Highcharts.stockChart("researchChart", {
+          chart: { backgroundColor: "#fbfefb" },
+          rangeSelector: { selected: 4 },
+          legend: { enabled: true },
+          yAxis: [
+            { title: { text: "Price" }, height: "67%" },
+            { title: { text: "Prediction Score" }, top: "70%", height: "14%" },
+            { title: { text: "Volume" }, top: "86%", height: "14%" }
+          ],
+          tooltip: {
+            shared: true,
+            formatter: function () {
+              try {
+                const points = Array.isArray(this.points) ? this.points : [this.point || this];
+                const hoverX = typeof this.x === "number" ? this.x : (points[0] ? points[0].x : NaN);
+                if (!Number.isFinite(hoverX)) return false;
+                const lines = ["<b>" + Highcharts.dateFormat("%Y-%m-%d", hoverX) + "</b>"];
+                for (const item of points) {
+                  if (!item || !item.series) continue;
+                  const point = item.point || {};
+                  const custom = point.custom || {};
+                  const name = String(item.series.name || "");
+                  if (name === "Adjusted Price") {
+                    const open = Number(point.open);
+                    const high = Number(point.high);
+                    const low = Number(point.low);
+                    const close = Number(point.close);
+                    if ([open, high, low, close].every((v) => Number.isFinite(v))) {
+                      lines.push(`Price: O ${Highcharts.numberFormat(open, 4)} | H ${Highcharts.numberFormat(high, 4)} | L ${Highcharts.numberFormat(low, 4)} | C ${Highcharts.numberFormat(close, 4)}`);
+                    }
+                    continue;
+                  }
+                  if (name === "Volume") {
+                    const vol = Number(item.y);
+                    if (Number.isFinite(vol)) lines.push(`Volume: ${Highcharts.numberFormat(vol, 0)}`);
+                    continue;
+                  }
+                  if (custom.source_name) {
+                    const indicator = Number(item.y);
+                    if (Number.isFinite(indicator)) {
+                      lines.push(`${custom.source_name}: ${Highcharts.numberFormat(indicator, 4)}`);
+                    }
+                    continue;
+                  }
+                  if (name === "Strategy Score") {
+                    if (Number.isFinite(Number(item.y))) lines.push(`Strategy Score: ${Highcharts.numberFormat(Number(item.y), 4)}`);
+                    continue;
+                  }
+                  if (custom.type) {
+                    const markerValue = Number(item.y);
+                    lines.push(`${name}: ${custom.type}${Number.isFinite(markerValue) ? ` @ ${Highcharts.numberFormat(markerValue, 4)}` : ""}`);
+                    if (Array.isArray(custom.details) && custom.details.length) {
+                      const summary = custom.details.filter(Boolean).slice(-1)[0];
+                      if (summary) lines.push(summary);
+                    }
+                    continue;
+                  }
+                  if (Number.isFinite(Number(item.y))) {
+                    lines.push(`${name}: ${Highcharts.numberFormat(Number(item.y), 4)}`);
+                  }
+                }
+                return lines.join("<br/>");
+              } catch (_err) {
+                return "<b>" + Highcharts.dateFormat("%Y-%m-%d", this.x || 0) + "</b>";
+              }
+            }
+          },
+          series: [
+            { id: "price", type: "candlestick", name: "Adjusted Price", data: ohlc, zIndex: 3 },
+            { type: "scatter", name: "Entries", yAxis: 0, data: entryPts, color: "#15803d", marker: { symbol: "triangle", radius: 6 } },
+            { type: "scatter", name: "Exits", yAxis: 0, data: exitPts, color: "#b91c1c", marker: { symbol: "triangle-down", radius: 6 } },
+            { type: "scatter", name: "Strategy Actions", yAxis: 0, data: strategyPts, color: "#7c3aed", marker: { symbol: "diamond", radius: 5 } },
+            { type: "scatter", name: "Backtest Trades", yAxis: 0, data: backtestPts, color: "#ea580c", marker: { symbol: "circle", radius: 4 } },
+            ...predictionLineSeries,
+            { type: "line", name: "Strategy Score", yAxis: 1, data: strategyScorePts, color: "#7c3aed", lineWidth: 1.8, dashStyle: "Dot", tooltip: { valueDecimals: 4 } },
+            { type: "column", name: "Volume", yAxis: 2, data: volume, color: "rgba(111, 143, 125, 0.35)" },
+            ...tradeLineSeries
+          ]
+        });
+      }
+
+      ensureHighchartsLoaded().then((ok) => {
+        if (!ok) {
+          showChartError("Highcharts failed to load from all CDNs. Network or CSP is blocking external scripts.");
+          return;
+        }
+        renderChart();
+      });
+    </script>
+  {% endif %}
+</body>
+</html>

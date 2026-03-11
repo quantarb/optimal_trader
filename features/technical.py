@@ -6,7 +6,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import pandas as pd
 
-from modules.utils.normalize import normalize_cols
+from utils.normalize import normalize_cols
 
 
 # Base columns that must exist in prices
@@ -135,9 +135,6 @@ def compute_features_worldclass(df: pd.DataFrame) -> pd.DataFrame:
 
     for n in [2, 3, 5, 10, 20, 63, 126, 252]:
         feats[f"Ret{n}d"] = close.pct_change(n)
-
-    for n in [5, 10, 20, 63]:
-        feats[f"CumRet{n}d"] = (1.0 + ret_1d).rolling(n).apply(np.prod, raw=True) - 1.0
 
     # ========================================================
     # 2) Trend (moving averages, slopes, MACD)

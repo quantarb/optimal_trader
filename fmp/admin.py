@@ -15,6 +15,7 @@ from .models import (
     SymbolSectionState,
     TreasuryRateObservation,
     TreasuryRateSeries,
+    UniverseDownloadJob,
 )
 
 
@@ -132,3 +133,22 @@ class SymbolSectionHistoricalAdmin(admin.ModelAdmin):
     list_filter = ("section_key",)
     search_fields = ("symbol__symbol", "section_key", "record_key")
     ordering = ("symbol__symbol", "section_key", "-record_date")
+
+
+@admin.register(UniverseDownloadJob)
+class UniverseDownloadJobAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "status",
+        "total",
+        "completed",
+        "success_count",
+        "failed_count",
+        "current_symbol",
+        "created_at",
+        "updated_at",
+        "finished_at",
+    )
+    list_filter = ("status", "created_at")
+    search_fields = ("id", "current_symbol", "celery_task_id")
+    ordering = ("-created_at",)

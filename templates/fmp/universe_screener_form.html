@@ -241,6 +241,85 @@
       box-shadow: 0 9px 18px rgba(13, 106, 109, 0.32);
     }
 
+    .result-actions {
+      margin: 10px 0 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .download-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .download-name {
+      min-width: 220px;
+      max-width: 320px;
+    }
+
+    .download-btn {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 700;
+      color: #fff;
+      background: linear-gradient(120deg, #1f4f88, #2e6eaf);
+      cursor: pointer;
+      box-shadow: 0 6px 14px rgba(25, 70, 122, 0.25);
+    }
+
+    .download-btn[disabled] {
+      opacity: 0.6;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .download-status {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .progress-panel {
+      display: none;
+      border: 1px solid #d5dfeb;
+      border-radius: 10px;
+      padding: 10px;
+      background: #f8fbff;
+    }
+
+    .progress-track {
+      height: 12px;
+      width: 100%;
+      background: #d8e3f2;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, #1f4f88, #2e6eaf);
+      transition: width 180ms ease;
+    }
+
+    .progress-meta {
+      font-size: 0.86rem;
+      color: #455a74;
+      margin-top: 4px;
+    }
+
+    .progress-errors {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: #8a1b1b;
+      font-size: 0.82rem;
+      max-height: 120px;
+      overflow: auto;
+    }
+
     .error {
       margin: 0 16px 12px;
       border: 1px solid #f1c8c8;
@@ -395,6 +474,13 @@
         <form method="post">
           {% csrf_token %}
           <div class="group-title">General</div>
+          <div class="field full">
+            <label for="{{ form.data_source.id_for_label }}">{{ form.data_source.label }}</label>
+            {{ form.data_source }}
+            {% if form.data_source.errors %}
+              <div class="field-error">{{ form.data_source.errors|join:", " }}</div>
+            {% endif %}
+          </div>
           <div class="field full">
             <label for="{{ form.limit.id_for_label }}">{{ form.limit.label }}</label>
             {{ form.limit }}
@@ -583,6 +669,22 @@
         <div class="result-wrap">
           {% if records %}
             <div class="stat">Rows returned: {{ count }}</div>
+            <div class="stat">Source: {{ data_source_label }}</div>
+            <div class="result-actions">
+              <div class="download-row">
+                <button type="button" class="download-btn" id="download-all-btn">Save Universe Artifact</button>
+                <input type="text" class="download-name" id="download-run-name" placeholder="Run name (optional)">
+                <span class="download-status" id="download-status">Ready to persist universe output.</span>
+              </div>
+              <div class="progress-panel" id="download-progress-panel">
+                <div class="progress-track">
+                  <div class="progress-fill" id="download-progress-fill"></div>
+                </div>
+                <div class="progress-meta" id="download-progress-label">0%</div>
+                <div class="progress-meta" id="download-progress-meta"></div>
+                <ul class="progress-errors" id="download-progress-errors"></ul>
+              </div>
+            </div>
             <div class="table-wrap">
               <table id="results-table" data-symbol-col-index="{{ symbol_col_index }}">
                 <thead>
@@ -626,7 +728,7 @@
               </div>
             </div>
           {% else %}
-            <p class="empty">Submit the form to fetch full screener rows from FMP.</p>
+            <p class="empty">Submit the form to fetch screener rows from the selected source.</p>
           {% endif %}
         </div>
       </section>
@@ -647,6 +749,14 @@
       const infoEl = document.getElementById("page-info");
       const sortButtons = Array.from(table.querySelectorAll(".sort-btn"));
       const symbolColIndex = parseInt(table.getAttribute("data-symbol-col-index"), 10);
+      const downloadBtn = document.getElementById("download-all-btn");
+      const downloadStatusEl = document.getElementById("download-status");
+      const progressPanel = document.getElementById("download-progress-panel");
+      const progressFillEl = document.getElementById("download-progress-fill");
+      const progressLabelEl = document.getElementById("download-progress-label");
+      const progressMetaEl = document.getElementById("download-progress-meta");
+      const progressErrorsEl = document.getElementById("download-progress-errors");
+      const downloadRunNameEl = document.getElementById("download-run-name");
 
       let rows = Array.from(body.querySelectorAll("tr")).map((tr) =>
         Array.from(tr.querySelectorAll("td")).map((td) => td.textContent.trim())
@@ -655,6 +765,7 @@
       let pageSize = parseInt(pageSizeEl.value, 10);
       let sortCol = -1;
       let sortDir = "asc";
+      let downloadPollHandle = null;
       const collator = new Intl.Collator(undefined, { sensitivity: "base" });
 
       function esc(value) {
@@ -664,6 +775,78 @@
           .replaceAll(">", "&gt;")
           .replaceAll('"', "&quot;")
           .replaceAll("'", "&#39;");
+      }
+
+      function getCSRFToken() {
+        const parts = String(document.cookie || "").split(";");
+        for (const part of parts) {
+          const [k, ...rest] = part.trim().split("=");
+          if (k === "csrftoken") return decodeURIComponent(rest.join("="));
+        }
+        return "";
+      }
+
+      function collectSymbols() {
+        if (Number.isNaN(symbolColIndex) || symbolColIndex < 0) return [];
+        const seen = new Set();
+        const out = [];
+        rows.forEach((cells) => {
+          const symbol = String(cells[symbolColIndex] || "").trim().toUpperCase();
+          if (!symbol || seen.has(symbol)) return;
+          seen.add(symbol);
+          out.push(symbol);
+        });
+        return out;
+      }
+
+      function renderDownloadProgress(run) {
+        if (!run || !progressPanel || !progressFillEl || !progressLabelEl || !progressMetaEl || !progressErrorsEl) return;
+        progressPanel.style.display = "block";
+        const jobRuns = Array.isArray(run.job_runs) ? run.job_runs : [];
+        const completed = jobRuns.filter((j) => String(j.status || "") === "succeeded").length;
+        const total = Math.max(1, jobRuns.length || 1);
+        const pct = Math.max(0, Math.min(100, Math.round((completed / total) * 100)));
+        const artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
+        const latestArtifact = artifacts.length ? artifacts[artifacts.length - 1] : null;
+        progressFillEl.style.width = `${pct}%`;
+        progressLabelEl.textContent = `${pct}%`;
+        progressMetaEl.textContent = `Run ${run.pipeline_run_id || "-"} | Job ${run.requested_job || "-"} | Status ${run.status || "-"}${latestArtifact ? ` | Artifact ${latestArtifact.artifact_id} (${latestArtifact.artifact_type})` : ""}`;
+        const errors = [];
+        if (run.error) errors.push(String(run.error));
+        jobRuns.forEach((jobRun) => {
+          if (jobRun && jobRun.error) errors.push(`${jobRun.job_type}: ${jobRun.error}`);
+        });
+        progressErrorsEl.innerHTML = errors.slice(0, 12).map((msg) => `<li>${esc(msg)}</li>`).join("");
+      }
+
+      async function pollDownloadJob(jobId) {
+        try {
+          const resp = await fetch(`/pipeline/runs/${encodeURIComponent(jobId)}/`, {
+            credentials: "same-origin",
+          });
+          if (!resp.ok) throw new Error(`Status check failed (${resp.status})`);
+          const run = await resp.json();
+          renderDownloadProgress(run);
+          const status = String(run.status || "");
+          if (status === "running" || status === "pending") {
+            downloadStatusEl.textContent = status === "pending" ? "Queued..." : "Persisting universe artifact...";
+            return;
+          }
+          if (downloadPollHandle) {
+            clearInterval(downloadPollHandle);
+            downloadPollHandle = null;
+          }
+          downloadBtn.disabled = false;
+          if (status === "succeeded") downloadStatusEl.textContent = "Universe artifact saved.";
+          else downloadStatusEl.textContent = "Pipeline run failed.";
+        } catch (err) {
+          if (downloadPollHandle) {
+            clearInterval(downloadPollHandle);
+            downloadPollHandle = null;
+          }
+          downloadBtn.disabled = false;
+          downloadStatusEl.textContent = `Progress check failed: ${err.message}`;
+        }
       }
 
       function parseNumber(value) {
@@ -800,6 +983,52 @@
           render();
         }
       });
+
+      if (downloadBtn && downloadStatusEl) {
+        downloadBtn.addEventListener("click", async () => {
+          const symbols = collectSymbols();
+          if (!symbols.length) {
+            downloadStatusEl.textContent = "No symbols found in results.";
+            return;
+          }
+          downloadBtn.disabled = true;
+          downloadStatusEl.textContent = `Starting download for ${symbols.length} symbols...`;
+          if (progressPanel) progressPanel.style.display = "block";
+          if (progressFillEl) progressFillEl.style.width = "0%";
+          if (progressLabelEl) progressLabelEl.textContent = "0%";
+          if (progressMetaEl) progressMetaEl.textContent = "";
+          if (progressErrorsEl) progressErrorsEl.innerHTML = "";
+
+          try {
+              const resp = await fetch("/pipeline/runs/start/", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-CSRFToken": getCSRFToken(),
+                },
+              body: JSON.stringify({
+                target_job: "universe",
+                mode: "strict",
+                name: String((downloadRunNameEl && downloadRunNameEl.value) || "").trim() || "UI Universe Run",
+                config: { symbols },
+              }),
+            });
+            const payload = await resp.json();
+            if (!resp.ok) throw new Error(payload.error || `Start failed (${resp.status})`);
+            const jobId = String(payload.pipeline_run_id || "");
+            if (!jobId) throw new Error("Missing job id from server.");
+            if (downloadPollHandle) clearInterval(downloadPollHandle);
+            await pollDownloadJob(jobId);
+            downloadPollHandle = setInterval(() => {
+              pollDownloadJob(jobId);
+            }, 1000);
+          } catch (err) {
+            downloadBtn.disabled = false;
+            downloadStatusEl.textContent = `Could not start download: ${err.message}`;
+          }
+        });
+      }
 
       render();
     })();

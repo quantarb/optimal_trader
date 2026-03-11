@@ -17,19 +17,25 @@ TRADE_DEDUP_CHOICES = (
     ("none", "No Trade Deduplication"),
 )
 
+MODEL_TARGET_CHOICES = (
+    ("label", "Label"),
+    ("market_position", "Market Position"),
+    ("trade_return", "Trade Return"),
+)
+
 
 class LabelingConfigForm(forms.Form):
-    symbols = forms.MultipleChoiceField(
-        required=True,
-        choices=(),
-        widget=forms.SelectMultiple(attrs={"size": 12}),
-        help_text="Select one or more symbols.",
-    )
     k_w_list = forms.CharField(required=False, initial="", label="k list for W", help_text="Comma-separated list, e.g. 2,3,4")
     k_m_list = forms.CharField(required=False, initial="", label="k list for M", help_text="Comma-separated list, e.g. 1,2")
     k_qe_list = forms.CharField(required=False, initial="", label="k list for QE", help_text="Comma-separated list, e.g. 1,2")
-    k_ye_list = forms.CharField(required=False, initial="", label="k list for YE", help_text="Comma-separated list, e.g. 1")
-    min_profit_pct = forms.FloatField(required=False, min_value=0.0, initial=0.01)
+    k_ye_list = forms.CharField(required=False, initial="1, 2, 4, 8", label="k list for YE", help_text="Comma-separated list, e.g. 1")
+    min_profit_pct = forms.FloatField(
+        required=False,
+        min_value=0.0,
+        initial=1.0,
+        label="Min Profit %",
+        help_text="Percent points. Example: 10 means 10%.",
+    )
 
     buy_execution = forms.ChoiceField(required=True, choices=PRICE_COL_CHOICES, initial="adj_high", label="Buy Price Execution")
     sell_execution = forms.ChoiceField(required=True, choices=PRICE_COL_CHOICES, initial="adj_low", label="Sell Price Execution")
@@ -44,6 +50,25 @@ class LabelingConfigForm(forms.Form):
         label="Trade Deduplication",
         help_text="Choose how to deduplicate overlapping generated trades.",
     )
+    model_target_col = forms.ChoiceField(
+        required=True,
+        choices=MODEL_TARGET_CHOICES,
+        initial="label",
+        label="Model Target Label",
+        help_text="Target column to carry into the model forms.",
+    )
+
+    def clean(self):
+        cleaned = super().clean()
+        raw_lists = [
+            str(cleaned.get("k_w_list") or "").strip(),
+            str(cleaned.get("k_m_list") or "").strip(),
+            str(cleaned.get("k_qe_list") or "").strip(),
+            str(cleaned.get("k_ye_list") or "").strip(),
+        ]
+        if not any(raw_lists):
+            raise forms.ValidationError("Enter at least one k value (W, M, QE, or YE) before building config.")
+        return cleaned
 
     def __init__(
         self,
@@ -57,9 +82,3 @@ class LabelingConfigForm(forms.Form):
             self.fields["sell_execution"].initial = "adj_low"
             self.fields["short_execution"].initial = "adj_low"
             self.fields["cover_execution"].initial = "adj_high"
-        if symbol_choices:
-            self.fields["symbols"].choices = list(symbol_choices)
-            # Keep a practical default selection when choices exist.
-            defaults = [s for s in ("AAPL", "MSFT", "NVDA") if any(s == c[0] for c in symbol_choices)]
-            if defaults and not self.is_bound:
-                self.fields["symbols"].initial = defaults

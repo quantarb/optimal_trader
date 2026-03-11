@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strategy #{{ artifact.id }}</title>
+  <style>
+    :root { --bg:#f5f2ec; --panel:#fffdf9; --ink:#1d2320; --muted:#677067; --line:#d9d3c8; --accent:#8a4b22; }
+    body { margin:0; font-family:"Avenir Next","Trebuchet MS",sans-serif; background:linear-gradient(180deg,#fbfaf7,var(--bg)); color:var(--ink); }
+    .shell { max-width:1320px; margin:0 auto; padding:28px 18px 40px; }
+    .topbar,.stats { display:flex; gap:12px; flex-wrap:wrap; }
+    .topbar { justify-content:space-between; margin-bottom:18px; }
+    .link { color:var(--accent); text-decoration:none; font-weight:700; }
+    .hero,.panel { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:18px; box-shadow:0 10px 24px rgba(30,24,19,.04); }
+    .grid,.subgrid { display:grid; gap:16px; margin-top:18px; }
+    .grid { grid-template-columns:1fr 1fr; }
+    .subgrid { grid-template-columns:1.2fr .8fr; }
+    .stat { min-width:150px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#f8f3eb; }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:12px; margin-top:10px; }
+    table { width:100%; border-collapse:collapse; font-size:.9rem; }
+    th,td { text-align:left; padding:8px 10px; border-bottom:1px solid #ebe5d9; white-space:nowrap; }
+    th { background:#f8f3eb; }
+    .bar-list { display:grid; gap:10px; margin-top:12px; }
+    .bar-row { padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .bar-meta { display:flex; justify-content:space-between; gap:10px; font-size:.88rem; }
+    .bar-track { margin-top:8px; height:10px; border-radius:999px; background:#efe6d9; overflow:hidden; }
+    .bar-fill { height:100%; background:linear-gradient(90deg, #8a4b22, #c77a39); border-radius:inherit; }
+    pre { margin:0; padding:14px; border-radius:12px; background:#0f1722; color:#d6ecff; overflow:auto; font-size:.84rem; }
+    details { margin-top:14px; }
+    summary { cursor:pointer; color:var(--accent); font-weight:700; }
+    .subnote { color:var(--muted); font-size:.88rem; margin-top:4px; }
+    @media (max-width: 980px) { .grid,.subgrid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="link" href="{% url 'pipeline-strategies' %}">Back to Strategy Lab</a>
+      <a class="link" href="{% url 'pipeline-artifact-detail' artifact.id %}">Open Artifact View</a>
+    </div>
+    <div class="hero">
+      <h1>Strategy Dataset #{{ artifact.id }}</h1>
+      <p>Portfolio target artifact derived from saved model outputs and feature panels.</p>
+      <div class="stats">
+        <div class="stat"><strong>Run</strong><div>#{{ artifact.pipeline_run_id }}</div></div>
+        <div class="stat"><strong>Strategy</strong><div>{{ artifact.metadata.strategy_definition_name|default:"-" }}</div></div>
+        <div class="stat"><strong>Rows</strong><div>{{ content_payload.rows|default:"-" }}</div></div>
+        <div class="stat"><strong>Symbols</strong><div>{{ content_payload.symbols|default:"-" }}</div></div>
+        <div class="stat"><strong>Selected Rows</strong><div>{{ content_payload.selected_rows|default:"-" }}</div></div>
+        <div class="stat"><strong>Dates</strong><div>{{ content_payload.dates|default:"-" }}</div></div>
+        <div class="stat"><strong>Avg Daily Positions</strong><div>{{ content_payload.avg_daily_positions|default:"-" }}</div></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Strategy Config</h2>
+        <table>
+          <tbody>
+            <tr><th>Definition</th><td>{{ artifact.metadata.strategy_definition_name|default:"-" }}</td></tr>
+            <tr><th>Type</th><td>{{ artifact.metadata.strategy_type|default:"-" }}</td></tr>
+            <tr><th>Gate Quantile</th><td>{{ strategy_config.gate_quantile|default:"-" }}</td></tr>
+            <tr><th>Top K</th><td>{{ strategy_config.top_k|default:"-" }}</td></tr>
+            <tr><th>Rebalance</th><td>{{ strategy_config.rebalance_freq|default:"-" }}</td></tr>
+            <tr><th>Gross Exposure</th><td>{{ strategy_config.gross_exposure|default:"-" }}</td></tr>
+            <tr><th>Selection Side</th><td>{{ strategy_config.selection_side|default:"-" }}</td></tr>
+            <tr><th>Signal Combination</th><td>{{ strategy_config.signal_combination|default:"-" }}</td></tr>
+            <tr><th>Action Source</th><td>{{ strategy_config.action_source_field|default:"-" }}</td></tr>
+            <tr><th>Action Threshold</th><td>{{ strategy_config.action_threshold|default:"-" }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Source Inputs</h2>
+        <table>
+          <tbody>
+            <tr><th>Features</th><td>{{ artifact.metadata.source_features_artifact_id|default:"-" }}</td></tr>
+            <tr><th>Labels</th><td>{{ artifact.metadata.source_label_artifact_id|default:"-" }}</td></tr>
+            <tr><th>Predictions</th><td>{{ artifact.metadata.source_prediction_artifact_ids|default:"-" }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="subgrid">
+      <div class="panel">
+        <h2>Symbol Summary</h2>
+        <p class="subnote">Showing {{ symbol_summary|length }} of {{ symbol_summary_count }} symbols.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Rows</th>
+                <th>Min Date</th>
+                <th>Max Date</th>
+                <th>Avg Strategy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in symbol_summary %}
+                <tr>
+                  <td><a class="link" href="{{ row.detail_url }}">{{ row.symbol }}</a></td>
+                  <td>{{ row.rows }}</td>
+                  <td>{{ row.min_date|default:"-" }}</td>
+                  <td>{{ row.max_date|default:"-" }}</td>
+                  <td>{{ row.avg_strategy_score|default:"-" }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="5">No symbol rows.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Highest Scoring Symbols</h2>
+        <p class="subnote">Bar view scales better than a wide table when the universe grows.</p>
+        <div class="bar-list">
+          {% for row in top_symbol_rows %}
+            <div class="bar-row">
+              <div class="bar-meta">
+                <strong>{{ row.symbol }}</strong>
+                <span>{{ row.avg_strategy_score|default:"-"|floatformat:4 }}</span>
+              </div>
+              <div class="subnote">{{ row.rows }} rows, {{ row.min_date|default:"-" }} to {{ row.max_date|default:"-" }}</div>
+              <div class="bar-track"><div class="bar-fill" style="width:{{ row.score_bar_pct }}%;"></div></div>
+            </div>
+          {% empty %}
+            <div class="subnote">No ranked symbol rows.</div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="subgrid">
+      <div class="panel">
+        <h2>Selected Rebalance Snapshot</h2>
+        <p class="subnote">Showing up to {{ selected_preview_rows|length }} selected rows from the current artifact preview.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Symbol</th>
+                <th>Combined</th>
+                <th>Strategy</th>
+                <th>Rank</th>
+                <th>Target Weight</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in selected_preview_rows %}
+                <tr>
+                  <td>{{ row.date }}</td>
+                  <td>{{ row.symbol }}</td>
+                  <td>{{ row.combined_score }}</td>
+                  <td>{{ row.strategy_score }}</td>
+                  <td>{{ row.rank }}</td>
+                  <td>{{ row.target_weight }}</td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6">No selected preview rows.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px;">
+      <h2>Artifact Summary</h2>
+      <details>
+        <summary>Open summarized strategy payload</summary>
+        <pre style="margin-top:10px;">{{ content_json }}</pre>
+      </details>
+      <details>
+        <summary>Open preview rows sample</summary>
+        <pre style="margin-top:10px;">{{ preview_rows_json }}</pre>
+      </details>
+      <details>
+        <summary>Open metadata</summary>
+        <pre style="margin-top:10px;">{{ metadata_json }}</pre>
+      </details>
+    </div>
+  </div>
+</body>
+</html>

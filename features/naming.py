@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from modules.data.feature_name_map import PRETTY_NAME_MAP
+from data import PRETTY_NAME_MAP
 
 
 _ACRONYM_MAP = {
@@ -31,6 +31,10 @@ _ACRONYM_MAP = {
     "Vwap": "VWAP",
 }
 
+_COMPACT_OVERRIDE_MAP = {
+    "totalassetsgrowth": "Total Assets Growth",
+}
+
 
 def _split_feature_name(name: str) -> tuple[str | None, str]:
     value = str(name or "").strip()
@@ -46,7 +50,7 @@ def _humanize_token(token: str) -> str:
     token = str(token or "").strip()
     if not token:
         return ""
-    mapped = PRETTY_NAME_MAP.get(token.lower(), token)
+    mapped = PRETTY_NAME_MAP.get(token.lower()) or _COMPACT_OVERRIDE_MAP.get(token.lower()) or token
     with_spaces = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", mapped.replace("_", " "))
     pretty = with_spaces.strip().title()
     for src, target in _ACRONYM_MAP.items():
@@ -62,7 +66,7 @@ def feature_display_name(name: str) -> str:
     if prefix in {"km", "rt", "is", "isg", "cf", "cfg", "bs", "bsg", "fg", "earn", "ae", "rating", "grade", "mcap", "float", "insider"}:
         return _humanize_token(remainder)
 
-    if prefix in {"evt", "own"} and "_" in remainder:
+    if prefix == "evt" and "_" in remainder:
         _, _, detail = remainder.partition("_")
         if detail:
             return _humanize_token(detail)

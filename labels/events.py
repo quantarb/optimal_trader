@@ -5,7 +5,7 @@ from typing import Callable, Dict, Optional, List, Any, Union
 import pandas as pd
 import numpy as np
 
-from modules.utils.normalize import normalize_cols
+from utils.normalize import normalize_cols
 from labels.directional import add_binary_classification_labels, add_action_labels
 from labels.ranking import add_rank_regression_labels
 

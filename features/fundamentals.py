@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from fmp.models import Symbol, SymbolSectionHistorical
-from modules.data.pit import asof_join_pit, broadcast_asof_to_target_index
+from data import asof_join_pit, broadcast_asof_to_target_index
 
 
 def fetch_fundamentals_data(

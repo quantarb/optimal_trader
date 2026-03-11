@@ -1,0 +1,108 @@
+{% extends "pipeline/base_report.html" %}
+{% load pipeline_ui %}
+
+{% block title %}Market Situations{% endblock %}
+{% block report_eyebrow %}Historical Market Situation Library{% endblock %}
+{% block report_title %}Market Situation Taxonomy{% endblock %}
+{% block report_subtitle %}Oracle trade entry states are clustered into reusable situation families. The consumer insight layer uses these clusters before raw nearest-state matching.{% endblock %}
+
+{% block topbar_links %}
+  <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+  <a class="topbar-link" href="{% url 'pipeline-opportunities' %}">Opportunities</a>
+  <a class="topbar-link" href="{% url 'pipeline-stock-intelligence' %}">Stock Intelligence</a>
+  <a class="topbar-link" href="{% url 'pipeline-portfolio-analysis' %}">Portfolio Analysis</a>
+  <a class="topbar-link" href="{% url 'pipeline-research-reports' %}">Research Reports</a>
+{% endblock %}
+
+{% block report_sidebar %}
+  <div class="eyebrow">Saved Artifacts</div>
+  <h2 class="section-title">Runs</h2>
+  <div class="summary-list">
+    {% for row in artifacts %}
+      <div class="summary-item {% if selected_row and row.artifact.id == selected_row.artifact.id %}is-active{% endif %}">
+        <div><a class="summary-item-title" href="?artifact_id={{ row.artifact.id }}">{{ row.artifact.pipeline_run.name|default:row.artifact.key }}</a></div>
+        <div class="small" style="margin-top:6px;">#{{ row.artifact.id }} | {{ row.summary.rows|default:"0" }} states</div>
+        <div class="small">{{ row.summary.clusters|default:"0" }} clusters</div>
+      </div>
+    {% empty %}
+      {% include "pipeline/components/_empty_state.html" with eyebrow="No Artifacts" title="No market situation artifacts yet" body="Run market-situation clustering first, then inspect the saved taxonomy here." %}
+    {% endfor %}
+  </div>
+{% endblock %}
+
+{% block report_content %}
+  {% if selected_row %}
+    <div class="section-card">
+      <div class="eyebrow">Selected Artifact</div>
+      <h2 class="section-title">{{ selected_row.artifact.pipeline_run.name|default:selected_row.artifact.key }}</h2>
+      <div class="metric-grid">
+        <div class="metric-tile"><span class="metric-label">Oracle States</span><div class="metric-value">{{ summary.rows|default:"0" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Clusters</span><div class="metric-value">{{ summary.clusters|default:"0" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Symbols</span><div class="metric-value">{{ summary.symbols|default:"0" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Embedding Dims</span><div class="metric-value">{{ summary.embedding_dims|default:"0" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Date Range</span><div class="metric-value small">{{ summary.date_start|default:"-" }} to {{ summary.date_end|default:"-" }}</div></div>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <div class="eyebrow">Situation Families</div>
+      <h3 class="section-title">Clusters</h3>
+      <div class="data-table-shell">
+        <div class="table-wrap">
+          <table class="app-table js-data-table" data-page-size="12">
+            <thead>
+              <tr>
+                <th>Cluster</th>
+                <th>Type</th>
+                <th>Features</th>
+                <th>Size</th>
+                <th>Win Rate</th>
+                <th>Median Return</th>
+                <th>Stability</th>
+                <th>Examples</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in cluster_rows %}
+                <tr>
+                  <td><strong>{{ row.cluster_id }}</strong><br><span class="small">code {{ row.cluster_code }}</span></td>
+                  <td>{{ row.description }}<br><span class="pill">{{ row.side }}</span></td>
+                  <td>
+                    <div class="pill-row">
+                      {% for family in row.feature_signature %}
+                        <span class="pill">{{ family|feature_family_label }}</span>
+                      {% empty %}
+                        <span class="small">-</span>
+                      {% endfor %}
+                    </div>
+                  </td>
+                  <td>
+                    {{ row.cluster_size }}
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.size_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                  <td>
+                    {{ row.win_rate|floatformat:2 }}
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.win_rate_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                  <td class="{% if row.median_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.median_return|signed_pct:1 }}</td>
+                  <td>{{ row.yearly_median_return_std|floatformat:3 }}</td>
+                  <td>
+                    {% for item in row.example_historical_dates %}
+                      <div>{{ item.date }} {{ item.symbol }}</div>
+                    {% empty %}
+                      <span class="small">-</span>
+                    {% endfor %}
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="8" class="small">No clusters available.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {% else %}
+    {% include "pipeline/components/_empty_state.html" with eyebrow="No Artifact" title="No Market Situation Artifact Selected" body="Run market-situation clustering first, then inspect the saved cluster taxonomy here." %}
+  {% endif %}
+{% endblock %}

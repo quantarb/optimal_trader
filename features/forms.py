@@ -6,7 +6,17 @@ from django import forms
 
 
 class FeaturePreviewForm(forms.Form):
-    symbol = forms.ChoiceField(required=True, choices=())
+    universe_artifact_id = forms.ChoiceField(
+        required=True,
+        choices=(),
+        label="Universe Artifact",
+        help_text="Select the universe to load symbols from.",
+    )
+    job_name = forms.CharField(
+        required=False,
+        label="Job Name",
+        help_text="Optional. Used when saving a feature engineering job.",
+    )
     include_price_technicals = forms.BooleanField(required=False, initial=True)
     include_fundamental_change = forms.BooleanField(required=False, initial=True)
     include_statement_quality = forms.BooleanField(required=False, initial=True)
@@ -19,15 +29,12 @@ class FeaturePreviewForm(forms.Form):
     def __init__(
         self,
         *args,
-        symbol_choices: Optional[Sequence[tuple[str, str]]] = None,
+        universe_artifact_choices: Optional[Sequence[tuple[str, str]]] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        if symbol_choices:
-            self.fields["symbol"].choices = list(symbol_choices)
+        if universe_artifact_choices:
+            self.fields["universe_artifact_id"].choices = list(universe_artifact_choices)
         if not self.is_bound:
-            if symbol_choices:
-                for candidate in ("AAPL", "MSFT", "NVDA"):
-                    if any(candidate == c[0] for c in symbol_choices):
-                        self.fields["symbol"].initial = candidate
-                        break
+            if universe_artifact_choices:
+                self.fields["universe_artifact_id"].initial = universe_artifact_choices[0][0]

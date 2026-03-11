@@ -16,6 +16,7 @@ FEATURE_FAMILY_DEFINITIONS = (
     ("insider_trading", "Insider Trading", 5),
     ("economic_indicators", "Economic Indicators", 24),
     ("treasury_rates", "Treasury Rates", 12),
+    ("representation_embedding", "Representation Embedding", 384),
 )
 
 FEATURE_FAMILY_LABELS = {

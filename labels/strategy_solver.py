@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from bisect import bisect_left
 from typing import Dict, List, Literal, Optional, Tuple
 
 import pandas as pd
@@ -49,6 +48,20 @@ class _TradeCandidate:
     entry_price: float
     exit_price: float
     profit: float
+
+
+@dataclass(frozen=True)
+class _TradePathState:
+    value: float
+    trades: tuple[_TradeCandidate, ...]
+
+
+@dataclass(frozen=True)
+class _HoldState:
+    value: float
+    entry_idx: int
+    entry_price: float
+    base_trades: tuple[_TradeCandidate, ...]
 
 
 def _resolve_freq(freq: str) -> Tuple[str, str]:
@@ -133,87 +146,100 @@ def solve_optimal_joint_trades_generic(
     short_exit = df[sx_col].astype(float).to_numpy()
     n = len(df)
 
-    candidates: List[_TradeCandidate] = []
     min_profit = float(min_profit_pct)
+    cash: List[_TradePathState] = [_TradePathState(0.0, ()) for _ in range(k + 1)]
+    long_hold: List[_HoldState | None] = [None] * (k + 1)
+    short_hold: List[_HoldState | None] = [None] * (k + 1)
 
-    for i in range(n - 1):
+    for i in range(n):
         le = float(long_entry[i])
+        lx = float(long_exit[i])
         se = float(short_entry[i])
-        if le <= 0 and se <= 0:
-            continue
+        sx = float(short_exit[i])
 
-        for j in range(i + 1, n):
-            lx = float(long_exit[j])
-            sx = float(short_exit[j])
+        prev_cash = list(cash)
+        prev_long_hold = list(long_hold)
+        prev_short_hold = list(short_hold)
+
+        for trade_count in range(1, k + 1):
+            best_cash = prev_cash[trade_count]
+
+            long_state = prev_long_hold[trade_count]
+            if long_state is not None and long_state.entry_idx < i:
+                long_pct = _profit_pct("long", long_state.entry_price, lx)
+                if long_pct >= min_profit:
+                    candidate_value = float(long_state.value + lx)
+                    if candidate_value > float(best_cash.value) + 1e-12:
+                        best_cash = _TradePathState(
+                            candidate_value,
+                            long_state.base_trades
+                            + (
+                                _TradeCandidate(
+                                    side="long",
+                                    entry_idx=int(long_state.entry_idx),
+                                    exit_idx=i,
+                                    entry_price=float(long_state.entry_price),
+                                    exit_price=float(lx),
+                                    profit=float(lx - long_state.entry_price),
+                                ),
+                            ),
+                        )
+
+            short_state = prev_short_hold[trade_count]
+            if short_state is not None and short_state.entry_idx < i:
+                short_pct = _profit_pct("short", short_state.entry_price, sx)
+                if short_pct >= min_profit:
+                    candidate_value = float(short_state.value - sx)
+                    if candidate_value > float(best_cash.value) + 1e-12:
+                        best_cash = _TradePathState(
+                            candidate_value,
+                            short_state.base_trades
+                            + (
+                                _TradeCandidate(
+                                    side="short",
+                                    entry_idx=int(short_state.entry_idx),
+                                    exit_idx=i,
+                                    entry_price=float(short_state.entry_price),
+                                    exit_price=float(sx),
+                                    profit=float(short_state.entry_price - sx),
+                                ),
+                            ),
+                        )
+
+            cash[trade_count] = best_cash
+
+        for trade_count in range(1, k + 1):
+            base_state = prev_cash[trade_count - 1]
 
             if le > 0:
-                long_pct = _profit_pct("long", le, lx)
-                if long_pct >= min_profit:
-                    candidates.append(
-                        _TradeCandidate(
-                            side="long",
-                            entry_idx=i,
-                            exit_idx=j,
-                            entry_price=le,
-                            exit_price=lx,
-                            profit=lx - le,
-                        )
+                candidate_hold_value = float(base_state.value - le)
+                current_long = prev_long_hold[trade_count]
+                if current_long is None or candidate_hold_value > float(current_long.value) + 1e-12:
+                    long_hold[trade_count] = _HoldState(
+                        value=candidate_hold_value,
+                        entry_idx=i,
+                        entry_price=float(le),
+                        base_trades=base_state.trades,
                     )
+                else:
+                    long_hold[trade_count] = current_long
 
             if se > 0:
-                short_pct = _profit_pct("short", se, sx)
-                if short_pct >= min_profit:
-                    candidates.append(
-                        _TradeCandidate(
-                            side="short",
-                            entry_idx=i,
-                            exit_idx=j,
-                            entry_price=se,
-                            exit_price=sx,
-                            profit=se - sx,
-                        )
+                candidate_hold_value = float(base_state.value + se)
+                current_short = prev_short_hold[trade_count]
+                if current_short is None or candidate_hold_value > float(current_short.value) + 1e-12:
+                    short_hold[trade_count] = _HoldState(
+                        value=candidate_hold_value,
+                        entry_idx=i,
+                        entry_price=float(se),
+                        base_trades=base_state.trades,
                     )
+                else:
+                    short_hold[trade_count] = current_short
 
-    if not candidates:
+    chosen = list(max(cash, key=lambda state: float(state.value)).trades)
+    if not chosen:
         return []
-
-    candidates.sort(key=lambda c: (c.exit_idx, c.entry_idx, c.side))
-    exits = [c.exit_idx for c in candidates]
-
-    # Previous non-overlapping candidate index for each candidate.
-    prev_idx: List[int] = []
-    for c in candidates:
-        j = bisect_left(exits, c.entry_idx) - 1
-        prev_idx.append(j)
-
-    m = len(candidates)
-    dp = [[0.0] * (m + 1) for _ in range(k + 1)]
-    keep = [[False] * (m + 1) for _ in range(k + 1)]
-
-    for t in range(1, k + 1):
-        for i in range(1, m + 1):
-            c = candidates[i - 1]
-            p = prev_idx[i - 1] + 1
-            skip_val = dp[t][i - 1]
-            take_val = dp[t - 1][p] + c.profit
-            if take_val > skip_val:
-                dp[t][i] = take_val
-                keep[t][i] = True
-            else:
-                dp[t][i] = skip_val
-
-    chosen: List[_TradeCandidate] = []
-    t = k
-    i = m
-    while t > 0 and i > 0:
-        if keep[t][i]:
-            c = candidates[i - 1]
-            chosen.append(c)
-            i = prev_idx[i - 1] + 1
-            t -= 1
-        else:
-            i -= 1
-    chosen.reverse()
 
     out: List[Trade] = []
     for c in chosen:

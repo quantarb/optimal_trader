@@ -1,0 +1,336 @@
+{% load pipeline_ui %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cohort Comparisons</title>
+  <style>
+    :root {
+      --bg: #eef4f7;
+      --panel: rgba(255,255,255,0.84);
+      --ink: #152433;
+      --muted: #627688;
+      --line: rgba(21,36,51,0.10);
+      --accent: #0d6b73;
+      --accent-2: #d46d38;
+      --good: #177245;
+      --bad: #b2403a;
+      --shadow: 0 18px 48px rgba(18, 35, 50, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,107,115,0.10), transparent 28%),
+        radial-gradient(circle at top right, rgba(212,109,56,0.08), transparent 24%),
+        linear-gradient(180deg, #f8fbfc, var(--bg));
+    }
+    .shell { max-width: 1500px; margin: 0 auto; padding: 28px 18px 48px; }
+    .topbar { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+    .link { color: var(--accent); text-decoration:none; font-weight:700; }
+    .hero, .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .hero { padding: 24px; }
+    .eyebrow { text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.72rem; color: var(--muted); font-weight: 700; }
+    .hero-grid { display:grid; grid-template-columns: 1.1fr .9fr; gap:18px; align-items: end; }
+    .hero h1, .card h2, .card h3 { margin: 0; }
+    .hero p, .subnote, .small { color: var(--muted); }
+    .hero-metrics { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; }
+    .metric {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid rgba(21,36,51,0.08);
+    }
+    .metric .k { font-size:0.76rem; text-transform:uppercase; letter-spacing:0.10em; color:var(--muted); }
+    .metric .v { font-size:1.2rem; font-weight:800; margin-top:6px; }
+    .layout { display:grid; grid-template-columns: 320px 1fr; gap:18px; margin-top:18px; }
+    .card { padding: 20px; }
+    .summary-list { display:grid; gap:12px; }
+    .summary-item { border:1px solid var(--line); border-radius:18px; padding:14px; background:rgba(255,255,255,0.72); }
+    .summary-item.active { border-color: rgba(13,107,115,0.28); background: linear-gradient(180deg, rgba(13,107,115,0.08), rgba(255,255,255,0.82)); }
+    .summary-item h3 { font-size:1rem; margin-bottom:6px; }
+    .pills { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .pill {
+      display:inline-flex; align-items:center; gap:6px;
+      padding:4px 10px; border-radius:999px; font-size:0.76rem; font-weight:700;
+      background: rgba(13,107,115,0.10); color: var(--accent);
+    }
+    .pill.bad { background: rgba(178,64,58,0.10); color: var(--bad); }
+    .content-grid { display:grid; gap:18px; }
+    .spotlight { display:grid; grid-template-columns: 1.15fr .85fr; gap:18px; }
+    .leaderboard-grid { display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:12px; }
+    .filters { display:grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap:12px; margin:16px 0; }
+    .filters label { display:block; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); margin-bottom:6px; }
+    .filters input, .filters select {
+      width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:14px; background:#fff; font:inherit; color:var(--ink);
+    }
+    .filter-actions { display:flex; gap:12px; align-items:center; }
+    .btn {
+      border: 1px solid transparent;
+      background: linear-gradient(135deg, var(--accent), #116d8d);
+      color:#fff; border-radius:999px; padding:10px 16px; font-weight:700; cursor:pointer;
+    }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:18px; background:#fff; }
+    table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+    th, td { text-align:left; padding:12px 14px; border-bottom:1px solid rgba(21,36,51,0.08); vertical-align:middle; }
+    th { background: linear-gradient(180deg, rgba(13,107,115,0.08), rgba(13,107,115,0.02)); color:var(--muted); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.10em; position:sticky; top:0; }
+    tr:last-child td { border-bottom:none; }
+    .bar-cell { min-width: 180px; }
+    .bar-track { height:10px; background:rgba(21,36,51,0.08); border-radius:999px; overflow:hidden; margin-top:6px; }
+    .bar-fill { height:100%; background:linear-gradient(90deg, var(--accent), #35a7a1); border-radius:inherit; }
+    .bar-fill.bad-bar { background:linear-gradient(90deg, var(--accent-2), var(--bad)); }
+    .mono { font-variant-numeric: tabular-nums; }
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .family-stack { display:flex; flex-wrap:wrap; gap:6px; max-width:320px; }
+    .family-stack span { padding:4px 8px; border-radius:999px; background:rgba(13,107,115,0.08); color:var(--accent); font-size:0.76rem; }
+    .links-cell a { display:inline-block; margin-right:10px; }
+    @media (max-width: 1180px) {
+      .layout, .spotlight, .hero-grid, .hero-metrics, .leaderboard-grid, .filters { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+      <a class="link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
+      <a class="link" href="{% url 'pipeline-strategies' %}">Strategy Lab</a>
+      <a class="link" href="{% url 'pipeline-research-reports' %}">Research Reports</a>
+    </div>
+
+    <div class="hero">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">Research Comparisons</div>
+          <h1 style="font-size:clamp(2.2rem,4vw,3.4rem); line-height:0.95; letter-spacing:-0.04em; margin:8px 0 10px;">Cohorts Built For Scanning, Not Spreadsheeting</h1>
+          <p>Rank variants by excess return, stability, runtime, and drawdown without reading a 100-column table first.</p>
+        </div>
+        <div class="hero-metrics">
+          <div class="metric"><div class="k">Saved Summaries</div><div class="v">{{ summaries|length }}</div></div>
+          <div class="metric"><div class="k">Visible Variants</div><div class="v">{{ detail_row_count|compact_number }}</div></div>
+          <div class="metric"><div class="k">Rejected</div><div class="v">{{ rejected_row_count|compact_number }}</div></div>
+          <div class="metric"><div class="k">Profile</div><div class="v" style="font-size:1rem;">{{ report_summary.research_profile|default:"-" }}</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="layout">
+      <div class="card">
+        <div class="eyebrow">Saved Outputs</div>
+        <h2 style="margin:8px 0 14px;">Summary Files</h2>
+        <div class="summary-list">
+          {% for summary in summaries %}
+            <div class="summary-item {% if selected_summary and summary.name == selected_summary.name %}active{% endif %}">
+              <h3><a class="link" href="?summary={{ summary.name|urlencode }}">{{ summary.name }}</a></h3>
+              <div class="small">{{ summary.updated_at|date:"Y-m-d H:i" }}</div>
+              <div class="pills">
+                <span class="pill">{{ summary.kind|title|cut:"_" }}</span>
+                <span class="pill">{{ summary.variant_count }} rows</span>
+                {% if summary.report_summary.rejected_count %}<span class="pill bad">{{ summary.report_summary.rejected_count }} rejected</span>{% endif %}
+              </div>
+              {% if summary.fit_job or summary.score_job %}<div class="small" style="margin-top:8px;">{{ summary.fit_job }}{% if summary.score_job %} -> {{ summary.score_job }}{% endif %}</div>{% endif %}
+              {% if summary.strategy_definition.name %}<div class="small">Strategy: {{ summary.strategy_definition.name }}</div>{% endif %}
+            </div>
+          {% empty %}
+            <div class="small">No cohort summaries found yet.</div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="content-grid">
+        {% if selected_summary %}
+          <div class="card">
+            <div class="spotlight">
+              <div>
+                <div class="eyebrow">Selected Summary</div>
+                <h2 style="margin:8px 0 8px;">{{ selected_summary.name }}</h2>
+                <p class="subnote">
+                  {{ selected_summary.variant_count }} ranked rows.
+                  {% if label_artifact_id %} Labels #{{ label_artifact_id }}.{% endif %}
+                  {% if feature_artifact_id %} Features #{{ feature_artifact_id }}.{% endif %}
+                  {% if report_summary.research_profile %} Profile {{ report_summary.research_profile }}.{% endif %}
+                </p>
+                <p class="subnote">
+                  Showing {{ detail_rows|length }} of {{ detail_row_count }} variants.
+                  {% if detail_hidden_count > 0 and not show_all_variants %}
+                    <a class="link" href="?summary={{ selected_summary.name|urlencode }}&show=all">Show all {{ detail_row_count }}</a>
+                  {% elif show_all_variants and detail_row_count > 20 %}
+                    <a class="link" href="?summary={{ selected_summary.name|urlencode }}">Collapse view</a>
+                  {% endif %}
+                </p>
+              </div>
+              <div class="leaderboard-grid">
+                <div class="metric"><div class="k">Passed</div><div class="v">{{ report_summary.leaderboard_count|default:"0" }}</div></div>
+                <div class="metric"><div class="k">Rejected</div><div class="v">{{ report_summary.rejected_count|default:"0" }}</div></div>
+                <div class="metric"><div class="k">Mean Fold Excess</div><div class="v {% if report_summary.best_mean_fold_excess_cumulative_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ report_summary.best_mean_fold_excess_cumulative_return|default:0|signed_pct:1 }}</div></div>
+                <div class="metric"><div class="k">Dispersion</div><div class="v mono">{{ report_summary.best_fold_excess_cumulative_return_std|default:"-"|floatformat:3 }}</div></div>
+                <div class="metric"><div class="k">Best Variant</div><div class="v" style="font-size:0.96rem;">{{ report_summary.best_variant_name|default:"-" }}</div></div>
+              </div>
+            </div>
+
+            <form method="get">
+              <input type="hidden" name="summary" value="{{ selected_summary.name }}">
+              <div class="filters">
+                <div>
+                  <label for="model">Model</label>
+                  <input id="model" type="text" name="model" value="{{ model_filter }}" placeholder="classifier, regressor">
+                </div>
+                <div>
+                  <label for="family">Family</label>
+                  <select id="family" name="family">
+                    <option value="">All families</option>
+                    {% for family in available_families %}
+                      <option value="{{ family }}" {% if family_filter == family %}selected{% endif %}>{{ family }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div>
+                  <label for="k">Horizon</label>
+                  <select id="k" name="k">
+                    <option value="">All horizons</option>
+                    {% for item in available_ks %}
+                      <option value="{{ item }}" {% if k_filter == item %}selected{% endif %}>{{ item }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div>
+                  <label for="sort">Sort</label>
+                  <select id="sort" name="sort">
+                    <option value="walk_forward_excess" {% if sort_by == "walk_forward_excess" %}selected{% endif %}>WF excess</option>
+                    <option value="mean_fold_excess" {% if sort_by == "mean_fold_excess" %}selected{% endif %}>Mean fold excess</option>
+                    <option value="fold_dispersion" {% if sort_by == "fold_dispersion" %}selected{% endif %}>Low dispersion</option>
+                    <option value="valid_fold_rate" {% if sort_by == "valid_fold_rate" %}selected{% endif %}>Valid fold rate</option>
+                    <option value="walk_forward_final_equity" {% if sort_by == "walk_forward_final_equity" %}selected{% endif %}>WF final equity</option>
+                    <option value="final_equity" {% if sort_by == "final_equity" %}selected{% endif %}>Legacy final equity</option>
+                    <option value="max_drawdown" {% if sort_by == "max_drawdown" %}selected{% endif %}>Drawdown</option>
+                    <option value="fit_seconds" {% if sort_by == "fit_seconds" %}selected{% endif %}>Fastest fit</option>
+                  </select>
+                </div>
+              </div>
+              <div class="filter-actions">
+                <button class="btn" type="submit">Apply Filters</button>
+                <a class="link" href="?summary={{ selected_summary.name|urlencode }}">Reset</a>
+                {% if show_all_variants %}<input type="hidden" name="show" value="all">{% endif %}
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="eyebrow">Leaderboard</div>
+            <h2 style="margin:8px 0 14px;">Passed Variants</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Variant</th>
+                    <th>Families</th>
+                    <th>Folds</th>
+                    <th class="bar-cell">Mean Fold Excess</th>
+                    <th class="bar-cell">WF Excess</th>
+                    <th>WF Equity</th>
+                    <th>Drawdown</th>
+                    <th>Runtime</th>
+                    <th>Links</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in detail_rows %}
+                    <tr>
+                      <td>
+                        <strong>{{ row.variant_name }}</strong>
+                        <div class="small">{{ row.suite_name }}{% if row.label_ks %} | k {{ row.label_ks|join:", " }}{% endif %}</div>
+                      </td>
+                      <td>
+                        <div class="family-stack">
+                          {% for family in row.feature_families %}
+                            <span>{{ family }}</span>
+                          {% endfor %}
+                        </div>
+                      </td>
+                      <td class="mono">
+                        {% if row.fold_count %}
+                          {{ row.valid_fold_count }}/{{ row.fold_count }}
+                          <div class="bar-track"><div class="bar-fill" style="width:{% widthratio row.valid_fold_rate 1 100 %}%"></div></div>
+                        {% else %}
+                          -
+                        {% endif %}
+                      </td>
+                      <td class="bar-cell">
+                        <strong class="{% if row.mean_fold_excess_cumulative_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.mean_fold_excess_cumulative_return|signed_pct:1 }}</strong>
+                        <div class="bar-track"><div class="bar-fill {% if row.mean_fold_excess_cumulative_return|default:0 < 0 %}bad-bar{% endif %}" style="width: {{ row.excess_bar_pct|default:0 }}%"></div></div>
+                      </td>
+                      <td class="bar-cell">
+                        <strong class="{% if row.walk_forward_excess_cumulative_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.walk_forward_excess_cumulative_return|signed_pct:1 }}</strong>
+                        <div class="bar-track"><div class="bar-fill {% if row.walk_forward_excess_cumulative_return|default:0 < 0 %}bad-bar{% endif %}" style="width: {{ row.walk_forward_excess_bar_pct|default:0 }}%"></div></div>
+                      </td>
+                      <td class="mono">{{ row.walk_forward_final_equity|floatformat:2 }}</td>
+                      <td class="bad mono">{{ row.walk_forward_max_drawdown|signed_pct:1 }}</td>
+                      <td class="mono">{{ row.avg_fit_seconds|floatformat:2 }}s</td>
+                      <td class="links-cell">
+                        {% if row.strategy_url %}<a class="link" href="{{ row.strategy_url }}">Strategy</a>{% endif %}
+                        {% if row.backtest_url %}<a class="link" href="{{ row.backtest_url }}">Backtest</a>{% endif %}
+                        {% if row.research_url %}<a class="link" href="{{ row.research_url }}">Research</a>{% endif %}
+                        {% if row.stale_references %}<div class="small">Stale: {{ row.stale_references|join:", " }}</div>{% endif %}
+                      </td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="9" class="small">No variants in this summary.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {% if rejected_rows %}
+            <div class="card">
+              <div class="eyebrow">Failures</div>
+              <h2 style="margin:8px 0 14px;">Rejected Variants</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Variant</th>
+                      <th>Valid Fold Rate</th>
+                      <th class="bar-cell">Dispersion</th>
+                      <th>Reasons</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in rejected_rows %}
+                      <tr>
+                        <td><strong>{{ row.variant_name }}</strong></td>
+                        <td class="mono">{{ row.valid_fold_rate|default:"-" }}</td>
+                        <td class="bar-cell">
+                          <strong class="bad">{{ row.fold_excess_cumulative_return_std|default:"-"|floatformat:3 }}</strong>
+                          <div class="bar-track"><div class="bar-fill bad-bar" style="width: {{ row.dispersion_bar_pct|default:0 }}%"></div></div>
+                        </td>
+                        <td>{% if row.stability_gate_reasons %}{{ row.stability_gate_reasons|join:", " }}{% elif row.gate_reasons %}{{ row.gate_reasons|join:", " }}{% else %}-{% endif %}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {% endif %}
+        {% else %}
+          <div class="card">
+            <div class="eyebrow">No Selection</div>
+            <h2 style="margin:8px 0 8px;">No Cohort Summary Selected</h2>
+            <p class="subnote">Run the CLI research or cohort commands first, then come back here for the ranked view.</p>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

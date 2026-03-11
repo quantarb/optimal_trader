@@ -3,10 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Labeling Config Form</title>
+  <title>Labels</title>
   <style>
     body { font-family: "Avenir Next", "Trebuchet MS", sans-serif; margin: 24px; background: #f7f8fa; color: #202833; }
-    .card { max-width: 1240px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .card { max-width: 1260px; margin: 0 auto; background: #fff; border: 1px solid #dde3ea; border-radius: 14px; padding: 18px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+    .tab-btn { border: 1px solid #cdd8e4; background: #fff; color: #2b3e53; border-radius: 8px; padding: 8px 12px; font-weight: 700; cursor: pointer; }
+    .tab-btn.active { border-color: #0d6a6d; background: #e8f6f6; color: #0d6a6d; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .layout { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; align-items: start; }
     .panel { border: 1px solid #e2e8ef; border-radius: 12px; padding: 12px; background: #fcfdff; }
     .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
@@ -14,213 +19,952 @@
     label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 0.92rem; }
     input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #ccd6e2; border-radius: 8px; padding: 8px; font-size: 0.92rem; }
     .help { color: #5b6777; font-size: 0.8rem; margin-top: 6px; }
-    .errorlist { color: #a31515; margin: 0 0 6px; padding-left: 16px; }
     .btn { border: 1px solid #0d6a6d; background: #0d6a6d; color: #fff; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
-    .search { margin-bottom: 8px; }
-    .error { margin-top: 10px; padding: 10px; border: 1px solid #f3c4c4; background: #fff1f1; color: #9e2020; border-radius: 8px; }
+    .btn.secondary { background: #fff; color: #21425b; border-color: #a9bacb; }
+    .btn.danger { background: #9f2a2a; border-color: #9f2a2a; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .muted { color: #5b6777; font-size: 0.86rem; margin-top: 8px; }
+    .artifact-info { margin-top: 6px; padding: 8px; border: 1px dashed #cdd9e5; border-radius: 8px; background: #f9fbfd; font-size: 0.85rem; color: #3f4d5d; }
+    .progress-panel { margin-top: 10px; border: 1px solid #e2e8ef; border-radius: 10px; background: #f8fbff; padding: 10px; display: none; }
+    .progress-track { width: 100%; height: 10px; border-radius: 999px; overflow: hidden; background: #e3ebf4; }
+    .progress-fill { width: 0%; height: 100%; background: #0d6a6d; transition: width 0.2s linear; }
+    .progress-meta { margin-top: 8px; font-size: 0.84rem; color: #425062; }
     .table-wrap { border: 1px solid #e2e8ef; border-radius: 10px; overflow: auto; margin-top: 10px; }
     table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
     th, td { padding: 8px 10px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; }
     th { background: #f3f7fb; position: sticky; top: 0; }
-    a { color: #0d6a6d; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .symbol-section { margin-top: 18px; }
-    pre { margin-top: 14px; padding: 12px; border-radius: 10px; border: 1px solid #dde3ea; background: #0f1722; color: #d8ecff; overflow: auto; }
+    .error { color: #9e2020; }
+    .symbol-group { margin-top: 12px; }
+    .symbol-group h4 { margin: 10px 0 6px; }
+    .rename-input { width: 220px; margin-right: 6px; }
+    .inline-edit { display: flex; align-items: center; gap: 8px; }
+    .inline-edit input { width: 220px; }
+    .link-anchor { color: #0d6a6d; text-decoration: underline; }
     @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>Labeling Parameters</h1>
-    <div class="layout">
-      <div class="panel">
-        <form method="post">
-          {% csrf_token %}
-          <div class="grid">
-            {% for field in form %}
-              <div class="field">
-                {{ field.errors }}
-                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                {% if field.name == 'symbols' %}
-                  <input id="symbol-search" class="search" type="text" placeholder="Type to filter symbols...">
-                {% endif %}
-                {{ field }}
-                {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+    <h1>Labels</h1>
+    <p>Run labels using a selected <strong>UNIVERSE</strong> artifact. Use <strong>Label Jobs</strong> tab to load and rerun previous label jobs.</p>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="run">Run Labels</button>
+      <button class="tab-btn" data-tab="jobs">Label Jobs</button>
+    </div>
+
+    <div class="tab-panel active" data-tab="run">
+      <div class="layout">
+        <div class="panel">
+          <form method="post" id="build-config-form">
+            {% csrf_token %}
+
+            <div class="field">
+              <label for="universe-artifact-select">Universe Artifact</label>
+              <select id="universe-artifact-select" name="universe_artifact_id"></select>
+              <div class="artifact-info" id="universe-artifact-info">Loading universe artifacts...</div>
+            </div>
+
+            <div class="field">
+              <label for="run-name-input">Run Name</label>
+              <input id="run-name-input" type="text" placeholder="e.g. Sample Universe (Mega Caps) + Labels">
+              <div class="help">Optional. If empty, a default name is generated.</div>
+            </div>
+
+            <div class="field">
+              <label for="label-job-id-select">Label Job ID (optional)</label>
+              <select id="label-job-id-select" name="source_label_run_id">
+                <option value="">(none)</option>
+              </select>
+              <div class="help">Choose an existing label job to load/edit config before rerun.</div>
+            </div>
+
+            <div class="grid">
+              {% for field in form %}
+                <div class="field">
+                  {{ field.errors }}
+                  <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                  {{ field }}
+                  {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+                </div>
+              {% endfor %}
+            </div>
+
+            <div class="actions">
+              <button class="btn" id="run-labels-btn" type="submit">Run Labels Job</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Run Status</h2>
+          <p class="muted" id="build-config-status">Choose universe artifact and run labels.</p>
+          <div class="progress-panel" id="labels-progress-panel">
+            <div class="progress-track"><div class="progress-fill" id="labels-progress-fill"></div></div>
+            <div class="progress-meta" id="labels-progress-meta"></div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th colspan="4">Saved Artifact Stats</th></tr></thead>
+              <tbody id="artifact-stats-body">
+                <tr><td colspan="4" class="muted">No saved artifact stats loaded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h2>Stats Preview</h2>
+          <div id="stats-preview-content">
+            <p class="muted" id="stats-preview-empty">Loading latest preview...</p>
+          </div>
+
+          {% if symbol_trade_groups %}
+            <h3>Trades By Symbol</h3>
+            {% for group in symbol_trade_groups %}
+              <div class="symbol-group" id="{{ group.anchor }}">
+                <h4>{{ group.symbol }}</h4>
+                <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Side</th><th>Freq</th><th>k</th><th>Entry Date</th><th>Exit Date</th><th>Entry Px</th><th>Exit Px</th><th>Return</th></tr></thead><tbody>
+                {% for row in group.rows %}
+                  <tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.freq }}</td><td>{{ row.k }}</td><td>{{ row.entry_date }}</td><td>{{ row.exit_date }}</td><td>{{ row.entry_px }}</td><td>{{ row.exit_px }}</td><td>{{ row.ret_pct }}</td></tr>
+                {% endfor %}
+                </tbody></table></div>
               </div>
             {% endfor %}
-          </div>
-          <p><button class="btn" type="submit">Build Config</button></p>
-        </form>
+          {% elif trades_rows %}
+            <h3>Trades</h3>
+            <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Side</th><th>Freq</th><th>k</th><th>Entry Date</th><th>Exit Date</th><th>Entry Px</th><th>Exit Px</th><th>Return</th></tr></thead><tbody>
+            {% for row in trades_rows %}
+              <tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.freq }}</td><td>{{ row.k }}</td><td>{{ row.entry_date }}</td><td>{{ row.exit_date }}</td><td>{{ row.entry_px }}</td><td>{{ row.exit_px }}</td><td>{{ row.ret_pct }}</td></tr>
+            {% endfor %}
+            </tbody></table></div>
+          {% endif %}
+        </div>
       </div>
+    </div>
+
+    <div class="tab-panel" data-tab="jobs">
       <div class="panel">
-        <h2>Normalized Config</h2>
-        {% if normalized %}
-          <pre>{{ normalized }}</pre>
-        {% else %}
-          <p>Submit the form to preview normalized labeling parameters.</p>
-        {% endif %}
-        <h2>Optimal Trades</h2>
-        {% if trades_error %}
-          <div class="error">{{ trades_error }}</div>
-        {% endif %}
-        {% if trade_stats %}
-          <h3>Trade Summary</h3>
-          <div class="table-wrap">
-            <table>
-              <tbody>
-                <tr><th>Total Trades</th><td>{{ trade_stats.total_trades }}</td><th>Long / Short</th><td>{{ trade_stats.long_trades }} / {{ trade_stats.short_trades }}</td></tr>
-                <tr><th>Wins / Losses / Flat</th><td>{{ trade_stats.winning_trades }} / {{ trade_stats.losing_trades }} / {{ trade_stats.breakeven_trades }}</td><th>Win Rate</th><td>{{ trade_stats.win_rate_pct|floatformat:2 }}%</td></tr>
-                <tr><th>Avg Return</th><td>{{ trade_stats.avg_return_pct|floatformat:2 }}%</td><th>Median Return</th><td>{{ trade_stats.median_return_pct|floatformat:2 }}%</td></tr>
-                <tr><th>Avg Win</th><td>{% if trade_stats.avg_win_pct is not None %}{{ trade_stats.avg_win_pct|floatformat:2 }}%{% else %}-{% endif %}</td><th>Avg Loss</th><td>{% if trade_stats.avg_loss_pct is not None %}{{ trade_stats.avg_loss_pct|floatformat:2 }}%{% else %}-{% endif %}</td></tr>
-                <tr><th>Profit Factor</th><td>{% if trade_stats.profit_factor is not None %}{{ trade_stats.profit_factor|floatformat:2 }}{% else %}N/A (no losing trades){% endif %}</td><th>Avg Holding Days</th><td>{% if trade_stats.avg_holding_days is not None %}{{ trade_stats.avg_holding_days|floatformat:2 }}{% else %}-{% endif %}</td></tr>
-              </tbody>
-            </table>
-          </div>
-        {% endif %}
-        {% if grouped_trade_stats %}
-          <h3>Grouped Trade Stats (Side / Freq / k)</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Side</th>
-                  <th>Freq</th>
-                  <th>k</th>
-                  <th>Trades</th>
-                  <th>Trade Return Mean %</th>
-                  <th>Trade Return Std %</th>
-                  <th>Trade Duration Mean</th>
-                  <th>Trade Duration Std</th>
-                  <th>Sharpe</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for s in grouped_trade_stats %}
-                  <tr>
-                    <td>{{ s.side }}</td>
-                    <td>{{ s.freq }}</td>
-                    <td>{{ s.k }}</td>
-                    <td>{{ s.trades }}</td>
-                    <td>{{ s.trade_return_mean_pct|floatformat:2 }}%</td>
-                    <td>{% if s.trade_return_std_pct is not None %}{{ s.trade_return_std_pct|floatformat:2 }}%{% else %}-{% endif %}</td>
-                    <td>{{ s.trade_duration_mean|floatformat:2 }}</td>
-                    <td>{% if s.trade_duration_std is not None %}{{ s.trade_duration_std|floatformat:2 }}{% else %}-{% endif %}</td>
-                    <td>{% if s.sharpe is not None %}{{ s.sharpe|floatformat:2 }}{% else %}-{% endif %}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        {% endif %}
-        {% if symbol_grouped_trade_stats %}
-          <h3>Grouped Trade Stats (Symbol)</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Trades</th>
-                  <th>Trade Return Mean %</th>
-                  <th>Trade Return Std %</th>
-                  <th>Trade Duration Mean</th>
-                  <th>Trade Duration Std</th>
-                  <th>Sharpe</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for s in symbol_grouped_trade_stats %}
-                  <tr>
-                    <td><a href="{{ s.detail_href }}">{{ s.symbol }}</a></td>
-                    <td>{{ s.trades }}</td>
-                    <td>{{ s.trade_return_mean_pct|floatformat:2 }}%</td>
-                    <td>{% if s.trade_return_std_pct is not None %}{{ s.trade_return_std_pct|floatformat:2 }}%{% else %}-{% endif %}</td>
-                    <td>{{ s.trade_duration_mean|floatformat:2 }}</td>
-                    <td>{% if s.trade_duration_std is not None %}{{ s.trade_duration_std|floatformat:2 }}{% else %}-{% endif %}</td>
-                    <td>{% if s.sharpe is not None %}{{ s.sharpe|floatformat:2 }}{% else %}-{% endif %}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        {% endif %}
-        {% if trades_rows %}
-          <h3>All Trades</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th>Side</th>
-                  <th>Freq</th>
-                  <th>k</th>
-                  <th>Entry Date</th>
-                  <th>Exit Date</th>
-                  <th>Entry Price</th>
-                  <th>Exit Price</th>
-                  <th>Return %</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for r in trades_rows %}
-                  <tr>
-                    <td>{{ r.symbol }}</td>
-                    <td>{{ r.side }}</td>
-                    <td>{{ r.freq }}</td>
-                    <td>{{ r.k }}</td>
-                    <td>{{ r.entry_date }}</td>
-                    <td>{{ r.exit_date }}</td>
-                    <td>{{ r.entry_px }}</td>
-                    <td>{{ r.exit_px }}</td>
-                    <td>{{ r.ret_pct }}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        {% else %}
-          <p>No trades generated yet.</p>
-        {% endif %}
+        <div class="actions">
+          <button class="btn secondary" id="refresh-label-jobs-btn" type="button">Refresh Label Jobs</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Universe Artifact</th>
+                <th>Duration</th>
+                <th>Symbols</th>
+                <th>Total Trades</th>
+                <th>Long / Short</th>
+                <th>Wins / Losses / Flat</th>
+                <th>Win Rate</th>
+                <th>Avg Return</th>
+                <th>Median Return</th>
+                <th>Created</th>
+                <th>Finished</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="label-jobs-body">
+              <tr><td colspan="15" class="muted">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
+
   <script>
     (function () {
-      const search = document.getElementById("symbol-search");
-      const select = document.getElementById("id_symbols");
-      if (!search || !select) return;
+      const form = document.getElementById("build-config-form");
+      const btn = document.getElementById("run-labels-btn");
+      const status = document.getElementById("build-config-status");
+      const progressPanel = document.getElementById("labels-progress-panel");
+      const progressFill = document.getElementById("labels-progress-fill");
+      const progressMeta = document.getElementById("labels-progress-meta");
+      const artifactStatsBody = document.getElementById("artifact-stats-body");
+      const statsPreviewHost = document.getElementById("stats-preview-content");
+      const artifactSelect = document.getElementById("universe-artifact-select");
+      const artifactInfo = document.getElementById("universe-artifact-info");
+      const runNameInput = document.getElementById("run-name-input");
+      const labelJobSelect = document.getElementById("label-job-id-select");
+      const jobsBody = document.getElementById("label-jobs-body");
+      const refreshJobsBtn = document.getElementById("refresh-label-jobs-btn");
+      const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
+      const tabPanels = Array.from(document.querySelectorAll(".tab-panel"));
+      if (!form || !btn || !status || !progressPanel || !progressFill || !progressMeta || !artifactSelect || !artifactInfo || !artifactStatsBody || !statsPreviewHost || !runNameInput || !labelJobSelect || !jobsBody || !refreshJobsBtn) return;
 
-      // Toggle selection on single click so users don't need Cmd/Ctrl.
-      select.addEventListener("mousedown", function (e) {
-        const target = e.target;
-        if (target && target.tagName === "OPTION") {
-          e.preventDefault();
-          target.selected = !target.selected;
+      const csrfInput = document.querySelector("input[name='csrfmiddlewaretoken']");
+      const csrf = csrfInput ? csrfInput.value : "";
+      let pollHandle = null;
+      let artifactRows = [];
+      let labelRuns = [];
+      let jobsLoaded = false;
+      let currentLabelArtifact = null;
+
+      function esc(value) {
+        return String(value == null ? "" : value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function setTab(key) {
+        tabButtons.forEach((b) => b.classList.toggle("active", b.getAttribute("data-tab") === key));
+        tabPanels.forEach((p) => p.classList.toggle("active", p.getAttribute("data-tab") === key));
+        if (key === "jobs" && !jobsLoaded) {
+          loadLabelJobs()
+            .then(() => { jobsLoaded = true; })
+            .catch((err) => {
+              jobsBody.innerHTML = `<tr><td colspan="15" class="error">${esc(err.message)}</td></tr>`;
+            });
+        }
+      }
+
+      tabButtons.forEach((btn) => {
+        btn.addEventListener("click", () => setTab(btn.getAttribute("data-tab")));
+      });
+
+      async function fetchJson(url, options) {
+        const resp = await fetch(url, options || { credentials: "same-origin" });
+        const payload = await resp.json();
+        if (!resp.ok) throw new Error(payload.error || `HTTP ${resp.status}`);
+        return payload;
+      }
+
+      function formatDate(value) {
+        if (!value) return "-";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return value;
+        return d.toLocaleString();
+      }
+
+      function selectedArtifact() {
+        const id = Number(artifactSelect.value || 0);
+        if (!id) return null;
+        return artifactRows.find((row) => Number(row.artifact_id) === id) || null;
+      }
+
+      function selectedLabelRun() {
+        const id = Number(labelJobSelect.value || 0);
+        if (!id) return null;
+        return labelRuns.find((row) => Number(row.pipeline_run_id) === id) || null;
+      }
+
+      function defaultRunNameForSelection() {
+        const selected = selectedArtifact();
+        const universeName = selected
+          ? (String(selected.pipeline_run_name || "").trim() || `universe-${selected.artifact_id}`)
+          : "labels";
+        return `${universeName} + Labels`;
+      }
+
+      function ensureRunNameDefault() {
+        const current = String(runNameInput.value || "").trim();
+        if (current) return;
+        const selectedRun = selectedLabelRun();
+        if (selectedRun && String(selectedRun.name || "").trim()) {
+          runNameInput.value = String(selectedRun.name || "").trim();
+          return;
+        }
+        runNameInput.value = defaultRunNameForSelection();
+      }
+
+      function isRunSucceeded(run) {
+        return String((run && run.status) || "").toLowerCase() === "succeeded";
+      }
+
+      function renderSelectedArtifactInfo() {
+        const row = selectedArtifact();
+        if (!row) {
+          artifactInfo.textContent = "No universe artifact selected.";
+          return;
+        }
+        const count = Number((row.content || {}).count || 0);
+        artifactInfo.innerHTML = `Artifact <a class="link-anchor" href="/pipeline/artifacts/${row.artifact_id}/" target="_blank" rel="noopener">#${row.artifact_id}</a> | symbols=${count || "?"} | run=#${row.pipeline_run_id} (${esc(row.pipeline_run_name || "unnamed")}) | created=${esc(formatDate(row.created_at))}`;
+      }
+
+      function applyRunConfigToForm(run) {
+        if (!run) return;
+        const cfg = run.config && typeof run.config === "object" ? run.config : {};
+        Object.keys(cfg).forEach((key) => {
+          if (key === "universe_artifact_id" || key === "source_label_run_id") return;
+          const field = form.elements.namedItem(key);
+          if (!field) return;
+          const value = cfg[key];
+          if (field instanceof RadioNodeList) {
+            Array.from(field).forEach((el) => {
+              el.checked = String(el.value) === String(value);
+            });
+            return;
+          }
+          if (field.type === "checkbox") {
+            field.checked = Boolean(value);
+            return;
+          }
+          field.value = value == null ? "" : String(value);
+        });
+
+        const ids = Array.isArray(run.label_input_artifact_ids) ? run.label_input_artifact_ids : [];
+        const universeId = ids.length ? Number(ids[0]) : Number((cfg.universe_artifact_id || 0));
+        if (universeId) {
+          const exists = artifactRows.some((a) => Number(a.artifact_id) === universeId);
+          if (exists) artifactSelect.value = String(universeId);
+          renderSelectedArtifactInfo();
+        }
+        const runId = Number(run.pipeline_run_id || 0);
+        if (runId) {
+          const hasRunOption = Array.from(labelJobSelect.options).some((o) => Number(o.value || 0) === runId);
+          if (hasRunOption) labelJobSelect.value = String(runId);
+        }
+        runNameInput.value = String(run.name || "").trim();
+      }
+
+      async function loadUniverseArtifacts() {
+        const payload = await fetchJson("/pipeline/artifacts/list/?type=UNIVERSE&limit=100");
+        artifactRows = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+        artifactSelect.innerHTML = "";
+        if (!artifactRows.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No UNIVERSE artifacts found";
+          artifactSelect.appendChild(option);
+          artifactSelect.disabled = true;
+          renderSelectedArtifactInfo();
+          return;
+        }
+        artifactRows.forEach((row, idx) => {
+          const option = document.createElement("option");
+          option.value = String(row.artifact_id);
+          const count = Number((row.content || {}).count || 0);
+          option.textContent = `#${row.artifact_id} | symbols=${count || "?"} | run=${row.pipeline_run_name || "unnamed"} | ${formatDate(row.created_at)}`;
+          if (idx === 0) option.selected = true;
+          artifactSelect.appendChild(option);
+        });
+        artifactSelect.disabled = false;
+        renderSelectedArtifactInfo();
+        ensureRunNameDefault();
+      }
+
+      async function loadLabelJobs() {
+        const payload = await fetchJson("/pipeline/runs/list/?job_type=labels&limit=50&summary=1");
+        labelRuns = Array.isArray(payload.runs) ? payload.runs : [];
+        const currentValue = String(labelJobSelect.value || "");
+
+        labelJobSelect.innerHTML = '<option value="">(none)</option>';
+        labelRuns.forEach((run) => {
+          const option = document.createElement("option");
+          option.value = String(run.pipeline_run_id);
+          option.textContent = `#${run.pipeline_run_id} | ${run.name || "unnamed"} | ${run.status} | ${formatDate(run.created_at || run.started_at || run.finished_at)}`;
+          labelJobSelect.appendChild(option);
+        });
+        if (currentValue) {
+          const hasCurrent = Array.from(labelJobSelect.options).some((o) => o.value === currentValue);
+          if (hasCurrent) labelJobSelect.value = currentValue;
+        }
+
+        if (!labelRuns.length) {
+          jobsBody.innerHTML = '<tr><td colspan="15" class="muted">No label jobs found.</td></tr>';
+          return;
+        }
+
+        jobsBody.innerHTML = labelRuns.map((run) => {
+          const ids = Array.isArray(run.label_input_artifact_ids) ? run.label_input_artifact_ids : [];
+          const universeId = ids.length ? ids[0] : "-";
+          const canDelete = !["pending", "running"].includes(String(run.status || ""));
+          const durationSec = Number(run.duration_seconds || 0);
+          const durationText = Number.isFinite(durationSec) && durationSec > 0
+            ? `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`
+            : "-";
+          const symbols = Number(run.label_symbols || 0);
+          const stats = run.label_trade_stats && typeof run.label_trade_stats === "object" ? run.label_trade_stats : {};
+          const totalTrades = Number(stats.total_trades || 0);
+          const longTrades = Number(stats.long_trades || 0);
+          const shortTrades = Number(stats.short_trades || 0);
+          const winTrades = Number(stats.winning_trades || 0);
+          const lossTrades = Number(stats.losing_trades || 0);
+          const flatTrades = Number(stats.breakeven_trades || 0);
+          const winRate = Number(stats.win_rate_pct || 0);
+          const avgReturn = Number(stats.avg_return_pct || 0);
+          const medianReturn = Number(stats.median_return_pct || 0);
+          return `
+            <tr>
+              <td>#${run.pipeline_run_id}</td>
+              <td>
+                ${esc(run.name || "") || "-"}
+              </td>
+              <td>${esc(run.status || "-")}</td>
+              <td>${universeId}</td>
+              <td>${esc(durationText)}</td>
+              <td>${symbols || "-"}</td>
+              <td>${totalTrades || "-"}</td>
+              <td>${totalTrades ? `${longTrades} / ${shortTrades}` : "-"}</td>
+              <td>${totalTrades ? `${winTrades} / ${lossTrades} / ${flatTrades}` : "-"}</td>
+              <td>${totalTrades ? `${winRate.toFixed(2)}%` : "-"}</td>
+              <td>${totalTrades ? `${avgReturn.toFixed(2)}%` : "-"}</td>
+              <td>${totalTrades ? `${medianReturn.toFixed(2)}%` : "-"}</td>
+              <td>${formatDate(run.created_at || run.started_at)}</td>
+              <td>${formatDate(run.finished_at)}</td>
+              <td>
+                ${run.label_latest_artifact_id ? `<a class="btn secondary" href="/pipeline/artifacts/${run.label_latest_artifact_id}/" target="_blank" rel="noopener">Artifact</a>` : ""}
+                <button class="btn secondary results-job-btn" data-run-id="${run.pipeline_run_id}" type="button">Results</button>
+                <button class="btn secondary rerun-job-btn" data-run-id="${run.pipeline_run_id}" type="button">Rerun</button>
+                <button class="btn danger del-job-btn" data-run-id="${run.pipeline_run_id}" type="button">Delete</button>
+              </td>
+            </tr>
+          `;
+        }).join("");
+
+        bindJobButtons();
+      }
+
+      function bindJobButtons() {
+        document.querySelectorAll(".rerun-job-btn").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const id = Number(btn.getAttribute("data-run-id") || 0);
+            if (!id) return;
+            const run = labelRuns.find((r) => Number(r.pipeline_run_id) === id) || null;
+            if (!run) return;
+            if (!isRunSucceeded(run)) {
+              status.textContent = `Run #${id} is ${run.status}. Rerun from successful jobs only.`;
+              return;
+            }
+            labelJobSelect.value = String(id);
+            applyRunConfigToForm(run);
+            setTab("run");
+            form.requestSubmit();
+          });
+        });
+
+        document.querySelectorAll(".results-job-btn").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const id = Number(btn.getAttribute("data-run-id") || 0);
+            if (!id) return;
+            const run = labelRuns.find((r) => Number(r.pipeline_run_id) === id) || null;
+            if (!run) return;
+            if (!isRunSucceeded(run)) {
+              status.textContent = `Run #${id} is ${run.status} and has no successful results to load.`;
+              return;
+            }
+            labelJobSelect.value = String(id);
+            applyRunConfigToForm(run);
+            setTab("run");
+            try {
+              const payload = await fetchStatus(id);
+              const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+              const labelArtifacts = artifacts.filter((a) => String(a.artifact_type || "") === "LABELS");
+              const latest = labelArtifacts.length ? labelArtifacts[labelArtifacts.length - 1] : null;
+              if (!latest || !latest.artifact_id) {
+                throw new Error(`No LABELS artifact found for run #${id}.`);
+              }
+              await renderArtifactPreview(Number(latest.artifact_id));
+              status.textContent = `Loaded results for run #${id} (artifact #${latest.artifact_id}).`;
+            } catch (err) {
+              status.textContent = `Could not load results for run #${id}: ${err.message}`;
+            }
+          });
+        });
+
+        document.querySelectorAll(".del-job-btn").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const id = Number(btn.getAttribute("data-run-id") || 0);
+            if (!id) return;
+            if (!window.confirm(`Delete label job run #${id}?`)) return;
+            try {
+              await fetchJson(`/pipeline/runs/${encodeURIComponent(id)}/delete/?force=1`, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "X-CSRFToken": csrf },
+              });
+              await loadLabelJobs();
+              status.textContent = `Deleted label job #${id}.`;
+            } catch (err) {
+              status.textContent = `Could not delete label job #${id}: ${err.message}`;
+            }
+          });
+        });
+
+      }
+
+      labelJobSelect.addEventListener("change", () => {
+        const run = selectedLabelRun();
+        if (!run) {
+          runNameInput.value = "";
+          ensureRunNameDefault();
+          return;
+        }
+        if (!isRunSucceeded(run)) {
+          status.textContent = `Run #${run.pipeline_run_id} is ${run.status}. Only succeeded runs can be loaded.`;
+          return;
+        }
+        applyRunConfigToForm(run);
+        const runId = Number(run.pipeline_run_id || 0);
+        if (!runId) return;
+        fetchStatus(runId)
+          .then((payload) => {
+            const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+            const labelArtifacts = artifacts.filter((a) => String(a.artifact_type || "") === "LABELS");
+            const latest = labelArtifacts.length ? labelArtifacts[labelArtifacts.length - 1] : null;
+            if (!latest || !latest.artifact_id) return null;
+            return renderArtifactPreview(Number(latest.artifact_id));
+          })
+          .then(() => {
+            status.textContent = `Loaded run #${runId} parameters and stats.`;
+          })
+          .catch((err) => {
+            status.textContent = `Could not load run #${runId} stats: ${err.message}`;
+          });
+      });
+
+      artifactSelect.addEventListener("change", renderSelectedArtifactInfo);
+      artifactSelect.addEventListener("change", () => {
+        const selectedRun = selectedLabelRun();
+        if (selectedRun) return;
+        runNameInput.value = "";
+        ensureRunNameDefault();
+      });
+
+      async function fetchStatus(runId) {
+        return fetchJson(`/pipeline/runs/${encodeURIComponent(runId)}/`);
+      }
+
+      async function renderArtifactPreview(artifactId) {
+        if (!artifactId) return;
+        const payload = await fetchJson(`/pipeline/artifacts/${encodeURIComponent(artifactId)}/preview/?limit=200`);
+        const artifact = payload.artifact || {};
+        currentLabelArtifact = artifact;
+        const stats = ((artifact.content || {}).statistics || {});
+        const tradeStats = stats.trade_stats || {};
+        const symbolsCount = tradeStats.symbols_count || (artifact.content || {}).symbols || 0;
+        if (Object.keys(tradeStats).length) {
+          const runId = Number(artifact.pipeline_run_id || 0);
+          const runName = String(artifact.pipeline_run_name || "").trim();
+          const runStatus = String(artifact.pipeline_run_status || "").trim().toLowerCase();
+          const canRename = runId > 0 && !["pending", "running"].includes(runStatus);
+          artifactStatsBody.innerHTML = `
+            <tr>
+              <th>Run Name</th>
+              <td>
+                <div class="inline-edit">
+                  <input type="text" id="saved-artifact-run-name" value="${esc(runName || "unnamed")}" ${canRename ? "" : "disabled"}>
+                </div>
+              </td>
+              <th>Symbols</th>
+              <td>${esc(symbolsCount)}</td>
+            </tr>
+            <tr><th>Artifact</th><td><a class="link-anchor" href="/pipeline/artifacts/${artifactId}/" target="_blank" rel="noopener">Open LABELS artifact #${artifactId}</a></td><th>Run</th><td>#${esc(runId)}</td></tr>
+            <tr><th>Total Trades</th><td>${esc(tradeStats.total_trades || 0)}</td><th>Long / Short</th><td>${esc(tradeStats.long_trades || 0)} / ${esc(tradeStats.short_trades || 0)}</td></tr>
+            <tr><th>Wins / Losses / Flat</th><td>${esc(tradeStats.winning_trades || 0)} / ${esc(tradeStats.losing_trades || 0)} / ${esc(tradeStats.breakeven_trades || 0)}</td><th>Win Rate</th><td>${esc(tradeStats.win_rate_pct || 0)}%</td></tr>
+            <tr><th>Avg Return</th><td>${esc(tradeStats.avg_return_pct || 0)}%</td><th>Median Return</th><td>${esc(tradeStats.median_return_pct || 0)}%</td></tr>
+          `;
+          const nameInput = document.getElementById("saved-artifact-run-name");
+          if (nameInput && canRename) {
+            let saving = false;
+            let lastSaved = String(runName || "").trim() || "unnamed";
+
+            const saveName = async () => {
+              if (saving) return;
+              const nextName = String(nameInput.value || "").trim();
+              if (!nextName) {
+                status.textContent = "Run name cannot be empty.";
+                nameInput.value = lastSaved;
+                return;
+              }
+              if (nextName === lastSaved) return;
+              saving = true;
+              nameInput.disabled = true;
+              try {
+                await fetchJson(`/pipeline/runs/${encodeURIComponent(runId)}/rename/`, {
+                  method: "POST",
+                  credentials: "same-origin",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": csrf,
+                  },
+                  body: JSON.stringify({ name: nextName }),
+                });
+                lastSaved = nextName;
+                status.textContent = `Saved run name: ${nextName}`;
+                if (currentLabelArtifact && Number(currentLabelArtifact.pipeline_run_id || 0) === runId) {
+                  currentLabelArtifact.pipeline_run_name = nextName;
+                }
+                await loadLabelJobs();
+                await loadUniverseArtifacts();
+              } catch (err) {
+                status.textContent = `Could not rename run #${runId}: ${err.message}`;
+                nameInput.value = lastSaved;
+              } finally {
+                nameInput.disabled = false;
+                saving = false;
+              }
+            };
+
+            nameInput.addEventListener("blur", saveName);
+            nameInput.addEventListener("keydown", (event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                nameInput.blur();
+              }
+            });
+          }
+          renderStatsPreviewFromArtifact(artifact);
+        } else {
+          artifactStatsBody.innerHTML = '<tr><td colspan=\"4\" class=\"muted\">No saved artifact stats available.</td></tr>';
+          renderStatsPreviewFromArtifact(null);
+        }
+      }
+
+      function fmtNum(value, digits) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return "-";
+        return n.toFixed(digits);
+      }
+
+      function parseKList(raw) {
+        if (raw == null || raw === "") return [];
+        return String(raw)
+          .split(",")
+          .map((v) => Number(String(v).trim()))
+          .filter((v) => Number.isFinite(v) && v > 0)
+          .map((v) => Math.trunc(v));
+      }
+
+      function buildNormalizedConfigForPreview() {
+        const formData = new FormData(form);
+        const cfg = {};
+        formData.forEach((value, key) => {
+          if (key === "csrfmiddlewaretoken") return;
+          cfg[key] = value;
+        });
+        const minProfitPctPoints = Number(cfg.min_profit_pct || 1);
+        const rawK = {
+          W: parseKList(cfg.k_w_list),
+          M: parseKList(cfg.k_m_list),
+          QE: parseKList(cfg.k_qe_list),
+          YE: parseKList(cfg.k_ye_list),
+        };
+        const kParams = {};
+        Object.keys(rawK).forEach((freq) => {
+          const vals = rawK[freq];
+          if (Array.isArray(vals) && vals.length) kParams[freq] = vals;
+        });
+        return {
+          execution_params: {
+            buy_execution: String(cfg.buy_execution || "adj_high"),
+            cover_execution: String(cfg.cover_execution || "adj_high"),
+            fee_bps: Number(cfg.fee_bps || 0),
+            sell_execution: String(cfg.sell_execution || "adj_low"),
+            short_execution: String(cfg.short_execution || "adj_low"),
+            slippage_bps: Number(cfg.slippage_bps || 0),
+          },
+          k_params: kParams,
+          options: {
+            trade_dedup_mode: String(cfg.trade_dedup_mode || "exact"),
+          },
+          solver: {
+            min_profit_pct: Number.isFinite(minProfitPctPoints) ? (minProfitPctPoints / 100.0) : 0.01,
+          },
+        };
+      }
+
+      function renderStatsPreviewFromArtifact(artifact) {
+        const host = document.getElementById("stats-preview-content");
+        if (!host) return;
+        const stats = artifact && artifact.content ? (artifact.content.statistics || {}) : {};
+        const tradeStats = stats.trade_stats || {};
+        const grouped = Array.isArray(stats.grouped_trade_stats) ? stats.grouped_trade_stats : [];
+        const symbols = Array.isArray(stats.symbol_grouped_trade_stats) ? stats.symbol_grouped_trade_stats : [];
+        const normalizedCfg = buildNormalizedConfigForPreview();
+        const normalizedCfgPretty = JSON.stringify(normalizedCfg, null, 2);
+        if (!Object.keys(tradeStats).length) {
+          host.innerHTML = `
+            <h3>Normalized Config</h3>
+            <pre>${esc(normalizedCfgPretty)}</pre>
+            <p class="muted" id="stats-preview-empty">No stats available for this run yet.</p>
+          `;
+          return;
+        }
+        const top10 = symbols.slice(0, 10);
+        host.innerHTML = `
+          <h3>Normalized Config</h3>
+          <pre>${esc(normalizedCfgPretty)}</pre>
+          ${top10.length ? `
+            <h3>Top 10 Symbol Examples</h3>
+            <p class="muted">Showing ${top10.length} of ${symbols.length} symbol rows.</p>
+            <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Trades</th><th>Trade Return Mean %</th><th>Trade Return Std %</th><th>Trade Duration Mean</th><th>Trade Duration Std</th><th>Sharpe</th></tr></thead><tbody>
+              ${top10.map((row) => `
+                <tr>
+                  <td><a class="link-anchor" href="${buildSymbolDetailUrl(String(row.symbol || ''))}">${esc(row.symbol || "")}</a></td>
+                  <td>${esc(row.trades || 0)}</td>
+                  <td>${fmtNum(row.trade_return_mean_pct, 2)}%</td>
+                  <td>${row.trade_return_std_pct == null ? "-" : `${fmtNum(row.trade_return_std_pct, 2)}%`}</td>
+                  <td>${fmtNum(row.trade_duration_mean, 2)}</td>
+                  <td>${row.trade_duration_std == null ? "-" : fmtNum(row.trade_duration_std, 2)}</td>
+                  <td>${row.sharpe == null ? "-" : fmtNum(row.sharpe, 2)}</td>
+                </tr>
+              `).join("")}
+            </tbody></table></div>
+          ` : ""}
+          ${grouped.length ? `
+            <div class="table-wrap"><table><thead><tr><th>Side</th><th>Freq</th><th>k</th><th>Trades</th><th>Trade Return Mean %</th><th>Trade Return Std %</th><th>Trade Duration Mean</th><th>Trade Duration Std</th><th>Sharpe</th></tr></thead><tbody>
+              ${grouped.map((row) => `
+                <tr>
+                  <td>${esc(row.side || "")}</td>
+                  <td>${esc(row.freq || "")}</td>
+                  <td>${esc(row.k || "")}</td>
+                  <td>${esc(row.trades || 0)}</td>
+                  <td>${fmtNum(row.trade_return_mean_pct, 2)}%</td>
+                  <td>${row.trade_return_std_pct == null ? "-" : `${fmtNum(row.trade_return_std_pct, 2)}%`}</td>
+                  <td>${fmtNum(row.trade_duration_mean, 2)}</td>
+                  <td>${row.trade_duration_std == null ? "-" : fmtNum(row.trade_duration_std, 2)}</td>
+                  <td>${row.sharpe == null ? "-" : fmtNum(row.sharpe, 2)}</td>
+                </tr>
+              `).join("")}
+            </tbody></table></div>
+          ` : ""}
+        `;
+      }
+
+      function buildSymbolDetailUrl(symbol) {
+        const s = String(symbol || "").trim().toUpperCase();
+        const formData = new FormData(form);
+        const params = new URLSearchParams();
+        const runId = Number((currentLabelArtifact || {}).pipeline_run_id || 0);
+        const base = runId > 0
+          ? `/labels/symbol/${encodeURIComponent(runId)}/${encodeURIComponent(s)}/`
+          : `/labels/symbol/${encodeURIComponent(s)}/`;
+        formData.forEach((value, key) => {
+          if (key === "csrfmiddlewaretoken") return;
+          if (key === "universe_artifact_id") return;
+          if (key === "source_label_run_id") return;
+          if (value == null || value === "") return;
+          params.set(key, String(value));
+        });
+        const q = params.toString();
+        return q ? `${base}?${q}` : base;
+      }
+
+      function renderProgress(payload) {
+        const jobRuns = Array.isArray(payload.job_runs) ? payload.job_runs : [];
+        // A pipeline run id may have multiple historical attempts; collapse to latest
+        // status per job_type so progress reflects only the current attempt semantics.
+        const latestByType = new Map();
+        jobRuns.forEach((j) => {
+          const key = String(j.job_type || "");
+          if (!key) return;
+          latestByType.set(key, j);
+        });
+        const currentRuns = Array.from(latestByType.values());
+        const completed = currentRuns.filter((j) => String(j.status || "") === "succeeded").length;
+        const total = Math.max(1, currentRuns.length || 1);
+        const labelsRun = currentRuns.find((j) => String(j.job_type || "") === "labels") || null;
+        const progress = (labelsRun && labelsRun.progress) || payload.progress || {};
+        const overallPct = Number(progress.overall_percent_complete);
+        const phasePct = Number(progress.percent_complete);
+        const fallbackPct = Math.round((completed / total) * 100);
+        const pct = Number.isFinite(overallPct)
+          ? overallPct
+          : (Number.isFinite(phasePct) ? phasePct : fallbackPct);
+        progressFill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        const symbolTotal = Number(progress.total_units || 0);
+        const symbolDone = Number(progress.completed_units || 0);
+        const symbolCur = String(progress.current_item || "");
+        const etaSeconds = Number(progress.eta_seconds);
+        const throughput = Number(progress.items_per_second);
+        const symbolMsg = symbolTotal > 0
+          ? ` | Symbols: ${Math.min(symbolDone + (symbolCur ? 1 : 0), symbolTotal)}/${symbolTotal}${symbolCur ? ` (${symbolCur})` : ""}`
+          : "";
+        const phaseLabel = String(progress.phase_label || "").trim();
+        const etaMsg = Number.isFinite(etaSeconds)
+          ? ` | ETA: ${formatDuration(etaSeconds)}`
+          : "";
+        const throughputMsg = Number.isFinite(throughput) && throughput > 0
+          ? ` | Rate: ${throughput.toFixed(2)}/s`
+          : "";
+        progressMeta.textContent = `${completed}/${total} steps | Status: ${payload.status || "-"}${phaseLabel ? ` | ${phaseLabel}` : ""}${symbolMsg}${throughputMsg}${etaMsg}`;
+      }
+
+      function formatDuration(seconds) {
+        const value = Math.max(0, Math.round(Number(seconds) || 0));
+        if (value < 60) return `${value}s`;
+        const mins = Math.floor(value / 60);
+        const secs = value % 60;
+        if (mins < 60) return secs ? `${mins}m ${secs}s` : `${mins}m`;
+        const hours = Math.floor(mins / 60);
+        const remMins = mins % 60;
+        return remMins ? `${hours}h ${remMins}m` : `${hours}h`;
+      }
+
+      function choosePollDelay(payload) {
+        const progress = (payload && payload.progress) || {};
+        const etaSeconds = Number(progress.eta_seconds);
+        if (Number.isFinite(etaSeconds)) {
+          if (etaSeconds > 900) return 15000;
+          if (etaSeconds > 180) return 8000;
+          if (etaSeconds > 60) return 5000;
+        }
+        return 1500;
+      }
+
+      async function pollLabelsRun(runId) {
+        try {
+          const payload = await fetchStatus(runId);
+          renderProgress(payload);
+          const done = ["succeeded", "failed"].includes(String(payload.status || ""));
+          if (!done) {
+            pollHandle = setTimeout(() => { pollLabelsRun(runId); }, choosePollDelay(payload));
+            return;
+          }
+
+          pollHandle = null;
+          btn.disabled = false;
+          btn.textContent = "Run Labels Job";
+
+          if (String(payload.status) === "succeeded") {
+            const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+            const labelArtifacts = artifacts.filter((a) => String(a.artifact_type || "") === "LABELS");
+            const latest = labelArtifacts.length ? labelArtifacts[labelArtifacts.length - 1] : null;
+            status.textContent = latest
+              ? `Done. Saved ${latest.artifact_type} artifact #${latest.artifact_id}.`
+              : "Done. Labels pipeline run succeeded.";
+            if (runId) {
+              labelJobSelect.value = String(runId);
+            }
+            if (latest && latest.artifact_id) {
+              try {
+                await renderArtifactPreview(Number(latest.artifact_id));
+              } catch (err) {
+                status.textContent = `Could not load LABELS stats: ${err.message}`;
+              }
+            }
+            await loadLabelJobs();
+            if (runId) {
+              const hasRunOption = Array.from(labelJobSelect.options).some((o) => Number(o.value || 0) === runId);
+              if (hasRunOption) {
+                labelJobSelect.value = String(runId);
+                const run = labelRuns.find((r) => Number(r.pipeline_run_id) === runId) || null;
+                applyRunConfigToForm(run);
+              }
+            }
+          } else {
+            status.textContent = payload.error
+              ? `Labels pipeline failed: ${payload.error}`
+              : "Labels pipeline failed.";
+          }
+        } catch (err) {
+          if (pollHandle) clearTimeout(pollHandle);
+          pollHandle = null;
+          btn.disabled = false;
+          btn.textContent = "Run Labels Job";
+          status.textContent = `Could not read progress status: ${err.message}`;
+        }
+      }
+
+      function clearRunResultPanels() {
+        artifactStatsBody.innerHTML = '<tr><td colspan="4" class="muted">Running labels job... previous results cleared.</td></tr>';
+        const host = document.getElementById("stats-preview-content");
+        if (host) {
+          host.innerHTML = '<p class="muted" id="stats-preview-empty">Running labels job... preview will load when finished.</p>';
+        }
+      }
+
+      async function startLabelsRun() {
+        const selected = selectedArtifact();
+        if (!selected) throw new Error("Select a UNIVERSE artifact first.");
+
+        const selectedRun = selectedLabelRun();
+        const run = isRunSucceeded(selectedRun) ? selectedRun : null;
+        const formData = new FormData(form);
+        const config = {};
+        formData.forEach((value, key) => {
+          if (key === "csrfmiddlewaretoken") return;
+          config[key] = value;
+        });
+        config.universe_artifact_id = Number(selected.artifact_id);
+        if (run) {
+          config.source_label_run_id = Number(run.pipeline_run_id);
+        } else {
+          delete config.source_label_run_id;
+        }
+        const universeName = String(selected.pipeline_run_name || "").trim() || `universe-${selected.artifact_id}`;
+        const typedName = String(runNameInput.value || "").trim();
+        const runName = typedName || (run
+          ? String(run.name || "").trim() || `Label Job #${run.pipeline_run_id}`
+          : `${universeName} + Labels`);
+
+        return fetchJson("/pipeline/runs/start/", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrf,
+          },
+          body: JSON.stringify({
+            target_job: "labels",
+            mode: "strict",
+            name: runName,
+            overwrite_pipeline_run_id: run ? Number(run.pipeline_run_id) : null,
+            force_overwrite: run ? true : false,
+            config,
+            input_artifact_ids: [Number(selected.artifact_id)],
+          }),
+        });
+      }
+
+      form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        btn.disabled = true;
+        btn.textContent = "Running...";
+        status.textContent = "Starting labels pipeline run...";
+        progressPanel.style.display = "block";
+        progressFill.style.width = "0%";
+        progressMeta.textContent = "Starting run...";
+        clearRunResultPanels();
+
+        try {
+          const started = await startLabelsRun();
+          renderProgress(started);
+          const runId = Number(started.pipeline_run_id || 0);
+          if (!runId) throw new Error("Missing pipeline_run_id.");
+
+          if (pollHandle) clearTimeout(pollHandle);
+          pollHandle = setTimeout(() => { pollLabelsRun(runId); }, choosePollDelay(started));
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "Run Labels Job";
+          status.textContent = `Could not start labels run: ${err.message}`;
         }
       });
 
-      search.addEventListener("input", function () {
-        const q = String(search.value || "").trim().toLowerCase();
-        for (const opt of Array.from(select.options)) {
-          const txt = String(opt.text || "").toLowerCase();
-          const match = !q || txt.includes(q);
-          opt.hidden = !match;
-        }
+      refreshJobsBtn.addEventListener("click", () => {
+        loadLabelJobs()
+          .then(() => { jobsLoaded = true; })
+          .catch((err) => {
+            jobsBody.innerHTML = `<tr><td colspan="15" class="error">${esc(err.message)}</td></tr>`;
+          });
       });
-    })();
 
-    (function () {
-      const forceDefaults = {{ force_default_exec|yesno:"true,false" }};
-      if (!forceDefaults) return;
-      const defaults = {
-        id_buy_execution: "adj_high",
-        id_sell_execution: "adj_low",
-        id_short_execution: "adj_low",
-        id_cover_execution: "adj_high",
-      };
-      Object.keys(defaults).forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) el.value = defaults[id];
-      });
+      Promise.all([loadUniverseArtifacts(), loadLabelJobs()])
+        .then(() => {
+          jobsLoaded = true;
+        })
+        .catch((err) => {
+          status.textContent = `Initialization error: ${err.message}`;
+        });
+
+      fetchJson("/pipeline/artifacts/latest/?type=LABELS")
+        .then((payload) => {
+          const artifact = payload && payload.artifact ? payload.artifact : null;
+          if (!artifact || !artifact.artifact_id) return;
+          return renderArtifactPreview(Number(artifact.artifact_id));
+        })
+        .catch(() => {});
+
     })();
   </script>
 </body>

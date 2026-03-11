@@ -9,6 +9,11 @@ BOOL_CHOICES = (
     ("false", "False"),
 )
 
+UNIVERSE_DATA_SOURCE_CHOICES = (
+    ("api", "FMP API (online)"),
+    ("db", "Django DB (local cache)"),
+)
+
 EXCHANGE_CHOICES = (
     ("", "Any"),
     ("NASDAQ", "NASDAQ"),
@@ -137,6 +142,7 @@ def _find_us_country_value(choices: Sequence[tuple[str, str]]) -> str:
 
 
 class UniverseScreenerForm(forms.Form):
+    data_source = forms.ChoiceField(required=False, choices=UNIVERSE_DATA_SOURCE_CHOICES, initial="db")
     limit = forms.IntegerField(required=False, min_value=1, initial=10000)
     marketCapMoreThan = forms.FloatField(required=False, label="Market Cap Min (Millions)", initial=5000)
     marketCapLowerThan = forms.FloatField(required=False, label="Market Cap Max (Millions)")

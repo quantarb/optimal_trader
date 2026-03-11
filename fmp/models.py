@@ -224,3 +224,56 @@ class SymbolSectionHistorical(models.Model):
 
     def __str__(self) -> str:
         return f"{self.symbol.symbol}:{self.section_key}:{self.record_key[:8]}"
+
+
+class UniverseDownloadJob(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_COMPLETED_WITH_ERRORS = "completed_with_errors"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = (
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_COMPLETED_WITH_ERRORS, "Completed With Errors"),
+        (STATUS_FAILED, "Failed"),
+    )
+
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    symbols = models.JSONField(default=list, blank=True)
+    total = models.IntegerField(default=0)
+    completed = models.IntegerField(default=0)
+    success_count = models.IntegerField(default=0)
+    failed_count = models.IntegerField(default=0)
+    current_symbol = models.CharField(max_length=32, blank=True, default="")
+    errors = models.JSONField(default=list, blank=True)
+    metrics = models.JSONField(default=dict, blank=True)
+    celery_task_id = models.CharField(max_length=255, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"universe-download:{self.pk}:{self.status}"
+
+
+class WorkflowState(models.Model):
+    key = models.CharField(max_length=64, unique=True, default="default")
+    universe_symbols = models.JSONField(default=list, blank=True)
+    universe_filters = models.JSONField(default=dict, blank=True)
+    labels_config = models.JSONField(default=dict, blank=True)
+    label_target_col = models.CharField(max_length=128, blank=True, default="label")
+    labels_generated_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"workflow-state:{self.key}"

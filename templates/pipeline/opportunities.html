@@ -1,0 +1,145 @@
+{% extends "pipeline/base_app.html" %}
+{% load pipeline_ui %}
+
+{% block title %}{{ page_title|default:"Opportunities" }}{% endblock %}
+
+{% block topbar_links %}
+  <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+  <a class="topbar-link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
+  <a class="topbar-link" href="{% url 'pipeline-market-situations' %}">Market Situations</a>
+  <a class="topbar-link" href="{% url 'pipeline-stock-intelligence' %}">Stock Intelligence</a>
+  <a class="topbar-link" href="{% url 'pipeline-portfolio-analysis' %}">Portfolio Analyzer</a>
+{% endblock %}
+
+{% block page_body %}
+  {% include "pipeline/components/_page_header.html" with eyebrow="Market Situation Intelligence" title="Top Opportunities Today" subtitle="This layer translates the internal quant engine into decision support. Each score blends model rank, historical analog outcomes, and market familiarity." metrics=header_metrics %}
+  <div class="page-grid page-grid-sidebar">
+    <aside class="filter-panel">
+      <div class="eyebrow">Insight Inputs</div>
+      <h2 class="section-title">Artifact Selection</h2>
+      <form method="get">
+        <div class="filter-grid">
+          <div class="field-group">
+            <label for="strategy_artifact_id">Strategy Dataset</label>
+            <select id="strategy_artifact_id" name="strategy_artifact_id">
+              <option value="">Latest STRATEGY_DATASET</option>
+              {% for artifact in strategy_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if selected_strategy_artifact and artifact.id == selected_strategy_artifact.id %} selected{% endif %}>#{{ artifact.id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="feature_artifact_id">Feature Artifact</label>
+            <select id="feature_artifact_id" name="feature_artifact_id">
+              <option value="">Latest FEATURES</option>
+              {% for artifact in feature_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if selected_feature_artifact and artifact.id == selected_feature_artifact.id %} selected{% endif %}>#{{ artifact.id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="label_artifact_id">Label Artifact</label>
+            <select id="label_artifact_id" name="label_artifact_id">
+              <option value="">Latest LABELS</option>
+              {% for artifact in label_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if selected_label_artifact and artifact.id == selected_label_artifact.id %} selected{% endif %}>#{{ artifact.id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="market_situation_artifact_id">Market Situation Artifact</label>
+            <select id="market_situation_artifact_id" name="market_situation_artifact_id">
+              <option value="">Latest MARKET_SITUATION_CLUSTER</option>
+              {% for artifact in market_situation_artifact_choices %}
+                <option value="{{ artifact.id }}"{% if selected_market_situation_artifact and artifact.id == selected_market_situation_artifact.id %} selected{% endif %}>#{{ artifact.id }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="search_method">Search Method</label>
+            <select id="search_method" name="search_method">
+              {% for choice in search_method_choices %}
+                <option value="{{ choice.value }}"{% if choice.value == search_method %} selected{% endif %}>{{ choice.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="limit">Limit</label>
+            <input id="limit" type="number" name="limit" min="5" max="100" step="1" value="{{ request.GET.limit|default:'20' }}">
+          </div>
+          <div class="field-group" style="grid-column: 1 / -1;">
+            <label>Prediction Artifacts</label>
+            <div class="check-list">
+              {% for artifact in prediction_artifact_choices %}
+                <label>
+                  <input type="checkbox" name="prediction_artifact_id" value="{{ artifact.id }}"{% if artifact.id in prediction_artifact_ids %} checked{% endif %}>
+                  <span>#{{ artifact.id }} | {{ artifact.artifact_type }} | {{ artifact.pipeline_run.name|default:"unnamed" }}</span>
+                </label>
+              {% empty %}
+                <div class="small">No prediction artifacts available.</div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        <div class="action-row">
+          <button class="action-button" type="submit">Refresh Opportunities</button>
+          <a class="action-button secondary" href="{% url 'pipeline-top-opportunities' %}">Top 10</a>
+        </div>
+      </form>
+      {% if error %}
+        <div class="error-state" style="margin-top:16px;">{{ error }}</div>
+      {% endif %}
+    </aside>
+
+    <section class="stack">
+      {% for row in rows %}
+        <div class="row-card">
+          <div class="page-grid page-grid-hero">
+            <div>
+              <div class="eyebrow">#{{ forloop.counter }}</div>
+              <a class="summary-item-title" href="{% url 'pipeline-stock-intelligence-symbol' row.symbol %}?search_method={{ search_method }}&strategy_artifact_id={{ dashboard.artifacts.strategy_artifact_id }}{% if dashboard.artifacts.feature_artifact_id %}&feature_artifact_id={{ dashboard.artifacts.feature_artifact_id }}{% endif %}{% if dashboard.artifacts.label_artifact_id %}&label_artifact_id={{ dashboard.artifacts.label_artifact_id }}{% endif %}{% if dashboard.artifacts.market_situation_artifact_id %}&market_situation_artifact_id={{ dashboard.artifacts.market_situation_artifact_id }}{% endif %}{% for artifact_id in dashboard.artifacts.prediction_artifact_ids %}&prediction_artifact_id={{ artifact_id }}{% endfor %}">
+                <h2 class="section-title" style="margin-bottom:4px;">{{ row.symbol }}</h2>
+              </a>
+              <div class="small">State date {{ row.date }}</div>
+              <div class="pill-row" style="margin-top:10px;">
+                <span class="pill">{{ row.confidence_label }} confidence</span>
+                <span class="pill">{{ row.market_familiarity_label }} familiarity</span>
+                {% if row.cluster_description %}
+                  <span class="pill">{{ row.cluster_description }}</span>
+                {% endif %}
+              </div>
+            </div>
+            <div class="metric-grid">
+              <div class="metric-tile">
+                <span class="metric-label">Opportunity Score</span>
+                <div class="score-display">{{ row.opportunity_score|floatformat:0 }}</div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ row.score_bar_pct|default:0 }}%"></div></div>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Confidence</span>
+                <div class="metric-value">{{ row.confidence_score|floatformat:0 }}</div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ row.confidence_bar_pct|default:0 }}%"></div></div>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Familiarity</span>
+                <div class="metric-value">{{ row.market_familiarity_score|floatformat:0 }}</div>
+                <div class="bar-track"><div class="bar-fill" style="width: {{ row.familiarity_bar_pct|default:0 }}%"></div></div>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Risk Indicator</span>
+                <div class="metric-value">{{ row.risk_indicator }}</div>
+                <div class="small" style="margin-top:6px;">Median 60d {% if row.median_return is not None %}{{ row.median_return|signed_pct:1 }}{% else %}-{% endif %}</div>
+                <div class="small">Win rate {% if row.win_rate is not None %}{{ row.win_rate|floatformat:2 }}{% else %}-{% endif %}</div>
+                {% if row.cluster_id %}
+                  <div class="small">Cluster {{ row.cluster_id }}</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+      {% empty %}
+        {% include "pipeline/components/_empty_state.html" with eyebrow="No Data" title="No Opportunity Rows Available" body="Select a strategy dataset or feature stack with predictions to populate the dashboard." %}
+      {% endfor %}
+    </section>
+  </div>
+{% endblock %}

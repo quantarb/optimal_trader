@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Form Tabs</title>
+  <style>
+    :root {
+      --bg: #f0f4f7;
+      --panel: #ffffff;
+      --ink: #1f2b39;
+      --muted: #5e6a78;
+      --line: #d2dce7;
+      --accent: #116149;
+      --accent-soft: #e4f4ee;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f7fafc, var(--bg));
+      color: var(--ink);
+      font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+    }
+    .shell {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px 16px 18px;
+      height: calc(100% - 38px);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: 1.6rem;
+    }
+    .hero p {
+      margin: 6px 0 0;
+      color: var(--muted);
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      padding: 9px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 0.92rem;
+    }
+    .tab-btn.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      overflow: hidden;
+      flex: 1;
+      min-height: 560px;
+    }
+    .tab-panel {
+      display: none;
+      height: 100%;
+    }
+    .tab-panel.active {
+      display: block;
+    }
+    .tab-frame {
+      border: 0;
+      width: 100%;
+      height: 100%;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <h1>Form Tabs</h1>
+      <p>Universe Screener, Labels, Feature, and Models in one page. Feature tab symbol: <strong>{{ feature_symbol }}</strong>.</p>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Form tabs">
+      {% for tab in tabs %}
+        <button
+          type="button"
+          class="tab-btn{% if forloop.first %} active{% endif %}"
+          data-tab-key="{{ tab.key }}"
+          role="tab"
+          aria-selected="{% if forloop.first %}true{% else %}false{% endif %}"
+        >
+          {{ tab.label }}
+        </button>
+      {% endfor %}
+    </div>
+    <div class="panel">
+      {% for tab in tabs %}
+        <div class="tab-panel{% if forloop.first %} active{% endif %}" data-tab-key="{{ tab.key }}" role="tabpanel">
+          <iframe class="tab-frame" src="{{ tab.url }}" title="{{ tab.label }}"></iframe>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const buttons = Array.from(document.querySelectorAll(".tab-btn"));
+      const panels = Array.from(document.querySelectorAll(".tab-panel"));
+      if (!buttons.length || !panels.length) return;
+
+      function activate(key) {
+        buttons.forEach((btn) => {
+          const isActive = btn.getAttribute("data-tab-key") === key;
+          btn.classList.toggle("active", isActive);
+          btn.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+        panels.forEach((panel) => {
+          const isActive = panel.getAttribute("data-tab-key") === key;
+          panel.classList.toggle("active", isActive);
+        });
+      }
+
+      buttons.forEach((btn) => {
+        btn.addEventListener("click", function() {
+          activate(btn.getAttribute("data-tab-key"));
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

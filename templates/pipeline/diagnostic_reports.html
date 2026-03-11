@@ -1,0 +1,262 @@
+{% load pipeline_ui %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagnostic Reports</title>
+  <style>
+    :root {
+      --bg:#eef4f7;
+      --panel:rgba(255,255,255,0.86);
+      --ink:#152433;
+      --muted:#627688;
+      --line:rgba(21,36,51,0.10);
+      --accent:#0d6b73;
+      --accent-2:#d46d38;
+      --good:#177245;
+      --bad:#b2403a;
+      --shadow:0 18px 48px rgba(18,35,50,0.08);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family:"Avenir Next","Trebuchet MS",sans-serif;
+      color:var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(13,107,115,0.10), transparent 28%),
+        radial-gradient(circle at top right, rgba(212,109,56,0.08), transparent 24%),
+        linear-gradient(180deg, #f8fbfc, var(--bg));
+    }
+    .shell { max-width:1500px; margin:0 auto; padding:28px 18px 48px; }
+    .topbar { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+    .link { color:var(--accent); text-decoration:none; font-weight:700; }
+    .hero, .card { background:var(--panel); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); backdrop-filter:blur(12px); padding:20px; }
+    .eyebrow { text-transform:uppercase; letter-spacing:0.14em; font-size:0.72rem; color:var(--muted); font-weight:700; }
+    .layout { display:grid; grid-template-columns:320px 1fr; gap:18px; margin-top:18px; }
+    .list { display:grid; gap:12px; }
+    .item { padding:14px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,0.72); }
+    .item.active { border-color:rgba(13,107,115,0.28); background:linear-gradient(180deg, rgba(13,107,115,0.08), rgba(255,255,255,0.82)); }
+    .stats { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:12px; margin:16px 0; }
+    .stat, .note { padding:14px 16px; border-radius:18px; background:rgba(255,255,255,0.72); border:1px solid rgba(21,36,51,0.08); }
+    .stat strong, .note strong { display:block; font-size:0.76rem; text-transform:uppercase; letter-spacing:0.10em; color:var(--muted); }
+    .value { font-size:1.16rem; font-weight:800; margin-top:6px; }
+    .good { color:var(--good); }
+    .bad { color:var(--bad); }
+    .columns { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+    .note-list { display:grid; gap:12px; }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:18px; background:#fff; }
+    table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+    th, td { text-align:left; padding:12px 14px; border-bottom:1px solid rgba(21,36,51,0.08); vertical-align:middle; }
+    th { background:linear-gradient(180deg, rgba(13,107,115,0.08), rgba(13,107,115,0.02)); color:var(--muted); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.10em; }
+    tr:last-child td { border-bottom:none; }
+    .bar-track { height:10px; background:rgba(21,36,51,0.08); border-radius:999px; overflow:hidden; margin-top:6px; }
+    .bar-fill { height:100%; background:linear-gradient(90deg, var(--accent), #35a7a1); border-radius:inherit; }
+    .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+    @media (max-width:1180px) { .layout, .stats, .columns { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <a class="link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+      <a class="link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
+      <a class="link" href="{% url 'pipeline-opportunities' %}">Opportunities</a>
+      <a class="link" href="{% url 'pipeline-market-situations' %}">Market Situations</a>
+      <a class="link" href="{% url 'pipeline-portfolio-analysis' %}">Portfolio Analysis</a>
+      <a class="link" href="{% url 'pipeline-research-reports' %}">Research Reports</a>
+      <a class="link" href="{% url 'pipeline-feature-attribution-reports' %}">Feature Attribution</a>
+      <a class="link" href="{% url 'pipeline-rl-policy-reports' %}">RL Policies</a>
+      <a class="link" href="/pipeline/oracle-reports/">Oracle Reports</a>
+    </div>
+    <div class="hero">
+      <div class="eyebrow">Explainable Research Reports</div>
+      <h1 style="font-size:clamp(2.2rem,4vw,3.3rem); line-height:0.95; letter-spacing:-0.04em; margin:8px 0 10px;">Diagnostics That Tell You What To Try Next</h1>
+      <p style="color:var(--muted);">Quantile signal checks, realistic backtest assumptions, RL policy sweeps, and machine-readable recommendations for the next experiment cycle.</p>
+    </div>
+    <div class="layout">
+      <div class="card">
+        <div class="eyebrow">Saved Reports</div>
+        <h2 style="margin:8px 0 14px;">Runs</h2>
+        <div class="list">
+          {% for summary in summaries %}
+            <div class="item {% if selected_summary and summary.name == selected_summary.name %}active{% endif %}">
+              <div><a class="link" href="?summary={{ summary.name|urlencode }}">{{ summary.name }}</a></div>
+              <div style="color:var(--muted); margin-top:6px;">{{ summary.updated_at|date:"Y-m-d H:i" }}</div>
+            </div>
+          {% empty %}
+            <div style="color:var(--muted);">No diagnostic reports found yet.</div>
+          {% endfor %}
+        </div>
+      </div>
+      <div>
+        {% if selected_summary %}
+          <div class="card">
+            <div class="eyebrow">Selected Report</div>
+            <h2 style="margin:8px 0 8px;">{{ selected_summary.name }}</h2>
+            <div class="stats">
+              <div class="stat"><strong>Candidate Rule</strong><div class="value">{{ candidate_rule.rows|default:"0" }} rows</div></div>
+              <div class="stat"><strong>Rule Win Rate</strong><div class="value {% if candidate_rule.win_rate|default:0 >= 0.75 %}good{% else %}bad{% endif %}">{{ candidate_rule.win_rate|default:0|floatformat:2 }}</div></div>
+              <div class="stat"><strong>Backtest Equity</strong><div class="value">{{ backtest_summary.final_equity|default:"-"|floatformat:2 }}</div></div>
+              <div class="stat"><strong>Best RL Return</strong><div class="value {% if best_rl_result.combined_total_return_pct|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ best_rl_result.combined_total_return_pct|default:0|floatformat:1 }}%</div></div>
+            </div>
+            <div class="columns">
+              <div class="note-list">
+                <div class="note">
+                  <strong>Observations</strong>
+                  {% for item in observations %}
+                    <div style="margin-top:8px;">{{ item }}</div>
+                  {% empty %}
+                    <div style="margin-top:8px; color:var(--muted);">No observations.</div>
+                  {% endfor %}
+                </div>
+                <div class="note">
+                  <strong>Recommendations</strong>
+                  {% for item in recommendations %}
+                    <div style="margin-top:8px;">{{ item }}</div>
+                  {% empty %}
+                    <div style="margin-top:8px; color:var(--muted);">No recommendations.</div>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="note-list">
+                <div class="note">
+                  <strong>Candidate Rule</strong>
+                  <div style="margin-top:8px;">`prob_buy >= {{ candidate_rule.prob_buy_gte|floatformat:3 }}`</div>
+                  <div style="margin-top:8px;">`pred_rf_reg >= {{ candidate_rule.pred_rf_reg_gte|floatformat:3 }}`</div>
+                  <div style="margin-top:8px;">`ae_familiarity >= {{ candidate_rule.ae_familiarity_gte|floatformat:3 }}`</div>
+                </div>
+                <div class="note">
+                  <strong>Backtest Assumptions</strong>
+                  <div style="margin-top:8px;">Delay {{ backtest_config.execution_delay_days|default:"-" }} day(s)</div>
+                  <div style="margin-top:8px;">Fee {{ backtest_config.fee_bps|default:"-"|floatformat:1 }} bps / Slippage {{ backtest_config.slippage_bps|default:"-"|floatformat:1 }} bps</div>
+                  <div style="margin-top:8px;">Min price {{ backtest_config.min_price|default:"-" }}</div>
+                  <div style="margin-top:8px;">Min dollar volume {{ backtest_config.min_dollar_volume|default:"-"|compact_number }}</div>
+                </div>
+                <div class="note">
+                  <strong>AE Signal Check</strong>
+                  <div style="margin-top:8px;">Raw familiarity median: {{ ae_signal_bug_check.raw_autoencoder_familiarity_median|default:"-"|floatformat:3 }}</div>
+                  <div style="margin-top:8px;">Strategy familiarity median: {{ ae_signal_bug_check.strategy_dataset_ae_familiarity_median|default:"-"|floatformat:3 }}</div>
+                </div>
+                <div class="note">
+                  <strong>Runtime Bottleneck</strong>
+                  <div style="margin-top:8px;">Slowest stage: {{ payload.runtime_summary.slowest_stage|default:"-" }}</div>
+                  <div style="margin-top:8px;">Backtest {{ payload.runtime_summary.backtest|default:"-"|floatformat:1 }}s</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:18px;">
+            <div class="eyebrow">Combined Signal</div>
+            <h3 style="margin:8px 0 14px;">Quantile Returns</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Bucket</th>
+                    <th>Rows</th>
+                    <th>Win Rate</th>
+                    <th>Avg Trade Return</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in combined_rows %}
+                    <tr>
+                      <td class="mono">{{ row.bucket }}</td>
+                      <td>{{ row.rows }}</td>
+                      <td>{{ row.win_rate|floatformat:2 }}</td>
+                      <td>
+                        <strong class="{% if row.avg_trade_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.avg_trade_return|signed_number:3 }}</strong>
+                        <div class="bar-track"><div class="bar-fill" style="width: {{ row.return_bar_pct|default:0 }}%"></div></div>
+                      </td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="4" style="color:var(--muted);">No combined signal rows.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:18px;">
+            <div class="eyebrow">Regressor Spread</div>
+            <h3 style="margin:8px 0 14px;">Trade Return Buckets</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Bucket</th>
+                    <th>Rows</th>
+                    <th>Win Rate</th>
+                    <th>Avg Trade Return</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in regressor_rows %}
+                    <tr>
+                      <td class="mono">{{ row.bucket }}</td>
+                      <td>{{ row.rows }}</td>
+                      <td>{{ row.win_rate|floatformat:2 }}</td>
+                      <td>
+                        <strong class="{% if row.avg_trade_return|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.avg_trade_return|signed_number:3 }}</strong>
+                        <div class="bar-track"><div class="bar-fill" style="width: {{ row.return_bar_pct|default:0 }}%"></div></div>
+                      </td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="4" style="color:var(--muted);">No regressor rows.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:18px;">
+            <div class="eyebrow">RL Sweep</div>
+            <h3 style="margin:8px 0 14px;">Policy Search Results</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Algo</th>
+                    <th>Eligibility Q</th>
+                    <th>Max Names</th>
+                    <th>Total Return</th>
+                    <th>Sharpe</th>
+                    <th>Max DD</th>
+                    <th>Exec Buys</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in rl_rows %}
+                    <tr>
+                      <td>{{ row.algorithm }}</td>
+                      <td>{{ row.eligibility_quantile|floatformat:2 }}</td>
+                      <td>{{ row.max_stocks_per_day }}</td>
+                      <td>
+                        <strong class="{% if row.combined_total_return_pct|default:0 >= 0 %}good{% else %}bad{% endif %}">{{ row.combined_total_return_pct|floatformat:1 }}%</strong>
+                        <div class="bar-track"><div class="bar-fill" style="width: {{ row.return_bar_pct|default:0 }}%"></div></div>
+                      </td>
+                      <td>{{ row.combined_sharpe|floatformat:2 }}</td>
+                      <td class="bad">{{ row.combined_max_drawdown_pct|floatformat:1 }}%</td>
+                      <td>{{ row.executed_buys }}</td>
+                    </tr>
+                  {% empty %}
+                    <tr><td colspan="7" style="color:var(--muted);">No RL sweep results in this report.</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {% else %}
+          <div class="card">
+            <div class="eyebrow">No Report</div>
+            <h2 style="margin:8px 0 8px;">No Diagnostic Report Selected</h2>
+            <p style="color:var(--muted);">Run `run_pipeline_diagnostics` from the CLI first, then inspect it here.</p>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

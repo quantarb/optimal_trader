@@ -12,7 +12,8 @@ import pandas as pd
 from django.http import Http404, HttpRequest, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.clickjacking import xframe_options_exempt
 from django.utils import timezone
 from django.db.models import Min, Max, Count
 
@@ -39,16 +40,36 @@ from .models import (
     SymbolSectionState,
     TreasuryRateObservation,
     TreasuryRateSeries,
+    UniverseDownloadJob,
+    WorkflowState,
 )
 from features.naming import feature_display_name
-from modules.data.fmp_client import FMPClient
-from modules.data.universe_fmp import screen_companies_fmp
+from data import FMPClient, screen_companies_fmp
+from utils.workflow import default_feature_symbol
 
 try:
     from dotenv import load_dotenv  # type: ignore
     load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 except Exception:
     pass
+
+
+def form_tabs_view(request: HttpRequest):
+    tabs = [
+        {"key": "pipeline", "label": "Pipeline", "url": "/pipeline/ui/"},
+        {"key": "universe", "label": "Universe Screener", "url": "/fmp/universe-screener/form/"},
+        {"key": "labels", "label": "Labels", "url": "/labels/form/"},
+        {"key": "feature", "label": "Feature", "url": "/features/form/"},
+        {"key": "models", "label": "Models", "url": "/ml/form/"},
+    ]
+    return render(
+        request,
+        "forms/tabs.html",
+        {
+            "tabs": tabs,
+            "feature_symbol": default_feature_symbol(request),
+        },
+    )
 
 
 def _parse_bool(value: str | None) -> bool | None:
@@ -436,6 +457,150 @@ def _save_symbols(records: list[dict]) -> int:
         )
         saved += 1
     return saved
+
+
+def _payload_bool(record: dict[str, Any], *keys: str) -> bool | None:
+    for key in keys:
+        value = record.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "t", "yes", "y"}:
+            return True
+        if text in {"0", "false", "f", "no", "n"}:
+            return False
+    return None
+
+
+def _bool_match(desired: bool | None, actual: bool | None) -> bool:
+    if desired is None:
+        return True
+    if desired is True:
+        return actual is True
+    # For "false", include explicit False and unknown values.
+    return actual is not True
+
+
+def _build_symbol_record_from_db(symbol_obj: Symbol) -> dict[str, Any]:
+    payload = symbol_obj.payload if isinstance(symbol_obj.payload, dict) else {}
+    record = dict(payload)
+    record["symbol"] = record.get("symbol") or symbol_obj.symbol
+    company_name = (
+        record.get("companyName")
+        or record.get("name")
+        or symbol_obj.company_name
+        or ""
+    )
+    exchange_value = record.get("exchangeShortName") or record.get("exchange") or symbol_obj.exchange or ""
+    record["companyName"] = company_name
+    record["name"] = record.get("name") or company_name
+    record["exchangeShortName"] = exchange_value
+    record["exchange"] = record.get("exchange") or exchange_value
+    record["country"] = record.get("country") or symbol_obj.country or ""
+    record["sector"] = record.get("sector") or symbol_obj.sector or ""
+    record["industry"] = record.get("industry") or symbol_obj.industry or ""
+    record["marketCap"] = record.get("marketCap")
+    if record["marketCap"] in (None, ""):
+        record["marketCap"] = symbol_obj.market_cap
+    record["price"] = record.get("price")
+    if record["price"] in (None, ""):
+        record["price"] = symbol_obj.price
+    record["beta"] = record.get("beta")
+    if record["beta"] in (None, ""):
+        record["beta"] = symbol_obj.beta
+    record["volume"] = record.get("volume")
+    if record["volume"] in (None, ""):
+        record["volume"] = symbol_obj.volume
+    record["lastDividend"] = record.get("lastDividend")
+    if record["lastDividend"] in (None, ""):
+        record["lastDividend"] = symbol_obj.dividend
+    record["dividendYield"] = record.get("dividendYield")
+    if record["dividendYield"] in (None, ""):
+        record["dividendYield"] = symbol_obj.dividend_yield
+    return record
+
+
+def _screen_companies_db(
+    *,
+    limit: int = 10_000,
+    marketCapMoreThan: float | None = None,
+    marketCapLowerThan: float | None = None,
+    sector: str | None = None,
+    industry: str | None = None,
+    betaMoreThan: float | None = None,
+    betaLowerThan: float | None = None,
+    priceMoreThan: float | None = None,
+    priceLowerThan: float | None = None,
+    dividendMoreThan: float | None = None,
+    dividendLowerThan: float | None = None,
+    volumeMoreThan: float | None = None,
+    volumeLowerThan: float | None = None,
+    exchange_values: list[str] | None = None,
+    country: str | None = None,
+    isEtf: bool | None = None,
+    isFund: bool | None = None,
+    isActivelyTrading: bool | None = None,
+) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
+    qs = Symbol.objects.all()
+
+    if marketCapMoreThan is not None:
+        qs = qs.filter(market_cap__gte=float(marketCapMoreThan))
+    if marketCapLowerThan is not None:
+        qs = qs.filter(market_cap__lte=float(marketCapLowerThan))
+    if betaMoreThan is not None:
+        qs = qs.filter(beta__gte=float(betaMoreThan))
+    if betaLowerThan is not None:
+        qs = qs.filter(beta__lte=float(betaLowerThan))
+    if priceMoreThan is not None:
+        qs = qs.filter(price__gte=float(priceMoreThan))
+    if priceLowerThan is not None:
+        qs = qs.filter(price__lte=float(priceLowerThan))
+    if dividendMoreThan is not None:
+        qs = qs.filter(dividend__gte=float(dividendMoreThan))
+    if dividendLowerThan is not None:
+        qs = qs.filter(dividend__lte=float(dividendLowerThan))
+    if volumeMoreThan is not None:
+        qs = qs.filter(volume__gte=float(volumeMoreThan))
+    if volumeLowerThan is not None:
+        qs = qs.filter(volume__lte=float(volumeLowerThan))
+    if sector:
+        qs = qs.filter(sector__iexact=str(sector).strip())
+    if industry:
+        qs = qs.filter(industry__iexact=str(industry).strip())
+    if country:
+        qs = qs.filter(country__iexact=str(country).strip())
+    if exchange_values:
+        normalized = [str(value).strip() for value in exchange_values if str(value).strip()]
+        if normalized:
+            qs = qs.filter(exchange__in=normalized)
+
+    records: list[dict[str, Any]] = []
+    for symbol_obj in qs.order_by("symbol").iterator():
+        record = _build_symbol_record_from_db(symbol_obj)
+        etf_value = _payload_bool(record, "isEtf", "isETF", "etf", "is_etf")
+        fund_value = _payload_bool(record, "isFund", "isMutualFund", "fund", "is_fund")
+        active_value = _payload_bool(
+            record,
+            "isActivelyTrading",
+            "activelyTrading",
+            "is_active",
+        )
+        if not _bool_match(isEtf, etf_value):
+            continue
+        if not _bool_match(isFund, fund_value):
+            continue
+        if not _bool_match(isActivelyTrading, active_value):
+            continue
+        records.append(record)
+        if len(records) >= int(limit):
+            break
+
+    symbols = tuple(sorted({str(r.get("symbol", "")).strip() for r in records if str(r.get("symbol", "")).strip()}))
+    return symbols, records
 
 
 def _normalize_cell(value):
@@ -880,6 +1045,10 @@ def _load_cached_history_rows(symbol_obj: Symbol, section_limits: dict[str, int]
 _FILTER_CHOICES_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _FILTER_TTL_SECONDS = 21600
 _LOOKUP_MAX_AGE_DAYS = 30
+_UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD = 0.75
+_UNIVERSE_DOWNLOAD_TARGET_YEARS = 20
+_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS = 3
+_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S = 1.5
 
 
 def _dedupe_choice_tuples(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -1014,6 +1183,313 @@ def _fetch_filter_choices(api_key: str | None) -> dict[str, list[tuple[str, str]
     return data
 
 
+def _parse_iso_date(value: Any):
+    if not value:
+        return None
+    try:
+        return timezone.datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _candidate_supports_date_window(candidates: list[tuple[str, dict]]) -> bool:
+    if not candidates:
+        return False
+    first_params = dict(candidates[0][1] or {})
+    return "from" in first_params and "to" in first_params
+
+
+def _clone_candidates_with_date_window(
+    candidates: list[tuple[str, dict]],
+    *,
+    from_date,
+    to_date,
+) -> list[tuple[str, dict]]:
+    out: list[tuple[str, dict]] = []
+    for path, params in candidates:
+        p = dict(params or {})
+        if "from" in p and "to" in p:
+            p["from"] = from_date.isoformat()
+            p["to"] = to_date.isoformat()
+        out.append((path, p))
+    return out
+
+
+def _run_with_retries(fetch_fn, *, max_attempts: int, base_delay_s: float) -> tuple[Any, int]:
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return fetch_fn(), attempt - 1
+        except Exception:
+            if attempt >= max_attempts:
+                raise
+            time.sleep(float(base_delay_s) * (2 ** (attempt - 1)))
+
+
+def _section_coverage_ratio(symbol_obj: Symbol, section_key: str, target_start, today) -> float:
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    section_range = ranges.get(section_key) if isinstance(ranges, dict) else None
+    if not isinstance(section_range, dict):
+        return 0.0
+    min_date = _parse_iso_date(section_range.get("min_date"))
+    max_date = _parse_iso_date(section_range.get("max_date"))
+    count = int(section_range.get("count") or 0)
+    if min_date is None or max_date is None or count <= 0:
+        return 0.0
+    window_days = max(1, (today - target_start).days + 1)
+    covered_start = max(min_date, target_start)
+    covered_end = min(max_date, today)
+    if covered_end < covered_start:
+        return 0.0
+    covered_days = (covered_end - covered_start).days + 1
+    ratio = float(covered_days) / float(window_days)
+    return max(0.0, min(1.0, ratio))
+
+
+def _refresh_all_symbol_sections(symbol_obj: Symbol, client: FMPClient) -> tuple[dict[str, str], dict[str, Any]]:
+    section_errors: dict[str, str] = {}
+    section_defs = get_symbol_endpoint_definitions(symbol_obj)
+    refreshed_historical = False
+    historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
+    now_date = timezone.now().date()
+    target_start = now_date - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
+
+    _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
+    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
+
+    stats = {
+        "sections_total": len(section_defs),
+        "sections_fetched": 0,
+        "sections_skipped": 0,
+        "partial_sections": 0,
+        "retry_attempts": 0,
+        "duration_s": 0.0,
+    }
+    t0 = time.perf_counter()
+
+    for section in section_defs:
+        section_key = section.key
+        kind = section.kind
+        candidates = section.candidates
+        filter_symbol = bool(section.filter_symbol)
+        threshold_days = int(section.threshold_days)
+        raw = None
+
+        try:
+            if kind == "historical":
+                coverage_ratio = _section_coverage_ratio(symbol_obj, section_key, target_start, now_date)
+                has_date_window = _candidate_supports_date_window(candidates)
+                section_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
+                max_date = _parse_iso_date(section_range.get("max_date"))
+                min_date = _parse_iso_date(section_range.get("min_date"))
+                is_recent_enough = bool(max_date and max_date >= (now_date - timedelta(days=threshold_days)))
+
+                fetch_mode = "full"
+                fetch_ranges: list[tuple[Any, Any]] = []
+
+                if coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and has_date_window:
+                    if max_date is not None and max_date < now_date:
+                        fetch_mode = "tail"
+                        fetch_ranges = [(max_date + timedelta(days=1), now_date)]
+                    elif not is_recent_enough:
+                        fetch_mode = "tail"
+                        fetch_ranges = [(max(now_date - timedelta(days=threshold_days), target_start), now_date)]
+                    else:
+                        fetch_mode = "skip"
+                elif coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and is_recent_enough:
+                    # Endpoints without date-window params can be skipped when sufficiently covered and fresh.
+                    fetch_mode = "skip"
+                elif has_date_window and min_date is not None and min_date > target_start:
+                    # Backfill only the missing head window when partial history exists.
+                    fetch_mode = "head"
+                    fetch_ranges = [(target_start, min_date - timedelta(days=1))]
+
+                if fetch_mode == "skip":
+                    stats["sections_skipped"] += 1
+                    continue
+
+                all_records: list[dict] = []
+                retries_used = 0
+                if fetch_mode in {"tail", "head"} and fetch_ranges:
+                    stats["partial_sections"] += 1
+                    for from_date, to_date in fetch_ranges:
+                        if to_date < from_date:
+                            continue
+                        partial_candidates = _clone_candidates_with_date_window(
+                            candidates,
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                        fetched, retries = _run_with_retries(
+                            lambda: _fetch_all_historical_records(client, partial_candidates),
+                            max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
+                            base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
+                        )
+                        retries_used += retries
+                        all_records.extend(list(fetched or []))
+                else:
+                    fetched, retries = _run_with_retries(
+                        lambda: _fetch_all_historical_records(client, candidates),
+                        max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
+                        base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
+                    )
+                    retries_used += retries
+                    all_records = list(fetched or [])
+
+                stats["retry_attempts"] += retries_used
+                records = _dedupe_records_by_record_date(all_records)
+            else:
+                raw, retries = _run_with_retries(
+                    lambda: _fetch_first_success(client, candidates),
+                    max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
+                    base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
+                )
+                stats["retry_attempts"] += retries
+                records = _to_records(raw)
+
+            if section_key == "peer_symbols":
+                peer_records: list[dict] = []
+                if isinstance(raw, list):
+                    if raw and isinstance(raw[0], dict):
+                        peer_records = raw
+                    else:
+                        peer_records = [{"peerSymbol": p} for p in raw]
+                elif isinstance(raw, dict):
+                    peers_list = raw.get("peersList") or raw.get("peers") or []
+                    if isinstance(peers_list, list):
+                        peer_records = [{"peerSymbol": p} for p in peers_list]
+                    else:
+                        peer_records = _to_records(raw)
+                records = peer_records
+
+            if filter_symbol:
+                records = _filter_records_for_symbol(records, symbol_obj.symbol)
+
+            if kind == "snapshot":
+                _save_snapshot_section(symbol_obj, section_key, raw)
+            else:
+                _save_historical_section(symbol_obj, section_key, records)
+                _update_symbol_historical_range(symbol_obj, section_key)
+                refreshed_historical = True
+
+            _mark_section_fetched(symbol_obj, section_key, kind)
+            stats["sections_fetched"] += 1
+        except Exception as exc:
+            if "HTTP 404" not in str(exc):
+                section_errors[section_key] = str(exc)
+
+    if refreshed_historical:
+        _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
+
+    stats["duration_s"] = round(float(time.perf_counter() - t0), 3)
+    return section_errors, stats
+
+
+def _serialize_universe_download_job(job: UniverseDownloadJob) -> dict[str, Any]:
+    total = max(1, int(job.total or 0))
+    progress_pct = int((int(job.completed or 0) / total) * 100) if total else 0
+    progress_pct = max(0, min(100, progress_pct))
+    return {
+        "job_id": str(job.pk),
+        "status": job.status,
+        "total": int(job.total or 0),
+        "completed": int(job.completed or 0),
+        "success_count": int(job.success_count or 0),
+        "failed_count": int(job.failed_count or 0),
+        "progress_pct": progress_pct,
+        "current_symbol": str(job.current_symbol or ""),
+        "errors": list(job.errors or []),
+        "metrics": dict(job.metrics or {}),
+        "celery_task_id": str(job.celery_task_id or ""),
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+@require_GET
+def universe_screener_download_status(request: HttpRequest, job_id: str) -> JsonResponse:
+    job = UniverseDownloadJob.objects.filter(pk=str(job_id).strip()).first()
+    if job is None:
+        raise Http404("Download job not found.")
+    return JsonResponse(_serialize_universe_download_job(job))
+
+
+@require_POST
+def universe_screener_download_start(request: HttpRequest) -> JsonResponse:
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return JsonResponse({"error": "Missing FMP_API_KEY in environment/.env."}, status=400)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        payload = {}
+    symbols_raw = payload.get("symbols") if isinstance(payload, dict) else []
+    if not isinstance(symbols_raw, list):
+        symbols_raw = []
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for item in symbols_raw:
+        code = str(item).strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        symbols.append(code)
+
+    if not symbols:
+        return JsonResponse({"error": "No symbols were provided."}, status=400)
+
+    if len(symbols) > 5000:
+        return JsonResponse({"error": "Too many symbols requested (max 5000)."}, status=400)
+
+    job = UniverseDownloadJob.objects.create(
+        status=UniverseDownloadJob.STATUS_PENDING,
+        symbols=symbols,
+        total=len(symbols),
+        completed=0,
+        success_count=0,
+        failed_count=0,
+        current_symbol="",
+        errors=[],
+        metrics={},
+    )
+
+    try:
+        from .tasks import run_universe_download_job_task
+    except Exception as exc:
+        job.status = UniverseDownloadJob.STATUS_FAILED
+        job.errors = [f"Celery task module unavailable: {exc}"]
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "errors", "finished_at", "updated_at"])
+        return JsonResponse(
+            {"error": "Celery is not available. Install/start Celery worker and broker."},
+            status=503,
+        )
+
+    try:
+        result = run_universe_download_job_task.delay(str(job.pk), api_key)
+        job.celery_task_id = str(getattr(result, "id", "") or "")
+        job.save(update_fields=["celery_task_id", "updated_at"])
+    except Exception as exc:
+        job.status = UniverseDownloadJob.STATUS_FAILED
+        job.errors = [f"Failed to enqueue Celery task: {exc}"]
+        job.finished_at = timezone.now()
+        job.save(update_fields=["status", "errors", "finished_at", "updated_at"])
+        return JsonResponse({"error": f"Could not enqueue job: {exc}"}, status=503)
+
+    return JsonResponse(
+        {
+            "job_id": str(job.pk),
+            "status": job.status,
+            "total": len(symbols),
+            "started_at": job.created_at.isoformat() if job.created_at else None,
+        }
+    )
+
+
 @require_GET
 def universe_screener(request: HttpRequest) -> JsonResponse:
     api_key = os.getenv("FMP_API_KEY")
@@ -1073,6 +1549,7 @@ def universe_screener(request: HttpRequest) -> JsonResponse:
     )
 
 
+@xframe_options_exempt
 def universe_screener_form(request: HttpRequest):
     api_key = os.getenv("FMP_API_KEY")
     dynamic_choices = _fetch_filter_choices(api_key)
@@ -1082,17 +1559,41 @@ def universe_screener_form(request: HttpRequest):
     symbol_col_index = -1
     display_rows: list[list] = []
     error: str | None = None
+    data_source_label = "FMP API"
 
     if request.method == "POST":
         form = UniverseScreenerForm(request.POST, **dynamic_choices)
         if form.is_valid():
-            if not api_key:
-                error = "Missing FMP_API_KEY in environment/.env."
-            else:
-                data = form.cleaned_data
-                selected_exchanges = data.get("exchange") or []
-                exchange_param = ",".join(selected_exchanges) if selected_exchanges else None
-                try:
+            data = form.cleaned_data
+            selected_exchanges = data.get("exchange") or []
+            data_source = str(data.get("data_source") or "db").strip().lower()
+            data_source_label = "Django DB" if data_source == "db" else "FMP API"
+            exchange_param = ",".join(selected_exchanges) if selected_exchanges else None
+            try:
+                if data_source == "db":
+                    _, records = _screen_companies_db(
+                        limit=data.get("limit") or 10000,
+                        marketCapMoreThan=_market_cap_millions_to_dollars(data.get("marketCapMoreThan")),
+                        marketCapLowerThan=_market_cap_millions_to_dollars(data.get("marketCapLowerThan")),
+                        sector=data.get("sector") or None,
+                        industry=data.get("industry") or None,
+                        betaMoreThan=data.get("betaMoreThan"),
+                        betaLowerThan=data.get("betaLowerThan"),
+                        priceMoreThan=data.get("priceMoreThan"),
+                        priceLowerThan=data.get("priceLowerThan"),
+                        dividendMoreThan=data.get("dividendMoreThan"),
+                        dividendLowerThan=data.get("dividendLowerThan"),
+                        volumeMoreThan=_volume_millions_to_units(data.get("volumeMoreThan")),
+                        volumeLowerThan=_volume_millions_to_units(data.get("volumeLowerThan")),
+                        exchange_values=list(selected_exchanges),
+                        country=data.get("country") or None,
+                        isEtf=_parse_bool(data.get("isEtf")),
+                        isFund=_parse_bool(data.get("isFund")),
+                        isActivelyTrading=_parse_bool(data.get("isActivelyTrading")),
+                    )
+                else:
+                    if not api_key:
+                        raise ValueError("Missing FMP_API_KEY in environment/.env.")
                     _, records = screen_companies_fmp(
                         api_key=api_key,
                         limit=data.get("limit") or 10000,
@@ -1115,17 +1616,59 @@ def universe_screener_form(request: HttpRequest):
                         isActivelyTrading=_parse_bool(data.get("isActivelyTrading")),
                         includeAllShareClasses=_parse_bool(data.get("includeAllShareClasses")),
                     )
-                    _save_symbols(records)
-                    if records:
-                        columns = _collect_columns(records)
-                        header_labels = [_prettify_header(col) for col in columns]
-                        symbol_col_index = columns.index("symbol") if "symbol" in columns else -1
-                        display_rows = [[_format_cell_for_column(col, row.get(col)) for col in columns] for row in records]
-                except Exception as exc:
-                    error = str(exc)
+                _save_symbols(records)
+                selected_symbols: list[str] = []
+                seen_symbols: set[str] = set()
+                for row in records:
+                    symbol_value = str(row.get("symbol") or "").strip().upper()
+                    if not symbol_value or symbol_value in seen_symbols:
+                        continue
+                    seen_symbols.add(symbol_value)
+                    selected_symbols.append(symbol_value)
+                request.session["universe_screener_symbols"] = selected_symbols
+                try:
+                    workflow_filters = {
+                        "data_source": str(data.get("data_source") or "api"),
+                        "limit": data.get("limit") or 10000,
+                        "marketCapMoreThan": data.get("marketCapMoreThan"),
+                        "marketCapLowerThan": data.get("marketCapLowerThan"),
+                        "sector": data.get("sector") or "",
+                        "industry": data.get("industry") or "",
+                        "betaMoreThan": data.get("betaMoreThan"),
+                        "betaLowerThan": data.get("betaLowerThan"),
+                        "priceMoreThan": data.get("priceMoreThan"),
+                        "priceLowerThan": data.get("priceLowerThan"),
+                        "dividendMoreThan": data.get("dividendMoreThan"),
+                        "dividendLowerThan": data.get("dividendLowerThan"),
+                        "volumeMoreThan": data.get("volumeMoreThan"),
+                        "volumeLowerThan": data.get("volumeLowerThan"),
+                        "exchange": list(selected_exchanges),
+                        "country": data.get("country") or "",
+                        "isEtf": data.get("isEtf") or "",
+                        "isFund": data.get("isFund") or "",
+                        "isActivelyTrading": data.get("isActivelyTrading") or "",
+                        "includeAllShareClasses": data.get("includeAllShareClasses") or "",
+                    }
+                    WorkflowState.objects.update_or_create(
+                        key="default",
+                        defaults={
+                            "universe_symbols": selected_symbols,
+                            "universe_filters": workflow_filters,
+                        },
+                    )
+                except Exception:
+                    pass
+                if records:
+                    columns = _collect_columns(records)
+                    header_labels = [_prettify_header(col) for col in columns]
+                    symbol_col_index = columns.index("symbol") if "symbol" in columns else -1
+                    display_rows = [[_format_cell_for_column(col, row.get(col)) for col in columns] for row in records]
+            except Exception as exc:
+                error = str(exc)
     else:
         form = UniverseScreenerForm(
             initial={
+                "data_source": "db",
                 "limit": 10000,
                 "marketCapMoreThan": 5000,
                 "country": _default_country_value(dynamic_choices.get("country_choices")),
@@ -1147,6 +1690,7 @@ def universe_screener_form(request: HttpRequest):
             "symbol_col_index": symbol_col_index,
             "display_rows": display_rows,
             "count": len(records),
+            "data_source_label": data_source_label,
             "error": error,
         },
     )

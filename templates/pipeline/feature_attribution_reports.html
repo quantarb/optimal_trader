@@ -1,0 +1,146 @@
+{% extends "pipeline/base_report.html" %}
+{% load pipeline_ui %}
+
+{% block title %}Feature Attribution Reports{% endblock %}
+{% block report_eyebrow %}Feature Attribution{% endblock %}
+{% block report_title %}Which Feature Bundles Expand Recoverable Oracle Coverage{% endblock %}
+{% block report_subtitle %}Walk-forward attribution across feature bundles, ranked by oracle subset coverage and out-of-sample excess return.{% endblock %}
+
+{% block topbar_links %}
+  <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+  <a class="topbar-link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
+  <a class="topbar-link" href="{% url 'pipeline-research-reports' %}">Research Reports</a>
+  <a class="topbar-link" href="{% url 'pipeline-oracle-reports' %}">Oracle Reports</a>
+  <a class="topbar-link" href="{% url 'pipeline-diagnostic-reports' %}">Diagnostics</a>
+  <a class="topbar-link" href="{% url 'pipeline-rl-policy-reports' %}">RL Policies</a>
+{% endblock %}
+
+{% block report_sidebar %}
+  <div class="eyebrow">Saved Reports</div>
+  <h2 class="section-title">Runs</h2>
+  <div class="summary-list">
+    {% for summary_item in summaries %}
+      <div class="summary-item {% if selected_summary and summary_item.name == selected_summary.name %}is-active{% endif %}">
+        <div><a class="summary-item-title" href="?summary={{ summary_item.name|urlencode }}">{{ summary_item.name }}</a></div>
+        <div class="small" style="margin-top:6px;">{{ summary_item.updated_at|date:"Y-m-d H:i" }}</div>
+        <div class="small">{{ summary_item.summary.best_feature_family_signature|default:"-"|feature_family_signature_label }}</div>
+      </div>
+    {% empty %}
+      {% include "pipeline/components/_empty_state.html" with eyebrow="No Reports" title="No attribution reports found yet" body="Run feature-family attribution to compare bundle lift versus baseline." %}
+    {% endfor %}
+  </div>
+{% endblock %}
+
+{% block report_content %}
+  {% if selected_summary %}
+    <div class="section-card">
+      <div class="eyebrow">Selected Report</div>
+      <h2 class="section-title">{{ selected_summary.name }}</h2>
+      <div class="metric-grid">
+        <div class="metric-tile"><span class="metric-label">Fit Job</span><div class="metric-value small">{{ summary.fit_job|default:"-" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Variants</span><div class="metric-value">{{ summary.variant_count|default:"0" }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Baseline</span><div class="metric-value small">{{ summary.baseline_signature|default:"-"|feature_family_signature_label }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Best Oracle Recall</span><div class="metric-value">{{ summary.best_oracle_recall|default:0|floatformat:3 }}</div></div>
+        <div class="metric-tile"><span class="metric-label">Best Cluster Coverage</span><div class="metric-value">{{ summary.best_oracle_cluster_coverage_rate|default:0|floatformat:3 }}</div></div>
+      </div>
+      <div class="split-grid">
+        <div class="report-note">
+          <strong>Best Bundle</strong>
+          <div style="margin-top:10px; font-size:1.1rem; font-weight:800;">{{ summary.best_feature_family_signature|default:"-"|feature_family_signature_label }}</div>
+          <div class="small" style="margin-top:8px;">Variant: {{ summary.best_variant_name|default:"-" }}</div>
+          <div class="small" style="margin-top:8px;">Mean fold excess return: {{ summary.best_mean_fold_excess_cumulative_return|default:0|signed_number:3 }}</div>
+        </div>
+        <div class="report-note">
+          <strong>Recommendations</strong>
+          {% for item in recommendations %}
+            <div style="margin-top:8px;">{{ item }}</div>
+          {% empty %}
+            <div class="small">No recommendations.</div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <div class="eyebrow">Bundle Scores</div>
+      <h3 class="section-title">Walk-Forward Variants</h3>
+      <div class="data-table-shell">
+        <div class="table-wrap">
+          <table class="app-table js-data-table" data-page-size="10">
+            <thead>
+              <tr>
+                <th>Variant</th>
+                <th>Families</th>
+                <th>Oracle Recall</th>
+                <th>Cluster Coverage</th>
+                <th>Mean Fold Excess</th>
+                <th>WF Excess</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+                <tr>
+                  <td><strong>{{ row.variant_name }}</strong><br><span class="small">{{ row.fit_job|default:"" }}</span></td>
+                  <td>{{ row.feature_family_signature|feature_family_signature_label }}</td>
+                  <td>{{ row.oracle_recall|floatformat:3 }}</td>
+                  <td>
+                    <strong>{{ row.oracle_cluster_coverage_rate|floatformat:3 }}</strong>
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.coverage_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                  <td>{{ row.mean_fold_excess_cumulative_return|signed_number:3 }}</td>
+                  <td>
+                    <strong>{{ row.walk_forward_excess_cumulative_return|signed_number:3 }}</strong>
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.excess_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="6" class="small">No rows.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <div class="eyebrow">Marginal Lift</div>
+      <h3 class="section-title">Delta Versus Baseline</h3>
+      <div class="data-table-shell">
+        <div class="table-wrap">
+          <table class="app-table js-data-table" data-page-size="10">
+            <thead>
+              <tr>
+                <th>Families</th>
+                <th>Baseline</th>
+                <th>Delta Oracle Recall</th>
+                <th>Delta Cluster Coverage</th>
+                <th>Delta Mean Fold Excess</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in marginal_rows %}
+                <tr>
+                  <td>{{ row.feature_family_signature|feature_family_signature_label }}</td>
+                  <td class="mono">{{ row.baseline_signature|feature_family_signature_label }}</td>
+                  <td>{{ row.delta_oracle_recall|signed_number:3 }}</td>
+                  <td>
+                    <strong>{{ row.delta_oracle_cluster_coverage_rate|signed_number:3 }}</strong>
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.delta_coverage_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                  <td>
+                    <strong>{{ row.delta_mean_fold_excess_cumulative_return|signed_number:3 }}</strong>
+                    <div class="bar-track"><div class="bar-fill" style="width: {{ row.delta_excess_bar_pct|default:0 }}%"></div></div>
+                  </td>
+                </tr>
+              {% empty %}
+                <tr><td colspan="5" class="small">No marginal rows.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {% else %}
+    {% include "pipeline/components/_empty_state.html" with eyebrow="No Report" title="No feature attribution report selected" body="Select a saved attribution report from the left rail to inspect bundle lift." %}
+  {% endif %}
+{% endblock %}

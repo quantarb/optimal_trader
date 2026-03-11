@@ -7,13 +7,76 @@ import numpy as np
 import pandas as pd
 
 from fmp.models import Symbol, SymbolSectionHistorical
-from modules.data.pit import broadcast_asof_to_target_index
+from data import broadcast_asof_to_target_index
 
 
 @dataclass(frozen=True)
 class BuiltFeatureSet:
     df: pd.DataFrame
     feature_cols: list[str]
+
+
+_SECTION_RECORD_CACHE: dict[tuple[int, str], list[tuple[Any, dict[str, Any]]]] = {}
+_DATE_KEY_CANDIDATES = (
+    "accepteddate",
+    "filingdate",
+    "fillingdate",
+    "transactiondate",
+    "date",
+    "calendar_date",
+)
+_EXCLUDED_PAYLOAD_FIELDS = {
+    "accepteddate",
+    "filingdate",
+    "fillingdate",
+    "transactiondate",
+    "date",
+    "calendar_date",
+    "symbol",
+    "link",
+    "finallink",
+    "cik",
+    "reportedcurrency",
+    "currency",
+    "fiscalyear",
+    "calendaryear",
+    "calendar_year",
+    "period",
+}
+
+
+def prime_section_record_cache(symbols: Sequence[Symbol], section_keys: Sequence[str]) -> None:
+    symbol_rows = [symbol for symbol in list(symbols or []) if getattr(symbol, "id", None)]
+    normalized_section_keys = [str(section_key).strip() for section_key in list(section_keys or []) if str(section_key).strip()]
+    if not symbol_rows or not normalized_section_keys:
+        return
+
+    symbol_ids = [int(symbol.id) for symbol in symbol_rows]
+    wanted_keys = {
+        (int(symbol.id), str(section_key))
+        for symbol in symbol_rows
+        for section_key in normalized_section_keys
+    }
+    missing = [item for item in wanted_keys if item not in _SECTION_RECORD_CACHE]
+    if not missing:
+        return
+
+    grouped: dict[tuple[int, str], list[tuple[Any, dict[str, Any]]]] = {key: [] for key in wanted_keys}
+    qs = (
+        SymbolSectionHistorical.objects.filter(symbol_id__in=symbol_ids, section_key__in=normalized_section_keys)
+        .only("symbol_id", "section_key", "record_date", "payload")
+        .order_by("symbol_id", "section_key", "record_date", "updated_at")
+    )
+    for item in qs.iterator():
+        grouped.setdefault((int(item.symbol_id), str(item.section_key)), []).append(
+            (item.record_date, item.payload if isinstance(item.payload, dict) else {})
+        )
+    for key in wanted_keys:
+        _SECTION_RECORD_CACHE[key] = list(grouped.get(key) or [])
+
+
+def clear_section_record_cache() -> None:
+    _SECTION_RECORD_CACHE.clear()
 
 
 def load_section_payload(
@@ -24,21 +87,25 @@ def load_section_payload(
     keep_fields: Iterable[str] | None = None,
     filing_lag_days: int = 0,
 ) -> pd.DataFrame:
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
-        .order_by("record_date", "updated_at")
-        .only("record_date", "payload")
-    )
     keep = {str(v).lower().strip() for v in keep_fields or []}
     rows: list[dict[str, Any]] = []
-    for item in qs.iterator():
-        payload = item.payload if isinstance(item.payload, dict) else {}
+    cached_rows = _SECTION_RECORD_CACHE.get((int(symbol_obj.id), str(section_key)))
+    if cached_rows is None:
+        qs = (
+            SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
+            .order_by("record_date", "updated_at")
+            .only("record_date", "payload")
+        )
+        iterator = ((item.record_date, item.payload if isinstance(item.payload, dict) else {}) for item in qs.iterator())
+    else:
+        iterator = iter(cached_rows)
+    for record_date, payload in iterator:
         row = payload_to_row(
             payload=payload,
             symbol=symbol_obj.symbol,
             prefix=prefix,
             keep_fields=keep if keep else None,
-            record_date=item.record_date,
+            record_date=record_date,
             filing_lag_days=filing_lag_days,
         )
         if row:
@@ -91,47 +158,50 @@ def payload_to_row(
 ) -> dict[str, Any]:
     raw = {str(k).lower().strip(): v for k, v in payload.items()}
     date_val = None
-    for key in ("accepteddate", "filingdate", "fillingdate", "transactiondate", "date", "calendar_date"):
+    for key in _DATE_KEY_CANDIDATES:
         if raw.get(key):
             date_val = raw.get(key)
             break
-    if date_val is None and record_date is not None:
-        date_val = record_date
-    ts = pd.to_datetime(date_val, errors="coerce")
-    if pd.isna(ts):
+    ts = _normalize_payload_timestamp(date_val, record_date=record_date, filing_lag_days=filing_lag_days)
+    if ts is None:
         return {}
-    ts = pd.Timestamp(ts).normalize()
-    if filing_lag_days:
-        ts = ts + pd.Timedelta(days=filing_lag_days)
     row: dict[str, Any] = {
         "date": ts,
         "symbol": str(symbol).upper(),
     }
-    exclude = {
-        "accepteddate",
-        "filingdate",
-        "fillingdate",
-        "transactiondate",
-        "date",
-        "calendar_date",
-        "symbol",
-        "link",
-        "finallink",
-        "cik",
-        "reportedcurrency",
-        "currency",
-        "fiscalyear",
-        "calendaryear",
-        "calendar_year",
-        "period",
-    }
     for key, value in raw.items():
-        if key in exclude:
+        if key in _EXCLUDED_PAYLOAD_FIELDS:
             continue
         if keep_fields is not None and key not in keep_fields:
             continue
         row[f"{prefix}{key}"] = value
     return row
+
+
+def _normalize_payload_timestamp(date_val: Any, *, record_date: Any, filing_lag_days: int) -> pd.Timestamp | None:
+    candidate = date_val if date_val not in (None, "") else record_date
+    if candidate in (None, ""):
+        return None
+    if isinstance(candidate, pd.Timestamp):
+        ts = candidate
+    else:
+        text_value = candidate
+        if not hasattr(candidate, "year"):
+            text_value = str(candidate).strip()
+            if not text_value:
+                return None
+            if len(text_value) >= 10:
+                text_value = text_value[:10]
+        try:
+            ts = pd.Timestamp(text_value)
+        except Exception:
+            return None
+    if pd.isna(ts):
+        return None
+    ts = pd.Timestamp(ts).normalize()
+    if filing_lag_days:
+        ts = ts + pd.Timedelta(days=filing_lag_days)
+    return ts
 
 
 def section_prefix(section_key: str) -> str:
@@ -229,3 +299,22 @@ def broadcast_sparse(sparse_df: pd.DataFrame, target_index: pd.MultiIndex) -> pd
     if sparse_df.empty:
         return pd.DataFrame(index=target_index)
     return broadcast_asof_to_target_index(sparse_df=sparse_df, target_index=target_index, on="date", by=("symbol",))
+
+
+__all__ = [
+    "BuiltFeatureSet",
+    "broadcast_sparse",
+    "build_passthrough_section_features",
+    "clear_section_record_cache",
+    "days_since_for_target",
+    "days_since_last_event",
+    "first_existing",
+    "load_combined_sparse_sections",
+    "load_section_payload",
+    "payload_to_row",
+    "prime_section_record_cache",
+    "rolling_zscore",
+    "safe_ratio",
+    "section_prefix",
+    "target_dates",
+]

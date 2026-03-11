@@ -29,13 +29,17 @@
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 12px 30px rgba(25, 44, 28, 0.06); }
     pre { margin: 0; padding: 14px; border-radius: 12px; background: #0f1722; color: #d8ecff; overflow: auto; font-size: 0.85rem; line-height: 1.45; }
     ul { margin: 0; padding-left: 18px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #e7efe8; white-space: nowrap; }
+    th { background: #f4f8f4; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="shell">
     <div class="topbar">
-      <a class="link" href="{% url 'train_model' %}">Back to Training Jobs</a>
+      <a class="link" href="{% url 'pipeline-lab' %}">Back to Pipeline Lab</a>
       <div class="actions">
         <span>Artifact #{{ artifact.id }}</span>
         <form method="post">
@@ -77,15 +81,39 @@
         <pre>{{ metadata_json }}</pre>
       </div>
       <div class="panel">
-        <h2>Related Jobs</h2>
-        {% if related_jobs %}
-          <ul>
-            {% for job in related_jobs %}
-              <li>{{ job.name }} ({{ job.status }})</li>
-            {% endfor %}
-          </ul>
+        <h2>Prediction Symbols</h2>
+        {% if prediction_symbol_rows %}
+          <p>Scored {{ prediction_rows_count }} row{{ prediction_rows_count|pluralize }} with complete model inputs.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Rows</th>
+                  <th>Avg Prediction</th>
+                  <th>Avg Score</th>
+                  <th>Label Rate</th>
+                  <th>Min Date</th>
+                  <th>Max Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in prediction_symbol_rows %}
+                  <tr>
+                    <td><a class="link" href="{% url 'model_artifact_symbol_predictions' artifact.id row.symbol %}">{{ row.symbol }}</a></td>
+                    <td>{{ row.rows }}</td>
+                    <td>{{ row.avg_prediction|default:"-" }}</td>
+                    <td>{{ row.avg_score|default:"-" }}</td>
+                    <td>{{ row.label_rate|default:"-" }}</td>
+                    <td>{{ row.min_date|default:"-" }}</td>
+                    <td>{{ row.max_date|default:"-" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
         {% else %}
-          <p>No linked training jobs.</p>
+          <p>No saved prediction rows are available for this model artifact.</p>
         {% endif %}
       </div>
     </div>

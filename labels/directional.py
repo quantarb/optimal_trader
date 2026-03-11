@@ -3,8 +3,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from modules.utils.normalize import normalize_cols
-from modules.schema import require_columns
+from utils.normalize import normalize_cols
+from data.schema import require_columns
 
 def add_binary_classification_labels(
     events: pd.DataFrame,
