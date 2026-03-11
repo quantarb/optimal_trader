@@ -47,6 +47,61 @@ class ArtifactSelectionSpec:
 
 
 @dataclass(frozen=True)
+class ArtifactTrainingDatasetSpec:
+    """Typed filters for building a trainable panel from saved artifacts."""
+
+    start_date: str | None = None
+    end_date: str | None = None
+    feature_family: str | None = None
+    feature_families: tuple[str, ...] = ()
+    label_k: int | None = None
+    label_ks: tuple[int, ...] = ()
+    min_abs_trade_return: float | None = None
+    max_hold_days: int | None = None
+    sample_weight_mode: str = "uniform"
+    oracle_cluster_keys: tuple[str, ...] = ()
+
+    def selected_feature_families(self) -> tuple[str, ...]:
+        cleaned = tuple(str(value).strip() for value in self.feature_families if str(value).strip())
+        if cleaned:
+            return cleaned
+        if self.feature_family is None:
+            return ()
+        value = str(self.feature_family).strip()
+        return (value,) if value else ()
+
+    def selected_label_ks(self) -> tuple[int, ...]:
+        cleaned: list[int] = []
+        for value in self.label_ks:
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed > 0 and parsed not in cleaned:
+                cleaned.append(parsed)
+        if cleaned:
+            return tuple(cleaned)
+        if self.label_k is None:
+            return ()
+        try:
+            parsed = int(self.label_k)
+        except Exception:
+            return ()
+        return (parsed,) if parsed > 0 else ()
+
+    def normalized_sample_weight_mode(self) -> str:
+        return str(self.sample_weight_mode or "uniform").strip().lower() or "uniform"
+
+    def selected_oracle_cluster_keys(self) -> tuple[str, ...]:
+        cleaned: list[str] = []
+        for value in self.oracle_cluster_keys:
+            key = str(value).strip()
+            if key and key not in cleaned:
+                cleaned.append(key)
+        return tuple(cleaned)
+
+
+@dataclass(frozen=True)
 class ModelTrainingSpec:
     """Typed training workflow configuration."""
 

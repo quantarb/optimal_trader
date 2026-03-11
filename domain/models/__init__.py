@@ -5,6 +5,7 @@ from domain.models.feature_families import infer_feature_family_columns
 from domain.models.interfaces import ArtifactRepository, BacktestRunner, ModelScorer, ModelTrainer
 from domain.models.specs import (
     ArtifactSelectionSpec,
+    ArtifactTrainingDatasetSpec,
     FitSpec,
     ModelScoringSpec,
     ModelTrainingSpec,
@@ -16,6 +17,7 @@ from domain.models.specs import (
 __all__ = [
     "ArtifactRepository",
     "ArtifactSelectionSpec",
+    "ArtifactTrainingDatasetSpec",
     "BacktestRunner",
     "FitSpec",
     "ModelScorer",
@@ -30,4 +32,3 @@ __all__ = [
     "infer_feature_family_columns",
     "metrics_with_feature_importance",
 ]
-
