@@ -4,6 +4,7 @@ import unittest
 
 import pandas as pd
 
+from domain.backtests import StrategyBacktestSpec, StrategyDatasetSpec
 from domain.features.panel import representation_embedding_dataset_rows
 from domain.features.specs import FeatureBuildSpec
 from domain.trades.operations import apply_trade_deduplication
@@ -35,6 +36,34 @@ class ResearchCoreUnitTests(unittest.TestCase):
         self.assertFalse(spec.toggles.include_economic_indicators)
         self.assertEqual(spec.start_date, "2024-01-01")
         self.assertEqual(spec.representation_embedding.store_dir, "/tmp/embeddings")
+
+    def test_strategy_dataset_spec_extracts_prediction_inputs(self):
+        spec = StrategyDatasetSpec.from_mapping(
+            {
+                "strategy_definition_id": "7",
+                "prediction_artifact_ids": ["2", "2", "5", "bad"],
+                "label_artifact_id": "9",
+                "strategy_start_date": "2024-01-01",
+                "strategy_end_date": "2024-03-31",
+            }
+        )
+        self.assertEqual(spec.strategy_definition_id, 7)
+        self.assertEqual(spec.prediction_artifact_ids, (2, 5))
+        self.assertEqual(spec.label_artifact_id, 9)
+        self.assertEqual(spec.start_date, "2024-01-01")
+        self.assertEqual(spec.end_date, "2024-03-31")
+
+    def test_strategy_backtest_spec_uses_transaction_cost_as_slippage_fallback(self):
+        spec = StrategyBacktestSpec.from_mapping(
+            {
+                "transaction_cost_bps": "12.5",
+                "execution_delay_days": "2",
+                "turnover_half_l1": "false",
+            }
+        )
+        self.assertEqual(spec.effective_slippage_bps(), 12.5)
+        self.assertEqual(spec.execution_delay_days, 2)
+        self.assertFalse(spec.turnover_half_l1)
 
     def test_trade_deduplication_prefers_best_return_for_same_entry(self):
         trade_rows = [

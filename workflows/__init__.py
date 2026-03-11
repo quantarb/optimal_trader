@@ -8,6 +8,7 @@ from workflows.modeling import (
     score_model_workflow,
     train_model_workflow,
 )
+from workflows.strategy import build_strategy_dataset_frame, run_strategy_backtest
 
 __all__ = [
     "OracleLabelWorkflowResult",
@@ -18,6 +19,7 @@ __all__ = [
     "build_oracle_labels",
     "build_trade_results",
     "score_model_workflow",
+    "build_strategy_dataset_frame",
+    "run_strategy_backtest",
     "train_model_workflow",
 ]
-
