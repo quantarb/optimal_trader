@@ -23,7 +23,10 @@ from fmp.models import SymbolSectionHistorical
 from fmp.models import WorkflowState
 from labels.strategy_solver import solve_joint_trades_by_frequency
 from data import FMPClient
+from domain.labels.specs import LabelBuildSpec
+from domain.trades.operations import apply_trade_deduplication, trade_return_pct
 from utils.workflow import workflow_symbols_from_request
+from workflows.labels import build_trade_results as workflow_build_trade_results
 
 
 def _non_empty(value, default):
@@ -163,11 +166,7 @@ def _load_adjusted_daily(
 
 
 def _ret_pct(side: str, entry_px: float, exit_px: float) -> float:
-    if not entry_px:
-        return 0.0
-    if side == "long":
-        return (float(exit_px) - float(entry_px)) / float(entry_px)
-    return (float(entry_px) - float(exit_px)) / float(entry_px)
+    return trade_return_pct(side, entry_px, exit_px)
 
 
 def _build_normalized_config(cleaned_data: dict, symbols: list[str], k_params: dict[str, list[int]]) -> dict:
@@ -230,92 +229,23 @@ def _build_trade_results(
     progress_callback=None,
     price_frames: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    api_key = os.getenv("FMP_API_KEY") or ""
-    trades_rows: list[dict] = []
-    completed_trades: list[dict] = []
-    normalized_symbols = [str(sym).strip().upper() for sym in list(symbols or []) if str(sym).strip()]
-    symbol_map = {
-        str(symbol.symbol).strip().upper(): symbol
-        for symbol in Symbol.objects.filter(symbol__in=normalized_symbols).only("id", "symbol")
-    }
-    if price_frames is None:
-        price_frames = load_adjusted_price_frames(normalized_symbols, start_date=start_date, end_date=end_date)
-    total_symbols = len(normalized_symbols)
-    if callable(progress_callback):
-        progress_callback(completed=0, total=total_symbols, current_symbol="")
-
-    for idx, sym in enumerate(normalized_symbols, start=1):
-        if callable(progress_callback):
-            progress_callback(completed=max(0, idx - 1), total=total_symbols, current_symbol=sym)
-        symbol_obj = symbol_map.get(sym)
-        if not symbol_obj:
-            symbol_obj = Symbol.objects.create(symbol=sym)
-        df_daily = _load_adjusted_daily(
-            symbol_obj,
-            price_frames=price_frames,
+    result = workflow_build_trade_results(
+        symbols=symbols,
+        spec=LabelBuildSpec(
+            k_params={str(key): [int(value) for value in values] for key, values in dict(k_params or {}).items()},
+            min_profit_pct=float(min_profit_pct),
+            buy_execution=str(buy_col),
+            sell_execution=str(sell_col),
+            short_execution=str(short_col),
+            cover_execution=str(cover_col),
             start_date=start_date,
             end_date=end_date,
-        )
-        if df_daily.empty:
-            if api_key and download_missing_prices:
-                _download_and_store_adjusted_prices(symbol_obj, api_key)
-                df_daily = _load_adjusted_daily(symbol_obj, start_date=start_date, end_date=end_date)
-            if df_daily.empty:
-                if callable(progress_callback):
-                    progress_callback(completed=idx, total=total_symbols, current_symbol=sym)
-                continue
-
-        for freq, ks in k_params.items():
-            for k in ks:
-                joint_trades = solve_joint_trades_by_frequency(
-                    df_daily,
-                    k=int(k),
-                    freq=freq,
-                    min_profit_pct=min_profit_pct,
-                    long_entry_price_col=buy_col,
-                    long_exit_price_col=sell_col,
-                    short_entry_price_col=short_col,
-                    short_exit_price_col=cover_col,
-                )
-                for t in joint_trades:
-                    entry_dt = pd.Timestamp(t["entry_row"].name)
-                    exit_dt = pd.Timestamp(t["exit_row"].name)
-                    entry_px = float(t["entry_price"])
-                    exit_px = float(t["exit_price"])
-                    side = str(t.get("side") or "").strip().lower()
-                    if side not in {"long", "short"}:
-                        continue
-                    ret_dec = _ret_pct(side, entry_px, exit_px)
-                    trades_rows.append(
-                        {
-                            "symbol": sym,
-                            "side": side,
-                            "freq": freq,
-                            "k": int(k),
-                            "entry_date": entry_dt.strftime("%Y-%m-%d"),
-                            "exit_date": exit_dt.strftime("%Y-%m-%d"),
-                            "entry_px": f"{entry_px:,.4f}",
-                            "exit_px": f"{exit_px:,.4f}",
-                            "ret_pct": f"{ret_dec * 100:.2f}%",
-                        }
-                    )
-                    completed_trades.append(
-                        {
-                            "symbol": sym,
-                            "side": side,
-                            "freq": freq,
-                            "k": int(k),
-                            "entry_date": entry_dt.strftime("%Y-%m-%d"),
-                            "exit_date": exit_dt.strftime("%Y-%m-%d"),
-                            "entry_px": f"{entry_px:,.4f}",
-                            "exit_px": f"{exit_px:,.4f}",
-                            "ret_dec": ret_dec,
-                            "hold_days": int((exit_dt - entry_dt).days),
-                        }
-                    )
-        if callable(progress_callback):
-            progress_callback(completed=idx, total=total_symbols, current_symbol=sym)
-    return trades_rows, completed_trades
+            download_missing_prices=bool(download_missing_prices),
+        ),
+        progress_callback=progress_callback,
+        price_frames=price_frames,
+    )
+    return result.trade_rows, result.completed_trades
 
 
 def _sort_trade_rows(trades_rows: list[dict]) -> list[dict]:
@@ -327,43 +257,7 @@ def _apply_trade_deduplication(
     completed_trades: list[dict],
     mode: str,
 ) -> tuple[list[dict], list[dict]]:
-    mode_value = str(mode or "exact").strip().lower()
-    if mode_value not in {"exact", "entry_date"}:
-        return trades_rows, completed_trades
-
-    if mode_value == "exact":
-        kept_rows: list[dict] = []
-        kept_completed: list[dict] = []
-        seen: set[tuple[str, str, str, str]] = set()
-        for row, completed in zip(trades_rows, completed_trades):
-            key = (
-                str(row.get("symbol") or ""),
-                str(row.get("side") or ""),
-                str(row.get("entry_date") or ""),
-                str(row.get("exit_date") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            kept_rows.append(row)
-            kept_completed.append(completed)
-        return kept_rows, kept_completed
-
-    best_by_key: dict[tuple[str, str, str], tuple[int, float]] = {}
-    for idx, completed in enumerate(completed_trades):
-        key = (
-            str(completed.get("symbol") or ""),
-            str(completed.get("side") or ""),
-            str(completed.get("entry_date") or ""),
-        )
-        ret_dec = float(completed.get("ret_dec") or 0.0)
-        prev = best_by_key.get(key)
-        if prev is None or ret_dec > prev[1]:
-            best_by_key[key] = (idx, ret_dec)
-    keep_indices = {idx for idx, _ in best_by_key.values()}
-    kept_rows = [row for idx, row in enumerate(trades_rows) if idx in keep_indices]
-    kept_completed = [row for idx, row in enumerate(completed_trades) if idx in keep_indices]
-    return kept_rows, kept_completed
+    return apply_trade_deduplication(trades_rows, completed_trades, mode=mode)
 
 
 def _build_symbol_trade_groups(trades_rows: list[dict]) -> list[dict]:

@@ -6,9 +6,12 @@ from typing import Any
 
 from django.utils import timezone
 
+from domain.features import FeatureBuildSpec
+from domain.labels import LabelBuildSpec
 from fmp.models import Symbol
-from features.pipeline_builders import build_feature_panel_frame_for_symbols
-from labels.views import _apply_trade_deduplication, _build_trade_results
+from settings import BASE_DIR
+from workflows.features import build_feature_panel_frame_for_symbols
+from workflows.labels import build_oracle_labels
 
 from .progress import ProgressReporter
 from .service_runtime import (
@@ -292,57 +295,8 @@ def execute_labels(
 ) -> BuiltOutput:
     symbols = load_universe_symbols(universe_artifact)
     progress = ProgressReporter(pipeline_run=pipeline_run, job_run=job_run)
-
-    def _parse_k_list(raw: Any) -> list[int]:
-        if raw in (None, ""):
-            return []
-        if isinstance(raw, (list, tuple)):
-            values = raw
-        else:
-            values = str(raw).split(",")
-        out: list[int] = []
-        seen: set[int] = set()
-        for part in values:
-            p = str(part).strip()
-            if not p:
-                continue
-            try:
-                k = int(p)
-            except Exception:
-                continue
-            if k > 0 and k not in seen:
-                seen.add(k)
-                out.append(k)
-        return out
-
-    k_params_raw = config.get("k_params")
-    if isinstance(k_params_raw, dict):
-        k_params = {
-            "W": _parse_k_list(k_params_raw.get("W")),
-            "M": _parse_k_list(k_params_raw.get("M")),
-            "QE": _parse_k_list(k_params_raw.get("QE")),
-            "YE": _parse_k_list(k_params_raw.get("YE")),
-        }
-    else:
-        k_params = {
-            "W": _parse_k_list(config.get("k_w_list")),
-            "M": _parse_k_list(config.get("k_m_list")),
-            "QE": _parse_k_list(config.get("k_qe_list")),
-            "YE": _parse_k_list(config.get("k_ye_list")),
-        }
-    k_params = {freq: ks for freq, ks in k_params.items() if ks}
-    if not k_params:
-        k_params = {"YE": [1]}
-
-    min_profit_dec = _min_profit_decimal_from_config(config)
-    buy_col = str(config.get("buy_execution") or "adj_high")
-    sell_col = str(config.get("sell_execution") or "adj_low")
-    short_col = str(config.get("short_execution") or "adj_low")
-    cover_col = str(config.get("cover_execution") or "adj_high")
-    dedup_mode = str(config.get("trade_dedup_mode") or "exact")
+    spec = LabelBuildSpec.from_mapping(config)
     storage_format = str(config.get("artifact_storage_format") or "csv").strip().lower() or "csv"
-    label_start_date = str(config.get("label_start_date") or config.get("start_date") or "").strip() or None
-    label_end_date = str(config.get("label_end_date") or config.get("end_date") or "").strip() or None
 
     total_symbols = len(symbols)
     progress.update(
@@ -367,17 +321,9 @@ def execute_labels(
         else None
     )
     if stage_ctx is None:
-        all_trades_rows, all_completed_trades = _build_trade_results(
-            symbols=symbols,
-            k_params=k_params,
-            min_profit_pct=min_profit_dec,
-            buy_col=buy_col,
-            sell_col=sell_col,
-            short_col=short_col,
-            cover_col=cover_col,
-            download_missing_prices=False,
-            start_date=label_start_date,
-            end_date=label_end_date,
+        built = build_oracle_labels(
+            symbols,
+            spec=spec,
             progress_callback=lambda *, completed, total, current_symbol="": progress.update(
                 phase="build_labels",
                 phase_label="Generate oracle labels",
@@ -391,17 +337,9 @@ def execute_labels(
         )
     else:
         with stage_ctx:
-            all_trades_rows, all_completed_trades = _build_trade_results(
-                symbols=symbols,
-                k_params=k_params,
-                min_profit_pct=min_profit_dec,
-                buy_col=buy_col,
-                sell_col=sell_col,
-                short_col=short_col,
-                cover_col=cover_col,
-                download_missing_prices=False,
-                start_date=label_start_date,
-                end_date=label_end_date,
+            built = build_oracle_labels(
+                symbols,
+                spec=spec,
                 progress_callback=lambda *, completed, total, current_symbol="": progress.update(
                     phase="build_labels",
                     phase_label="Generate oracle labels",
@@ -413,17 +351,6 @@ def execute_labels(
                     current_item=current_symbol,
                 ),
             )
-
-    if performance_tracer is not None:
-        with performance_tracer.stage(
-            "labels.deduplicate",
-            category="joins_merges",
-            workload_type="vectorized",
-            metadata={"rows": len(all_completed_trades)},
-        ):
-            _, completed_trades = _apply_trade_deduplication(all_trades_rows, all_completed_trades, mode=dedup_mode)
-    else:
-        _, completed_trades = _apply_trade_deduplication(all_trades_rows, all_completed_trades, mode=dedup_mode)
     progress.update(
         phase="finalize_labels",
         phase_label="Finalize labels output",
@@ -435,42 +362,7 @@ def execute_labels(
         current_item="",
         force=True,
     )
-
-    label_rows: list[dict[str, Any]] = []
-    for row in completed_trades:
-        side = str(row.get("side") or "").strip().lower()
-        if side not in {"long", "short"}:
-            continue
-        try:
-            ret = float(row.get("ret_dec") or 0.0)
-        except Exception:
-            ret = 0.0
-        try:
-            hold_days = int(row.get("hold_days") or 0)
-        except Exception:
-            hold_days = 0
-        symbol = str(row.get("symbol") or "").strip().upper()
-        entry_date = str(row.get("entry_date") or "")[:10]
-        if not symbol or not entry_date:
-            continue
-        label_rows.append(
-            {
-                "date": entry_date,
-                "symbol": symbol,
-                "label": 1 if side == "long" else 0,
-                "market_position": 1 if side == "long" else -1,
-                "trade_return": round(ret, 8),
-                "hold_days": hold_days,
-                "side": side,
-                "freq": str(row.get("freq") or ""),
-                "k": int(row.get("k") or 0),
-                "entry_date": entry_date,
-                "exit_date": str(row.get("exit_date") or "")[:10],
-                "entry_px": row.get("entry_px") or "",
-                "exit_px": row.get("exit_px") or "",
-                "ret_pct": f"{ret * 100.0:.2f}%",
-            }
-        )
+    label_rows = list(built.label_rows)
     key = f"labels_{uuid.uuid4().hex}"
     label_fieldnames = [
         "date",
@@ -508,18 +400,18 @@ def execute_labels(
             fieldnames=label_fieldnames,
             storage_format=storage_format,
         )
-    stats = _build_label_statistics(label_rows)
+    stats = dict(built.statistics or {})
     labels_cache_key = stable_payload_hash(
         {
             "source_universe_artifact_id": int(universe_artifact.id),
             "symbols": symbols,
-            "k_params": k_params,
-            "min_profit_decimal": min_profit_dec,
-            "buy_col": buy_col,
-            "sell_col": sell_col,
-            "short_col": short_col,
-            "cover_col": cover_col,
-            "dedup_mode": dedup_mode,
+            "k_params": spec.k_params,
+            "min_profit_decimal": spec.min_profit_pct,
+            "buy_col": spec.buy_execution,
+            "sell_col": spec.sell_execution,
+            "short_col": spec.short_execution,
+            "cover_col": spec.cover_execution,
+            "dedup_mode": spec.trade_dedup_mode,
         }
     )
     return BuiltOutput(
@@ -527,12 +419,12 @@ def execute_labels(
         content={
             "rows": len(label_rows),
             "symbols": len(symbols),
-            "min_profit_pct": round(min_profit_dec * 100.0, 6),
+            "min_profit_pct": round(spec.min_profit_pct * 100.0, 6),
             "statistics": stats,
         },
         metadata={
             "source_universe_artifact_id": universe_artifact.id,
-            "min_profit_decimal": min_profit_dec,
+            "min_profit_decimal": spec.min_profit_pct,
             "labels_cache_key": labels_cache_key,
             **stored.storage_metadata(),
         },
@@ -551,9 +443,10 @@ def execute_features(
     symbols = load_universe_symbols(universe_artifact)
     progress = ProgressReporter(pipeline_run=pipeline_run, job_run=job_run)
     storage_format = str(config.get("artifact_storage_format") or "csv").strip().lower() or "csv"
+    feature_spec = FeatureBuildSpec.from_mapping(config, default_store_dir=str(BASE_DIR / "data" / "embedding_store"))
     feature_frame, fieldnames, feature_meta = build_feature_panel_frame_for_symbols(
         symbols=symbols,
-        config=config,
+        spec=feature_spec,
         progress_callback=lambda *, completed, total, current_symbol="", force=False: progress.update(
             phase="build_features",
             phase_label="Build feature panel",

@@ -149,8 +149,8 @@ def _rebalance_dates(unique_dates: pd.DatetimeIndex, rebalance_freq: str) -> set
     if rebalance_freq == "D":
         return set(unique_dates)
     if rebalance_freq == "M":
-        return set(pd.Series(unique_dates, index=unique_dates).groupby(unique_dates.to_period("M")).tail(1).tolist())
-    return set(pd.Series(unique_dates, index=unique_dates).groupby(unique_dates.to_period("W")).tail(1).tolist())
+        return set(pd.Series(unique_dates, index=unique_dates).groupby(unique_dates.to_period("M")).head(1).tolist())
+    return set(pd.Series(unique_dates, index=unique_dates).groupby(unique_dates.to_period("W")).head(1).tolist())
 
 
 def _normalized_direct_weights(signals: pd.Series, *, gross_exposure: float, selection_side: str, threshold: float) -> pd.Series:

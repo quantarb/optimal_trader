@@ -11,6 +11,12 @@ from typing import Any, Sequence
 import pandas as pd
 from django.db import transaction
 
+from domain.models.datasets import (
+    dedupe_label_frame as _domain_dedupe_label_frame,
+    feature_columns_from_frame as _domain_feature_columns_from_frame,
+    filter_frame_by_date as _domain_filter_frame_by_date,
+)
+from domain.models.feature_families import infer_feature_family_columns as _domain_infer_feature_family_columns
 from fmp.models import EconomicIndicatorSeries, Symbol, SymbolSectionHistorical, TreasuryRateSeries
 from features.feature_builders import (
     build_event_features,
@@ -196,36 +202,11 @@ def _filter_frame_by_date(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    if df.empty or "date" not in df.columns:
-        return df
-    out = df.copy()
-    out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    out = out.dropna(subset=["date"])
-    if start_date:
-        start_ts = pd.Timestamp(str(start_date))
-        out = out[out["date"] >= start_ts]
-    if end_date:
-        end_ts = pd.Timestamp(str(end_date))
-        out = out[out["date"] <= end_ts]
-    return out.reset_index(drop=True)
+    return _domain_filter_frame_by_date(df, start_date=start_date, end_date=end_date)
 
 
 def _dedupe_label_frame(label_df: pd.DataFrame) -> pd.DataFrame:
-    if label_df.empty or "date" not in label_df.columns or "symbol" not in label_df.columns:
-        return label_df
-    out = label_df.copy()
-    if "trade_return" in out.columns:
-        out["__trade_return_abs"] = pd.to_numeric(out["trade_return"], errors="coerce").abs().fillna(-1.0)
-    else:
-        out["__trade_return_abs"] = -1.0
-    if "hold_days" in out.columns:
-        out["__hold_days_num"] = pd.to_numeric(out["hold_days"], errors="coerce").fillna(10**9)
-    else:
-        out["__hold_days_num"] = 10**9
-    out = out.sort_values(["date", "symbol", "__trade_return_abs", "__hold_days_num"], ascending=[True, True, False, True])
-    out = out.drop_duplicates(subset=["date", "symbol"], keep="first")
-    out = out.drop(columns=["__trade_return_abs", "__hold_days_num"], errors="ignore")
-    return out.reset_index(drop=True)
+    return _domain_dedupe_label_frame(label_df)
 
 
 def load_artifact_csv_frame(artifact: Artifact) -> pd.DataFrame:
@@ -233,70 +214,11 @@ def load_artifact_csv_frame(artifact: Artifact) -> pd.DataFrame:
 
 
 def _feature_columns_from_artifact_df(feature_df: pd.DataFrame) -> list[str]:
-    cols: list[str] = []
-    for col in feature_df.columns:
-        if col in {"date", "symbol"}:
-            continue
-        cols.append(str(col))
-    return cols
+    return _domain_feature_columns_from_frame(feature_df)
 
 
 def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[str]]:
-    grouped: dict[str, list[str]] = {
-        "prices_div_adj": [],
-        "key_metrics": [],
-        "ratios": [],
-        "income_statement": [],
-        "income_statement_growth": [],
-        "cash_flow": [],
-        "cash_flow_growth": [],
-        "balance_sheet": [],
-        "balance_sheet_growth": [],
-        "financial_growth": [],
-        "earnings": [],
-        "analyst_estimates": [],
-        "ratings_historical": [],
-        "grades_historical": [],
-        "insider_trading": [],
-        "economic_indicators": [],
-        "treasury_rates": [],
-        "representation_embedding": [],
-    }
-    for col in list(feature_cols):
-        name = str(col or "").strip()
-        if not name:
-            continue
-        assigned = False
-        if name.startswith(("embedding_", "repr_emb_")):
-            grouped["representation_embedding"].append(name)
-            assigned = True
-        if name in PRICE_FAMILY_COLUMNS or name.startswith(TECHNICAL_PREFIXES):
-            grouped["prices_div_adj"].append(name)
-            assigned = True
-        for family, prefixes in FUNDAMENTAL_PREFIXES.items():
-            if name.startswith(prefixes):
-                grouped[family].append(name)
-                assigned = True
-        for family, prefixes in STATEMENT_PREFIXES.items():
-            if name.startswith(prefixes):
-                grouped[family].append(name)
-                assigned = True
-        for family, prefixes in EVENT_PREFIXES.items():
-            if name.startswith(prefixes):
-                grouped[family].append(name)
-                assigned = True
-        if name.startswith("own__insider_"):
-            grouped["insider_trading"].append(name)
-            assigned = True
-        if name.startswith(("econ__", "economic__", "fred__")):
-            grouped["economic_indicators"].append(name)
-            assigned = True
-        if name.startswith(("tr__", "treasury__", "yield__", "rate__")):
-            grouped["treasury_rates"].append(name)
-            assigned = True
-        if not assigned and "__" not in name:
-            grouped["prices_div_adj"].append(name)
-    return {key: list(dict.fromkeys(vals)) for key, vals in grouped.items() if vals}
+    return _domain_infer_feature_family_columns(feature_cols)
 
 
 def _coverage_metadata(df: pd.DataFrame, feature_cols: Sequence[str]) -> dict[str, Any]:

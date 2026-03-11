@@ -1,0 +1,2 @@
+"""Pure research-domain layer."""
+
