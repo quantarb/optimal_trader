@@ -40,9 +40,9 @@
 | ml/autoencoder/diagnostics.py | 212 | sort_values | 0.90 | analyze_event_feature_breaks | `sort_values` inside a loop is a scaling risk. |
 | ml/autoencoder/diagnostics.py | 223 | sort_values | 0.90 | analyze_event_feature_breaks | `sort_values` inside a loop is a scaling risk. |
 | ml/views.py | 35 | groupby | 0.90 | _prediction_symbol_rows | `groupby` inside a loop is a scaling risk. |
-| pipeline/strategy_definitions.py | 202 | groupby | 0.90 | apply_strategy_definition | `groupby` inside a loop is a scaling risk. |
-| pipeline/strategy_definitions.py | 221 | sort_values | 0.90 | apply_strategy_definition | `sort_values` inside a loop is a scaling risk. |
-| pipeline/strategy_definitions.py | 237 | sort_values | 0.90 | apply_strategy_definition | `sort_values` inside a loop is a scaling risk. |
+| pipeline/strategy_definitions.py | 213 | groupby | 0.90 | apply_strategy_definition | `groupby` inside a loop is a scaling risk. |
+| pipeline/strategy_definitions.py | 233 | sort_values | 0.90 | apply_strategy_definition | `sort_values` inside a loop is a scaling risk. |
+| pipeline/strategy_definitions.py | 249 | sort_values | 0.90 | apply_strategy_definition | `sort_values` inside a loop is a scaling risk. |
 | analysis/situation_clustering.py | 121 | apply | 0.85 | fit_market_situation_clusters | DataFrame.apply often hides Python-level loops. |
 | analysis/diagnostics.py | 293 | materialization | 0.75 | build_diagnostic_report | Converting frames to Python objects materializes data and can inflate memory. |
 | analysis/feature_reasoning.py | 104 | materialization | 0.75 | summarize_feature_changes | Converting frames to Python objects materializes data and can inflate memory. |

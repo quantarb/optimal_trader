@@ -11,6 +11,7 @@ from domain.models.datasets import filter_frame_by_date
 from infra.repositories import DjangoArtifactRepository
 from ml.execution import _dedupe_label_frame, build_feature_frame_from_artifacts, load_artifact_csv_frame
 from pipeline.contracts import PREDICTION_ARTIFACT_TYPES
+from pipeline.factor_signals import build_multi_factor_score_frame
 from pipeline.service_runtime import PipelineExecutionError, read_frame_artifact
 from pipeline.strategy_definitions import ResolvedStrategyDefinition, apply_strategy_definition, resolve_strategy_definition
 
@@ -156,13 +157,52 @@ def _compute_strategy_scores(
     signal_combination = str(strategy_config.get("signal_combination") or "multiply").strip().lower() or "multiply"
     combined_score_expr = str(strategy_config.get("combined_score_expr") or "").strip()
     action_source_field = str(strategy_config.get("action_source_field") or "").strip()
+    factor_components = list(
+        strategy_config.get("factor_components")
+        or strategy_config.get("cross_sectional_factor_components")
+        or []
+    )
 
     prob_buy = _numeric_series(feature_df, "prob_buy", default=0.0)
     ranking = _numeric_series(feature_df, "ranking", default=0.0)
     ae_familiarity = _numeric_series(feature_df, "ae_familiarity", default=1.0)
 
+    if factor_components:
+        factor_frame, factor_meta = build_multi_factor_score_frame(
+            feature_df,
+            factor_components=factor_components,
+            output_col="factor_model_score",
+        )
+        for column in list(factor_meta.get("component_columns") or []) + [str(factor_meta.get("output_col") or "factor_model_score")]:
+            if column in factor_frame.columns:
+                feature_df[column] = pd.to_numeric(factor_frame[column], errors="coerce")
+        combined_score = _numeric_series(feature_df, "factor_model_score", default=0.0)
+        return combined_score, combined_score, {
+            "signal_combination": "factor_components",
+            "score_expression_used": "factor_components",
+            "score_source_field": "factor_model_score",
+            "factor_components": list(factor_meta.get("components") or []),
+        }
+
     if str(strategy_type) == "rl_policy_v1" or signal_combination == "direct":
         direct_field = action_source_field or "signal_score"
+        if direct_field in feature_df.columns:
+            direct_score = _numeric_series(feature_df, direct_field, default=0.0)
+            return direct_score, direct_score, {
+                "signal_combination": "direct",
+                "score_expression_used": direct_field,
+                "score_source_field": direct_field,
+            }
+        if combined_score_expr:
+            try:
+                direct_score = pd.to_numeric(feature_df.eval(combined_score_expr, engine="python"), errors="coerce").fillna(0.0)
+                return direct_score, direct_score, {
+                    "signal_combination": "direct",
+                    "score_expression_used": combined_score_expr,
+                    "score_source_field": "",
+                }
+            except Exception:
+                pass
         if direct_field not in feature_df.columns:
             direct_field = "ranking" if "ranking" in feature_df.columns else "prob_buy"
         direct_score = _numeric_series(feature_df, direct_field, default=0.0)
@@ -311,6 +351,8 @@ def _prepare_backtest_frame(strategy_dataset_artifact, *, spec: StrategyBacktest
 
 def _apply_backtest_filters(strategy_df: pd.DataFrame, *, spec: StrategyBacktestSpec, has_liquidity_data: bool) -> pd.DataFrame:
     out = strategy_df.copy()
+    if spec.allowed_symbols:
+        out = out[out["symbol"].isin(set(spec.allowed_symbols))].copy()
     if spec.max_position_weight > 0.0:
         out["target_weight"] = out["target_weight"].clip(
             lower=-float(spec.max_position_weight),

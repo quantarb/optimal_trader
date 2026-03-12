@@ -11,3 +11,15 @@ AutogluonModels/
 entry2exit.csv
 data/*.db
 data/*.sqlite
+db.sqlite3
+
+# Generated local research and pipeline artifacts
+data/pipeline_artifacts/
+data/code_analysis/
+data/code_analysis_tsmom/
+data/code_analysis_tsmom_after/
+data/code_analysis_tsmom_final/
+data/embedding_store/
+
+# Generated product quality crawl outputs
+docs/product_quality/

@@ -1,352 +1,351 @@
 {
   "engine": "tracemalloc",
-  "generated_at": "2026-03-11T23:57:31.147069+00:00",
+  "generated_at": "2026-03-12T03:00:22.416309+00:00",
   "hotspots": [
     {
-      "count": 143,
+      "count": 149,
       "line": 181,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/backends/sqlite3/operations.py",
-      "size_mb": 1.848153,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/backends/sqlite3/operations.py:181"
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/sqlite3/operations.py",
+      "size_mb": 1.844319,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/sqlite3/operations.py:181"
     },
     {
-      "count": 3496,
-      "line": 361,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/json/decoder.py",
-      "size_mb": 0.216022,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/json/decoder.py:361"
-    },
-    {
-      "count": 1900,
+      "count": 1987,
       "line": 34,
       "path": "data/historical_prices.py",
-      "size_mb": 0.159454,
+      "size_mb": 0.166756,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/data/historical_prices.py:34"
     },
     {
-      "count": 1754,
-      "line": 101,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/utils.py",
-      "size_mb": 0.106307,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/utils.py:101"
+      "count": 2101,
+      "line": 361,
+      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/json/decoder.py",
+      "size_mb": 0.138639,
+      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/json/decoder.py:361"
     },
     {
-      "count": 614,
+      "count": 1740,
+      "line": 101,
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/utils.py",
+      "size_mb": 0.105468,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/utils.py:101"
+    },
+    {
+      "count": 624,
       "line": 107,
       "path": "pipeline/service_runtime.py",
-      "size_mb": 0.077942,
+      "size_mb": 0.079239,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/service_runtime.py:107"
     },
     {
-      "count": 232,
+      "count": 995,
+      "line": 829,
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/pandas/core/arrays/arrow/array.py",
+      "size_mb": 0.055591,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/pandas/core/arrays/arrow/array.py:829"
+    },
+    {
+      "count": 242,
       "line": 26,
       "path": "pipeline/performance.py",
-      "size_mb": 0.051331,
+      "size_mb": 0.053543,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/performance.py:26"
     },
     {
-      "count": 475,
+      "count": 363,
       "line": 41,
       "path": "ml/models.py",
-      "size_mb": 0.026238,
+      "size_mb": 0.021101,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/ml/models.py:41"
     },
     {
-      "count": 230,
+      "count": 240,
       "line": 91,
       "path": "pipeline/performance.py",
-      "size_mb": 0.020126,
+      "size_mb": 0.021004,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/performance.py:91"
     },
     {
-      "count": 230,
+      "count": 240,
       "line": 38,
       "path": "pipeline/performance.py",
-      "size_mb": 0.020126,
+      "size_mb": 0.021004,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/performance.py:38"
     },
     {
-      "count": 116,
+      "count": 121,
       "line": 80,
       "path": "pipeline/performance.py",
-      "size_mb": 0.018585,
+      "size_mb": 0.019386,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/performance.py:80"
     },
     {
       "count": 162,
       "line": 109,
       "path": "pipeline/service_runtime.py",
-      "size_mb": 0.018471,
+      "size_mb": 0.018715,
       "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/service_runtime.py:109"
     },
     {
-      "count": 2,
-      "line": 1178,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/indexes/range.py",
-      "size_mb": 0.017708,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/indexes/range.py:1178"
-    },
-    {
-      "count": 2,
-      "line": 155,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/array_algos/take.py",
-      "size_mb": 0.017708,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/array_algos/take.py:155"
-    },
-    {
-      "count": 255,
-      "line": 93,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/io/parsers/c_parser_wrapper.py",
-      "size_mb": 0.013047,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/io/parsers/c_parser_wrapper.py:93"
-    },
-    {
-      "count": 228,
-      "line": 2764,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/indexes/base.py",
-      "size_mb": 0.010872,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/indexes/base.py:2764"
-    },
-    {
-      "count": 161,
+      "count": 167,
       "line": 146,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/backends/utils.py",
-      "size_mb": 0.009827,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/backends/utils.py:146"
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/utils.py",
+      "size_mb": 0.010193,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/utils.py:146"
     },
     {
-      "count": 80,
+      "count": 79,
       "line": 109,
       "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/contextlib.py",
-      "size_mb": 0.009155,
+      "size_mb": 0.009041,
       "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/contextlib.py:109"
     },
     {
-      "count": 186,
-      "line": 574,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/models/sql/compiler.py",
-      "size_mb": 0.008869,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/models/sql/compiler.py:574"
-    },
-    {
-      "count": 180,
-      "line": 598,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/dtypes/cast.py",
-      "size_mb": 0.007896,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/pandas/core/dtypes/cast.py:598"
-    },
-    {
-      "count": 69,
+      "count": 75,
       "line": 2166,
-      "path": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/models/sql/compiler.py",
-      "size_mb": 0.007896,
-      "traceback": "/Users/johnnylee/miniconda3/envs/optimal_trader/lib/python3.13/site-packages/django/db/models/sql/compiler.py:2166"
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/models/sql/compiler.py",
+      "size_mb": 0.008583,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/models/sql/compiler.py:2166"
+    },
+    {
+      "count": 170,
+      "line": 148,
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/utils.py",
+      "size_mb": 0.007458,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/backends/utils.py:148"
+    },
+    {
+      "count": 153,
+      "line": 574,
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/models/sql/compiler.py",
+      "size_mb": 0.007296,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/django/db/models/sql/compiler.py:574"
+    },
+    {
+      "count": 91,
+      "line": 56,
+      "path": "ml/artifact_datasets.py",
+      "size_mb": 0.007113,
+      "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/ml/artifact_datasets.py:56"
+    },
+    {
+      "count": 114,
+      "line": 182,
+      "path": "/Users/johnnylee/.local/lib/python3.13/site-packages/pandas/core/internals/blocks.py",
+      "size_mb": 0.005848,
+      "traceback": "/Users/johnnylee/.local/lib/python3.13/site-packages/pandas/core/internals/blocks.py:182"
+    },
+    {
+      "count": 242,
+      "line": 141,
+      "path": "pipeline/performance.py",
+      "size_mb": 0.005539,
+      "traceback": "/Users/johnnylee/PycharmProjects/optimal_trader/pipeline/performance.py:141"
     }
   ],
   "notes": [
     "Fell back to tracemalloc because scalene/memory_profiler are not installed."
   ],
-  "peak_rss_mb": 672.1562,
+  "peak_rss_mb": 615.3125,
   "raw_output_path": "/Users/johnnylee/PycharmProjects/optimal_trader/docs/performance/memory_profile_scalability_tier2.txt",
   "stage_hotspots": [
     {
-      "category": "inference",
-      "cpu_ratio": 1.026483,
-      "cpu_seconds": 0.187773,
-      "metadata": {
-        "artifact_type": "REGRESSOR_PREDICTIONS"
-      },
-      "name": "model.score",
+      "category": "data_loading",
+      "cpu_ratio": 0.993877,
+      "cpu_seconds": 0.107454,
+      "metadata": {},
+      "name": "backtest.load_inputs",
       "read_bytes": 0,
-      "rss_delta_mb": 12.6562,
-      "rss_end_mb": 652.875,
-      "rss_start_mb": 640.2188,
-      "wall_seconds": 0.182928,
+      "rss_delta_mb": 5.9688,
+      "rss_end_mb": 614.8594,
+      "rss_start_mb": 608.8906,
+      "wall_seconds": 0.108116,
       "workload_type": "batched",
       "write_bytes": 0
     },
     {
       "category": "joins_merges",
-      "cpu_ratio": 0.999423,
-      "cpu_seconds": 0.103748,
+      "cpu_ratio": 0.994491,
+      "cpu_seconds": 0.162593,
       "metadata": {
         "extra_prediction_artifacts": 1
       },
       "name": "strategy.build_dataset",
       "read_bytes": 0,
-      "rss_delta_mb": 8.125,
-      "rss_end_mb": 661.5469,
-      "rss_start_mb": 653.4219,
-      "wall_seconds": 0.103808,
+      "rss_delta_mb": 5.7812,
+      "rss_end_mb": 608.1719,
+      "rss_start_mb": 602.3906,
+      "wall_seconds": 0.163494,
       "workload_type": "batched",
-      "write_bytes": 0
-    },
-    {
-      "category": "data_loading",
-      "cpu_ratio": 0.998328,
-      "cpu_seconds": 0.081247,
-      "metadata": {},
-      "name": "backtest.load_inputs",
-      "read_bytes": 0,
-      "rss_delta_mb": 8.0156,
-      "rss_end_mb": 671.875,
-      "rss_start_mb": 663.8594,
-      "wall_seconds": 0.081383,
-      "workload_type": "batched",
-      "write_bytes": 0
-    },
-    {
-      "category": "serialization",
-      "cpu_ratio": 0.998761,
-      "cpu_seconds": 1.880921,
-      "metadata": {
-        "rows": 8191,
-        "storage_format": "csv"
-      },
-      "name": "features.serialize_artifact",
-      "read_bytes": 0,
-      "rss_delta_mb": 7.9062,
-      "rss_end_mb": 638.3281,
-      "rss_start_mb": 630.4219,
-      "wall_seconds": 1.883255,
-      "workload_type": "batched",
-      "write_bytes": 0
-    },
-    {
-      "category": "label_generation",
-      "cpu_ratio": 0.986463,
-      "cpu_seconds": 1.067374,
-      "metadata": {
-        "symbols": 100
-      },
-      "name": "labels.generate",
-      "read_bytes": 0,
-      "rss_delta_mb": 3.9531,
-      "rss_end_mb": 628.9688,
-      "rss_start_mb": 625.0156,
-      "wall_seconds": 1.082022,
-      "workload_type": "per_symbol",
       "write_bytes": 0
     },
     {
       "category": "model_training",
-      "cpu_ratio": 1.102874,
-      "cpu_seconds": 3.20443,
+      "cpu_ratio": 1.077001,
+      "cpu_seconds": 3.496588,
       "metadata": {
         "algorithm": "random_forest_regressor",
         "task_type": "regression"
       },
       "name": "model.fit",
       "read_bytes": 0,
-      "rss_delta_mb": 1.8906,
-      "rss_end_mb": 640.2188,
-      "rss_start_mb": 638.3281,
-      "wall_seconds": 2.905527,
+      "rss_delta_mb": 5.4062,
+      "rss_end_mb": 600.2812,
+      "rss_start_mb": 594.875,
+      "wall_seconds": 3.246598,
       "workload_type": "batched",
       "write_bytes": 0
     },
     {
-      "category": "serialization",
-      "cpu_ratio": 0.991622,
-      "cpu_seconds": 4.25328,
+      "category": "label_generation",
+      "cpu_ratio": 0.994207,
+      "cpu_seconds": 1.666306,
       "metadata": {
-        "rows": 8191,
-        "storage_format": "csv"
+        "symbols": 100
       },
-      "name": "strategy.serialize_dataset",
+      "name": "labels.generate",
       "read_bytes": 0,
-      "rss_delta_mb": 1.3125,
-      "rss_end_mb": 663.8594,
-      "rss_start_mb": 662.5469,
-      "wall_seconds": 4.289214,
-      "workload_type": "batched",
-      "write_bytes": 0
-    },
-    {
-      "category": "serialization",
-      "cpu_ratio": 0.994223,
-      "cpu_seconds": 2.306635,
-      "metadata": {
-        "rows": 8191,
-        "storage_format": "csv"
-      },
-      "name": "model.serialize_predictions",
-      "read_bytes": 0,
-      "rss_delta_mb": 0.5469,
-      "rss_end_mb": 653.4219,
-      "rss_start_mb": 652.875,
-      "wall_seconds": 2.320038,
-      "workload_type": "batched",
-      "write_bytes": 0
-    },
-    {
-      "category": "feature_generation",
-      "cpu_ratio": 1.000016,
-      "cpu_seconds": 0.036782,
-      "metadata": {
-        "rows": 87,
-        "symbol": "XOM"
-      },
-      "name": "features.compute_symbol_panel",
-      "read_bytes": 0,
-      "rss_delta_mb": 0.125,
-      "rss_end_mb": 629.4531,
-      "rss_start_mb": 629.3281,
-      "wall_seconds": 0.036781,
+      "rss_delta_mb": 2.4219,
+      "rss_end_mb": 590.5781,
+      "rss_start_mb": 588.1562,
+      "wall_seconds": 1.676015,
       "workload_type": "per_symbol",
       "write_bytes": 0
     },
     {
+      "category": "serialization",
+      "cpu_ratio": 0.983705,
+      "cpu_seconds": 2.666572,
+      "metadata": {
+        "rows": 8641,
+        "storage_format": "csv"
+      },
+      "name": "model.serialize_predictions",
+      "read_bytes": 0,
+      "rss_delta_mb": 1.6719,
+      "rss_end_mb": 602.3906,
+      "rss_start_mb": 600.7188,
+      "wall_seconds": 2.710745,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "serialization",
+      "cpu_ratio": 0.994984,
+      "cpu_seconds": 2.195935,
+      "metadata": {
+        "rows": 8641,
+        "storage_format": "csv"
+      },
+      "name": "features.serialize_artifact",
+      "read_bytes": 0,
+      "rss_delta_mb": 1.2344,
+      "rss_end_mb": 594.875,
+      "rss_start_mb": 593.6406,
+      "wall_seconds": 2.207006,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
       "category": "data_loading",
-      "cpu_ratio": 0.998194,
-      "cpu_seconds": 0.531379,
+      "cpu_ratio": 0.994715,
+      "cpu_seconds": 0.751652,
       "metadata": {
         "symbols_requested": 100
       },
       "name": "features.load_adjusted_prices",
       "read_bytes": 0,
-      "rss_delta_mb": 0.1094,
-      "rss_end_mb": 629.0781,
-      "rss_start_mb": 628.9688,
-      "wall_seconds": 0.532341,
+      "rss_delta_mb": 0.8125,
+      "rss_end_mb": 591.3906,
+      "rss_start_mb": 590.5781,
+      "wall_seconds": 0.755646,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "inference",
+      "cpu_ratio": 1.039642,
+      "cpu_seconds": 0.214343,
+      "metadata": {
+        "artifact_type": "REGRESSOR_PREDICTIONS"
+      },
+      "name": "model.score",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.4375,
+      "rss_end_mb": 600.7188,
+      "rss_start_mb": 600.2812,
+      "wall_seconds": 0.20617,
       "workload_type": "batched",
       "write_bytes": 0
     },
     {
       "category": "feature_generation",
-      "cpu_ratio": 1.000016,
-      "cpu_seconds": 0.037305,
+      "cpu_ratio": 0.90198,
+      "cpu_seconds": 0.080939,
       "metadata": {
         "rows": 87,
-        "symbol": "SCHW"
+        "symbol": "TXN"
       },
       "name": "features.compute_symbol_panel",
       "read_bytes": 0,
-      "rss_delta_mb": 0.0781,
-      "rss_end_mb": 630.2031,
-      "rss_start_mb": 630.125,
-      "wall_seconds": 0.037304,
+      "rss_delta_mb": 0.1562,
+      "rss_end_mb": 592.1719,
+      "rss_start_mb": 592.0156,
+      "wall_seconds": 0.089735,
       "workload_type": "per_symbol",
       "write_bytes": 0
     },
     {
       "category": "feature_generation",
-      "cpu_ratio": 0.831158,
-      "cpu_seconds": 0.057259,
+      "cpu_ratio": 0.887293,
+      "cpu_seconds": 0.131211,
       "metadata": {
         "rows": 87,
-        "symbol": "IBM"
+        "symbol": "ISRG"
       },
       "name": "features.compute_symbol_panel",
       "read_bytes": 0,
-      "rss_delta_mb": 0.0469,
-      "rss_end_mb": 629.7188,
-      "rss_start_mb": 629.6719,
-      "wall_seconds": 0.068891,
+      "rss_delta_mb": 0.1562,
+      "rss_end_mb": 592.4375,
+      "rss_start_mb": 592.2812,
+      "wall_seconds": 0.147878,
       "workload_type": "per_symbol",
+      "write_bytes": 0
+    },
+    {
+      "category": "feature_generation",
+      "cpu_ratio": 0.995219,
+      "cpu_seconds": 0.054351,
+      "metadata": {
+        "rows": 87,
+        "symbol": "AXP"
+      },
+      "name": "features.compute_symbol_panel",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.1406,
+      "rss_end_mb": 591.7812,
+      "rss_start_mb": 591.6406,
+      "wall_seconds": 0.054612,
+      "workload_type": "per_symbol",
+      "write_bytes": 0
+    },
+    {
+      "category": "joins_merges",
+      "cpu_ratio": 0.982029,
+      "cpu_seconds": 0.01194,
+      "metadata": {
+        "symbol_frames": 99
+      },
+      "name": "features.concat_symbol_frames",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.1406,
+      "rss_end_mb": 593.625,
+      "rss_start_mb": 593.4844,
+      "wall_seconds": 0.012158,
+      "workload_type": "vectorized",
       "write_bytes": 0
     }
   ],
   "target": "scalability_tier2",
-  "traced_peak_mb": 58.516011
+  "traced_peak_mb": 50.796018
 }

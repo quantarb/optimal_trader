@@ -1,8 +1,8 @@
 {
   "candidates": [
     {
-      "centrality_score": 0.2848,
-      "complexity_score": 0.1489,
+      "centrality_score": 0.2702,
+      "complexity_score": 0.1221,
       "evidence": [
         "runtime hotspot",
         "high complexity",
@@ -11,9 +11,9 @@
       "label": "pipeline/services.py",
       "memory_score": 0.0,
       "path": "pipeline/services.py",
-      "runtime_score": 0.9822,
+      "runtime_score": 0.9859,
       "scaling_score": 0.0,
-      "total_score": 0.4088
+      "total_score": 0.4039
     },
     {
       "centrality_score": 0.0,
@@ -30,7 +30,7 @@
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.7221,
+      "complexity_score": 0.7134,
       "evidence": [
         "high complexity",
         "scaling risk"
@@ -40,7 +40,7 @@
       "path": "analysis/oracle_reports.py",
       "runtime_score": 0.0,
       "scaling_score": 1.0,
-      "total_score": 0.2583
+      "total_score": 0.257
     },
     {
       "centrality_score": 0.0,
@@ -70,20 +70,7 @@
       "total_score": 0.15
     },
     {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0,
-      "evidence": [
-        "runtime hotspot"
-      ],
-      "label": "workflows/feature_runtime.py",
-      "memory_score": 0.0,
-      "path": "workflows/feature_runtime.py",
-      "runtime_score": 0.3849,
-      "scaling_score": 0.0,
-      "total_score": 0.1347
-    },
-    {
-      "centrality_score": 0.8456,
+      "centrality_score": 0.8461,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -93,11 +80,24 @@
       "path": "fmp/models.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.1268
+      "total_score": 0.1269
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.7512,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot"
+      ],
+      "label": "workflows/feature_runtime.py",
+      "memory_score": 0.0,
+      "path": "workflows/feature_runtime.py",
+      "runtime_score": 0.3594,
+      "scaling_score": 0.0,
+      "total_score": 0.1258
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.7433,
       "evidence": [
         "high complexity"
       ],
@@ -106,7 +106,7 @@
       "path": "pipeline/artifact_support.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.1127
+      "total_score": 0.1115
     },
     {
       "centrality_score": 0.0,
@@ -122,7 +122,7 @@
       "total_score": 0.1107
     },
     {
-      "centrality_score": 0.6879,
+      "centrality_score": 0.6644,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -132,11 +132,11 @@
       "path": "fmp/endpoints/base.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.1032
+      "total_score": 0.0997
     },
     {
-      "centrality_score": 0.0519,
-      "complexity_score": 0.5135,
+      "centrality_score": 0.0421,
+      "complexity_score": 0.4982,
       "evidence": [
         "high complexity",
         "central dependency",
@@ -147,13 +147,14 @@
       "path": "pipeline/research_suite.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0888,
-      "total_score": 0.0981
+      "total_score": 0.0944
     },
     {
-      "centrality_score": 0.0,
-      "complexity_score": 0.4419,
+      "centrality_score": 0.0167,
+      "complexity_score": 0.4243,
       "evidence": [
         "high complexity",
+        "central dependency",
         "scaling risk"
       ],
       "label": "pipeline/cohort_runner.py",
@@ -161,25 +162,11 @@
       "path": "pipeline/cohort_runner.py",
       "runtime_score": 0.0,
       "scaling_score": 0.1822,
-      "total_score": 0.0936
+      "total_score": 0.0935
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.1547,
-      "evidence": [
-        "runtime hotspot",
-        "high complexity"
-      ],
-      "label": "pipeline/service_jobs_data.py",
-      "memory_score": 0.0,
-      "path": "pipeline/service_jobs_data.py",
-      "runtime_score": 0.1827,
-      "scaling_score": 0.0,
-      "total_score": 0.0872
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.5723,
+      "complexity_score": 0.5588,
       "evidence": [
         "high complexity"
       ],
@@ -188,11 +175,11 @@
       "path": "pipeline/experiments.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0858
+      "total_score": 0.0838
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.2915,
+      "complexity_score": 0.2692,
       "evidence": [
         "high complexity",
         "scaling risk"
@@ -202,11 +189,38 @@
       "path": "fmp/views.py",
       "runtime_score": 0.0,
       "scaling_score": 0.2477,
-      "total_score": 0.0809
+      "total_score": 0.0775
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.4176,
+      "complexity_score": 0.128,
+      "evidence": [
+        "runtime hotspot",
+        "high complexity"
+      ],
+      "label": "pipeline/service_jobs_data.py",
+      "memory_score": 0.0,
+      "path": "pipeline/service_jobs_data.py",
+      "runtime_score": 0.1383,
+      "scaling_score": 0.0,
+      "total_score": 0.0676
+    },
+    {
+      "centrality_score": 0.441,
+      "complexity_score": 0.0,
+      "evidence": [
+        "central dependency"
+      ],
+      "label": "tools/product_quality_analysis/models.py",
+      "memory_score": 0.0,
+      "path": "tools/product_quality_analysis/models.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0661
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.3993,
       "evidence": [
         "high complexity"
       ],
@@ -215,11 +229,11 @@
       "path": "features/views.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0626
+      "total_score": 0.0599
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.2425,
+      "complexity_score": 0.2187,
       "evidence": [
         "high complexity",
         "scaling risk"
@@ -229,49 +243,7 @@
       "path": "analysis/diagnostics.py",
       "runtime_score": 0.0,
       "scaling_score": 0.1589,
-      "total_score": 0.0602
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0,
-      "evidence": [
-        "runtime hotspot"
-      ],
-      "label": "domain/features/technical.py",
-      "memory_score": 0.0,
-      "path": "domain/features/technical.py",
-      "runtime_score": 0.1586,
-      "scaling_score": 0.0,
-      "total_score": 0.0555
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0288,
-      "evidence": [
-        "high complexity",
-        "scaling risk"
-      ],
-      "label": "analysis/situation_clustering.py",
-      "memory_score": 0.0,
-      "path": "analysis/situation_clustering.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.3271,
-      "total_score": 0.0534
-    },
-    {
-      "centrality_score": 0.2363,
-      "complexity_score": 0.0,
-      "evidence": [
-        "runtime hotspot",
-        "memory hotspot",
-        "central dependency"
-      ],
-      "label": "pipeline/service_runtime.py",
-      "memory_score": 0.0481,
-      "path": "pipeline/service_runtime.py",
-      "runtime_score": 0.0134,
-      "scaling_score": 0.0,
-      "total_score": 0.0498
+      "total_score": 0.0566
     },
     {
       "centrality_score": 0.0,
@@ -290,18 +262,59 @@
       "centrality_score": 0.0,
       "complexity_score": 0.0,
       "evidence": [
+        "scaling risk"
+      ],
+      "label": "analysis/situation_clustering.py",
+      "memory_score": 0.0,
+      "path": "analysis/situation_clustering.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.3271,
+      "total_score": 0.0491
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot"
+      ],
+      "label": "domain/features/technical.py",
+      "memory_score": 0.0,
+      "path": "domain/features/technical.py",
+      "runtime_score": 0.1375,
+      "scaling_score": 0.0,
+      "total_score": 0.0481
+    },
+    {
+      "centrality_score": 0.2233,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot",
+        "memory hotspot",
+        "central dependency"
+      ],
+      "label": "pipeline/service_runtime.py",
+      "memory_score": 0.0501,
+      "path": "pipeline/service_runtime.py",
+      "runtime_score": 0.0102,
+      "scaling_score": 0.0,
+      "total_score": 0.0471
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0,
+      "evidence": [
         "runtime hotspot"
       ],
       "label": "workflows/features.py",
       "memory_score": 0.0,
       "path": "workflows/features.py",
-      "runtime_score": 0.1322,
+      "runtime_score": 0.1263,
       "scaling_score": 0.0,
-      "total_score": 0.0463
+      "total_score": 0.0442
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.3009,
+      "complexity_score": 0.2789,
       "evidence": [
         "high complexity"
       ],
@@ -310,11 +323,11 @@
       "path": "analysis/insights.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0451
+      "total_score": 0.0418
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.2797,
+      "complexity_score": 0.257,
       "evidence": [
         "high complexity"
       ],
@@ -323,10 +336,10 @@
       "path": "pipeline/service_jobs_modeling.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.042
+      "total_score": 0.0386
     },
     {
-      "centrality_score": 0.2699,
+      "centrality_score": 0.2559,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -336,33 +349,7 @@
       "path": "fmp/endpoints/helpers.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0405
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0,
-      "evidence": [
-        "scaling risk"
-      ],
-      "label": "ml/autoencoder/diagnostics.py",
-      "memory_score": 0.0,
-      "path": "ml/autoencoder/diagnostics.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.257,
-      "total_score": 0.0386
-    },
-    {
-      "centrality_score": 0.2548,
-      "complexity_score": 0.0,
-      "evidence": [
-        "central dependency"
-      ],
-      "label": "features/section_utils.py",
-      "memory_score": 0.0,
-      "path": "features/section_utils.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0382
+      "total_score": 0.0384
     },
     {
       "centrality_score": 0.0,
@@ -391,34 +378,20 @@
       "total_score": 0.0371
     },
     {
-      "centrality_score": 0.0901,
+      "centrality_score": 0.2411,
       "complexity_score": 0.0,
       "evidence": [
-        "runtime hotspot",
         "central dependency"
       ],
-      "label": "features/feature_builders.py",
+      "label": "features/section_utils.py",
       "memory_score": 0.0,
-      "path": "features/feature_builders.py",
-      "runtime_score": 0.0675,
-      "scaling_score": 0.0,
-      "total_score": 0.0371
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.2391,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "pipeline/views_artifacts.py",
-      "memory_score": 0.0,
-      "path": "pipeline/views_artifacts.py",
+      "path": "features/section_utils.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0359
+      "total_score": 0.0362
     },
     {
-      "centrality_score": 0.2263,
+      "centrality_score": 0.2145,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency",
@@ -429,23 +402,37 @@
       "path": "pipeline/tests.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0093,
-      "total_score": 0.0354
+      "total_score": 0.0336
+    },
+    {
+      "centrality_score": 0.0801,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot",
+        "central dependency"
+      ],
+      "label": "features/feature_builders.py",
+      "memory_score": 0.0,
+      "path": "features/feature_builders.py",
+      "runtime_score": 0.0606,
+      "scaling_score": 0.0,
+      "total_score": 0.0332
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.2179,
+      "complexity_score": 0.2151,
       "evidence": [
         "high complexity"
       ],
-      "label": "pipeline/views_reports.py",
+      "label": "pipeline/views_artifacts.py",
       "memory_score": 0.0,
-      "path": "pipeline/views_reports.py",
+      "path": "pipeline/views_artifacts.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0327
+      "total_score": 0.0323
     },
     {
-      "centrality_score": 0.2124,
+      "centrality_score": 0.2007,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -455,7 +442,34 @@
       "path": "fmp/endpoints/registry.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0319
+      "total_score": 0.0301
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot",
+        "scaling risk"
+      ],
+      "label": "pipeline/strategy_definitions.py",
+      "memory_score": 0.0,
+      "path": "pipeline/strategy_definitions.py",
+      "runtime_score": 0.0076,
+      "scaling_score": 0.1822,
+      "total_score": 0.03
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.1933,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "pipeline/views_reports.py",
+      "memory_score": 0.0,
+      "path": "pipeline/views_reports.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.029
     },
     {
       "centrality_score": 0.0,
@@ -476,9 +490,9 @@
       "evidence": [
         "scaling risk"
       ],
-      "label": "pipeline/strategy_definitions.py",
+      "label": "ml/autoencoder/diagnostics.py",
       "memory_score": 0.0,
-      "path": "pipeline/strategy_definitions.py",
+      "path": "ml/autoencoder/diagnostics.py",
       "runtime_score": 0.0,
       "scaling_score": 0.1822,
       "total_score": 0.0273
@@ -500,40 +514,15 @@
       "centrality_score": 0.0,
       "complexity_score": 0.0,
       "evidence": [
+        "memory hotspot",
         "scaling risk"
       ],
       "label": "ml/artifact_datasets.py",
-      "memory_score": 0.0,
+      "memory_score": 0.0007,
       "path": "ml/artifact_datasets.py",
       "runtime_score": 0.0,
       "scaling_score": 0.1636,
-      "total_score": 0.0245
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.1531,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "domain/trades/operations.py",
-      "memory_score": 0.0,
-      "path": "domain/trades/operations.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.023
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.1511,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "pipeline/views_workbench.py",
-      "memory_score": 0.0,
-      "path": "pipeline/views_workbench.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0227
+      "total_score": 0.0247
     },
     {
       "centrality_score": 0.0,
@@ -550,19 +539,32 @@
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.1392,
+      "complexity_score": 0.1264,
       "evidence": [
         "high complexity"
       ],
-      "label": "pipeline/management/commands/run_market_insight_reasoning.py",
+      "label": "domain/trades/operations.py",
       "memory_score": 0.0,
-      "path": "pipeline/management/commands/run_market_insight_reasoning.py",
+      "path": "domain/trades/operations.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0209
+      "total_score": 0.019
     },
     {
-      "centrality_score": 0.1346,
+      "centrality_score": 0.0,
+      "complexity_score": 0.1243,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "pipeline/views_workbench.py",
+      "memory_score": 0.0,
+      "path": "pipeline/views_workbench.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0186
+    },
+    {
+      "centrality_score": 0.1223,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -572,11 +574,51 @@
       "path": "ml/execution.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0202
+      "total_score": 0.0183
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.1342,
+      "complexity_score": 0.0,
+      "evidence": [
+        "runtime hotspot",
+        "memory hotspot"
+      ],
+      "label": "data/historical_prices.py",
+      "memory_score": 0.0875,
+      "path": "data/historical_prices.py",
+      "runtime_score": 0.0015,
+      "scaling_score": 0.0,
+      "total_score": 0.018
+    },
+    {
+      "centrality_score": 0.1185,
+      "complexity_score": 0.0,
+      "evidence": [
+        "central dependency"
+      ],
+      "label": "tools/product_quality_analysis/cli.py",
+      "memory_score": 0.0,
+      "path": "tools/product_quality_analysis/cli.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0178
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.112,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "pipeline/management/commands/run_market_insight_reasoning.py",
+      "memory_score": 0.0,
+      "path": "pipeline/management/commands/run_market_insight_reasoning.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0168
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.1069,
       "evidence": [
         "high complexity"
       ],
@@ -585,33 +627,7 @@
       "path": "workflows/modeling.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0201
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.1221,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "pipeline/progress.py",
-      "memory_score": 0.0,
-      "path": "pipeline/progress.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0183
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0,
-      "evidence": [
-        "memory hotspot"
-      ],
-      "label": "data/historical_prices.py",
-      "memory_score": 0.0824,
-      "path": "data/historical_prices.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0165
+      "total_score": 0.016
     },
     {
       "centrality_score": 0.0,
@@ -627,7 +643,20 @@
       "total_score": 0.0154
     },
     {
-      "centrality_score": 0.1,
+      "centrality_score": 0.0,
+      "complexity_score": 0.0944,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "pipeline/progress.py",
+      "memory_score": 0.0,
+      "path": "pipeline/progress.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0142
+    },
+    {
+      "centrality_score": 0.0916,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -637,20 +666,7 @@
       "path": "ml/base.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.015
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0965,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "analysis/feature_attribution.py",
-      "memory_score": 0.0,
-      "path": "analysis/feature_attribution.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0145
+      "total_score": 0.0137
     },
     {
       "centrality_score": 0.0,
@@ -682,28 +698,14 @@
       "centrality_score": 0.0,
       "complexity_score": 0.0,
       "evidence": [
-        "runtime hotspot",
-        "scaling risk"
+        "runtime hotspot"
       ],
-      "label": "workflows/labels.py",
+      "label": "pipeline/service_jobs_strategy.py",
       "memory_score": 0.0,
-      "path": "workflows/labels.py",
-      "runtime_score": 0.0316,
-      "scaling_score": 0.0093,
-      "total_score": 0.0125
-    },
-    {
-      "centrality_score": 0.0,
-      "complexity_score": 0.0755,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "analysis/insight_composer.py",
-      "memory_score": 0.0,
-      "path": "analysis/insight_composer.py",
-      "runtime_score": 0.0,
+      "path": "pipeline/service_jobs_strategy.py",
+      "runtime_score": 0.0381,
       "scaling_score": 0.0,
-      "total_score": 0.0113
+      "total_score": 0.0133
     },
     {
       "centrality_score": 0.0,
@@ -712,11 +714,24 @@
         "memory hotspot"
       ],
       "label": "pipeline/performance.py",
-      "memory_score": 0.0556,
+      "memory_score": 0.0623,
       "path": "pipeline/performance.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0111
+      "total_score": 0.0125
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0705,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "tools/product_quality_analysis/analyzers/data_completeness.py",
+      "memory_score": 0.0,
+      "path": "tools/product_quality_analysis/analyzers/data_completeness.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0106
     },
     {
       "centrality_score": 0.0,
@@ -732,7 +747,20 @@
       "total_score": 0.0105
     },
     {
-      "centrality_score": 0.0633,
+      "centrality_score": 0.0,
+      "complexity_score": 0.0681,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "analysis/feature_attribution.py",
+      "memory_score": 0.0,
+      "path": "analysis/feature_attribution.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0102
+    },
+    {
+      "centrality_score": 0.0524,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
@@ -742,10 +770,23 @@
       "path": "analysis/market_state.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0095
+      "total_score": 0.0079
     },
     {
-      "centrality_score": 0.0438,
+      "centrality_score": 0.0,
+      "complexity_score": 0.0464,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "analysis/insight_composer.py",
+      "memory_score": 0.0,
+      "path": "analysis/insight_composer.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.007
+    },
+    {
+      "centrality_score": 0.0338,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency",
@@ -756,48 +797,20 @@
       "path": "analysis/market_insight_schema.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0093,
-      "total_score": 0.008
+      "total_score": 0.0065
     },
     {
       "centrality_score": 0.0,
-      "complexity_score": 0.0389,
-      "evidence": [
-        "high complexity"
-      ],
-      "label": "pipeline/management/commands/run_market_situation_clustering.py",
-      "memory_score": 0.0,
-      "path": "pipeline/management/commands/run_market_situation_clustering.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0058
-    },
-    {
-      "centrality_score": 0.0149,
       "complexity_score": 0.0,
       "evidence": [
-        "memory hotspot",
-        "central dependency"
+        "runtime hotspot"
       ],
-      "label": "ml/models.py",
-      "memory_score": 0.01,
-      "path": "ml/models.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
-      "total_score": 0.0042
-    },
-    {
-      "centrality_score": 0.0177,
-      "complexity_score": 0.0,
-      "evidence": [
-        "central dependency",
-        "scaling risk"
-      ],
-      "label": "pipeline/feature_presentation.py",
+      "label": "workflows/strategy.py",
       "memory_score": 0.0,
-      "path": "pipeline/feature_presentation.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0093,
-      "total_score": 0.0041
+      "path": "workflows/strategy.py",
+      "runtime_score": 0.0141,
+      "scaling_score": 0.0,
+      "total_score": 0.0049
     },
     {
       "centrality_score": 0.0,
@@ -839,17 +852,32 @@
       "total_score": 0.0028
     },
     {
-      "centrality_score": 0.0,
+      "centrality_score": 0.0079,
       "complexity_score": 0.0,
       "evidence": [
-        "runtime hotspot"
+        "central dependency",
+        "scaling risk"
       ],
-      "label": "pipeline/service_jobs_strategy.py",
+      "label": "pipeline/feature_presentation.py",
       "memory_score": 0.0,
-      "path": "pipeline/service_jobs_strategy.py",
-      "runtime_score": 0.0068,
+      "path": "pipeline/feature_presentation.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0093,
+      "total_score": 0.0026
+    },
+    {
+      "centrality_score": 0.0055,
+      "complexity_score": 0.0,
+      "evidence": [
+        "memory hotspot",
+        "central dependency"
+      ],
+      "label": "ml/models.py",
+      "memory_score": 0.0083,
+      "path": "ml/models.py",
+      "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0024
+      "total_score": 0.0025
     },
     {
       "centrality_score": 0.0,
@@ -875,19 +903,6 @@
       "path": "backtest/latest.py",
       "runtime_score": 0.0,
       "scaling_score": 0.014,
-      "total_score": 0.0021
-    },
-    {
-      "centrality_score": 0.0142,
-      "complexity_score": 0.0,
-      "evidence": [
-        "central dependency"
-      ],
-      "label": "domain/features/specs.py",
-      "memory_score": 0.0,
-      "path": "domain/features/specs.py",
-      "runtime_score": 0.0,
-      "scaling_score": 0.0,
       "total_score": 0.0021
     },
     {
@@ -969,30 +984,56 @@
       "total_score": 0.0014
     },
     {
-      "centrality_score": 0.0087,
+      "centrality_score": 0.0,
       "complexity_score": 0.0,
       "evidence": [
-        "central dependency"
+        "scaling risk"
       ],
-      "label": "pipeline/contracts.py",
+      "label": "tools/product_quality_analysis/integrations/data_quality_runner.py",
       "memory_score": 0.0,
-      "path": "pipeline/contracts.py",
+      "path": "tools/product_quality_analysis/integrations/data_quality_runner.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0093,
+      "total_score": 0.0014
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0,
+      "evidence": [
+        "scaling risk"
+      ],
+      "label": "workflows/labels.py",
+      "memory_score": 0.0,
+      "path": "workflows/labels.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0093,
+      "total_score": 0.0014
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0086,
+      "evidence": [
+        "high complexity"
+      ],
+      "label": "pipeline/management/commands/run_market_situation_clustering.py",
+      "memory_score": 0.0,
+      "path": "pipeline/management/commands/run_market_situation_clustering.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
       "total_score": 0.0013
     },
     {
-      "centrality_score": 0.0057,
+      "centrality_score": 0.0049,
       "complexity_score": 0.0,
       "evidence": [
         "central dependency"
       ],
-      "label": "pipeline/views.py",
+      "label": "domain/features/specs.py",
       "memory_score": 0.0,
-      "path": "pipeline/views.py",
+      "path": "domain/features/specs.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
-      "total_score": 0.0009
+      "total_score": 0.0007
     },
     {
       "centrality_score": 0.0,
@@ -1009,17 +1050,28 @@
       "centrality_score": 0.0,
       "complexity_score": 0.0,
       "evidence": [],
-      "label": "tools/code_analysis/repository.py",
+      "label": "ml/frameworks/sklearn/__init__.py",
       "memory_score": 0.0,
-      "path": "tools/code_analysis/repository.py",
+      "path": "ml/frameworks/sklearn/__init__.py",
+      "runtime_score": 0.0,
+      "scaling_score": 0.0,
+      "total_score": 0.0
+    },
+    {
+      "centrality_score": 0.0,
+      "complexity_score": 0.0,
+      "evidence": [],
+      "label": "pipeline/contracts.py",
+      "memory_score": 0.0,
+      "path": "pipeline/contracts.py",
       "runtime_score": 0.0,
       "scaling_score": 0.0,
       "total_score": 0.0
     }
   ],
-  "generated_at": "2026-03-11T23:57:31.147932+00:00",
+  "generated_at": "2026-03-12T03:01:08.550867+00:00",
   "summary": {
-    "count": 77
+    "count": 81
   },
   "weights": {
     "centrality_weight": 0.15,

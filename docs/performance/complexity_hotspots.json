@@ -277,7 +277,7 @@
       "score": 210.1337
     }
   ],
-  "generated_at": "2026-03-11T23:56:59.610247+00:00",
+  "generated_at": "2026-03-12T02:59:39.116254+00:00",
   "module_findings": [
     {
       "complexity": 111.0,
@@ -500,6 +500,17 @@
       "score": 208.147
     },
     {
+      "complexity": 38.0,
+      "halstead_volume": 578.8753,
+      "loc": 160,
+      "maintainability_index": 34.2392,
+      "name": "tools.product_quality_analysis.analyzers.data_completeness",
+      "object_type": "module",
+      "path": "tools/product_quality_analysis/analyzers/data_completeness.py",
+      "rank": "E",
+      "score": 201.2161
+    },
+    {
       "complexity": 40.0,
       "halstead_volume": 1522.1499,
       "loc": 267,
@@ -533,29 +544,18 @@
       "score": 183.2698
     },
     {
-      "complexity": 38.0,
-      "halstead_volume": 1392.1701,
-      "loc": 329,
-      "maintainability_index": 20.5675,
-      "name": "analysis.situation_clustering",
+      "complexity": 39.0,
+      "halstead_volume": 1363.0225,
+      "loc": 286,
+      "maintainability_index": 19.7343,
+      "name": "pipeline.strategy_definitions",
       "object_type": "module",
-      "path": "analysis/situation_clustering.py",
+      "path": "pipeline/strategy_definitions.py",
       "rank": "E",
-      "score": 180.2592
-    },
-    {
-      "complexity": 37.0,
-      "halstead_volume": 2211.9418,
-      "loc": 289,
-      "maintainability_index": 27.9481,
-      "name": "backtest.strategies.stateful",
-      "object_type": "module",
-      "path": "backtest/strategies/stateful.py",
-      "rank": "E",
-      "score": 171.6339
+      "score": 180.7706
     }
   ],
   "summary": {
-    "files_analyzed": 332
+    "files_analyzed": 368
   }
 }

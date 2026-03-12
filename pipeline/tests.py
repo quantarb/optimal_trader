@@ -2074,6 +2074,41 @@ class UniverseScalingTests(Mag7FixtureMixin, TestCase):
         self.assertGreater(len(tier_10b), len(tier_100b))
         self.assertEqual(tier_10b[-1], "DUOL")
 
+    def test_resolve_symbol_universe_excludes_payload_funds_when_requested(self):
+        Symbol.objects.create(
+            symbol="FUNDX",
+            company_name="Broad Market Index Vehicle",
+            exchange="NASDAQ",
+            country="US",
+            market_cap=600_000_000_000.0,
+            payload={"isFund": True},
+        )
+        symbols = resolve_symbol_universe(
+            min_market_cap=100_000_000_000.0,
+            country="US",
+            exchanges=["NASDAQ", "NYSE"],
+            exclude_pooled_vehicles=True,
+        )
+        self.assertNotIn("FUNDX", symbols)
+
+    def test_resolve_symbol_universe_excludes_requested_symbol_prefixes(self):
+        Symbol.objects.create(
+            symbol="TIER1234",
+            company_name="tier1 synthetic 1234",
+            exchange="NASDAQ",
+            country="US",
+            market_cap=700_000_000_000.0,
+            payload={},
+        )
+        symbols = resolve_symbol_universe(
+            min_market_cap=100_000_000_000.0,
+            country="US",
+            exchanges=["NASDAQ", "NYSE"],
+            exclude_pooled_vehicles=True,
+            exclude_symbol_prefixes=["TIER"],
+        )
+        self.assertNotIn("TIER1234", symbols)
+
     def test_universe_job_supports_screen_filters(self):
         run = PipelineRun.objects.create(
             name="us-cap-tier-universe",

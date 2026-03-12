@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 
 from ml.base import FitSpec
-from ml.frameworks.sklearn import SklearnRFClassifier, SklearnRFRegressor
 
 
 def derive_oracle_cluster_labels(df: pd.DataFrame) -> pd.Series:
@@ -126,6 +125,8 @@ def train_multi_task_forest_bundle(
     model_params: dict[str, Any] | None = None,
     include_cluster_head: bool = True,
 ) -> MultiTaskForestBundle:
+    from ml.frameworks.sklearn import SklearnRFClassifier, SklearnRFRegressor
+
     params = dict(model_params or {})
     working = train_df.copy()
     if "sample_weight" not in working.columns:

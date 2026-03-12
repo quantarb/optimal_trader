@@ -23,7 +23,7 @@ from .service_runtime import (
     write_frame_artifact,
     write_payload_artifact,
 )
-from .universe_selection import parse_exchange_values, resolve_symbol_universe
+from .universe_selection import parse_exchange_values, parse_symbol_prefix_values, resolve_symbol_universe
 
 
 def execute_universe(config: dict[str, Any], *, performance_tracer=None) -> BuiltOutput:
@@ -47,14 +47,16 @@ def execute_universe(config: dict[str, Any], *, performance_tracer=None) -> Buil
             max_market_cap = config.get("max_market_cap")
             country = str(config.get("country") or "").strip()
             exchanges = parse_exchange_values(config.get("exchanges"))
+            exclude_symbol_prefixes = parse_symbol_prefix_values(config.get("exclude_symbol_prefixes"))
             exclude_pooled_vehicles = as_bool(config.get("exclude_pooled_vehicles"), default=False)
-            if min_market_cap not in (None, "") or max_market_cap not in (None, "") or country or exchanges:
+            if min_market_cap not in (None, "") or max_market_cap not in (None, "") or country or exchanges or exclude_symbol_prefixes:
                 universe_filters = {
                     "min_market_cap": float(min_market_cap) if min_market_cap not in (None, "") else None,
                     "max_market_cap": float(max_market_cap) if max_market_cap not in (None, "") else None,
                     "country": country,
                     "exchanges": exchanges,
                     "exclude_pooled_vehicles": bool(exclude_pooled_vehicles),
+                    "exclude_symbol_prefixes": list(exclude_symbol_prefixes),
                     "limit": max(1, limit),
                 }
                 symbols = normalize_symbol_list(
@@ -65,6 +67,7 @@ def execute_universe(config: dict[str, Any], *, performance_tracer=None) -> Buil
                         exchanges=exchanges,
                         limit=max(1, limit),
                         exclude_pooled_vehicles=exclude_pooled_vehicles,
+                        exclude_symbol_prefixes=exclude_symbol_prefixes,
                     )
                 )
             else:
@@ -81,14 +84,16 @@ def execute_universe(config: dict[str, Any], *, performance_tracer=None) -> Buil
                 max_market_cap = config.get("max_market_cap")
                 country = str(config.get("country") or "").strip()
                 exchanges = parse_exchange_values(config.get("exchanges"))
+                exclude_symbol_prefixes = parse_symbol_prefix_values(config.get("exclude_symbol_prefixes"))
                 exclude_pooled_vehicles = as_bool(config.get("exclude_pooled_vehicles"), default=False)
-                if min_market_cap not in (None, "") or max_market_cap not in (None, "") or country or exchanges:
+                if min_market_cap not in (None, "") or max_market_cap not in (None, "") or country or exchanges or exclude_symbol_prefixes:
                     universe_filters = {
                         "min_market_cap": float(min_market_cap) if min_market_cap not in (None, "") else None,
                         "max_market_cap": float(max_market_cap) if max_market_cap not in (None, "") else None,
                         "country": country,
                         "exchanges": exchanges,
                         "exclude_pooled_vehicles": bool(exclude_pooled_vehicles),
+                        "exclude_symbol_prefixes": list(exclude_symbol_prefixes),
                         "limit": max(1, limit),
                     }
                     symbols = normalize_symbol_list(
@@ -99,6 +104,7 @@ def execute_universe(config: dict[str, Any], *, performance_tracer=None) -> Buil
                             exchanges=exchanges,
                             limit=max(1, limit),
                             exclude_pooled_vehicles=exclude_pooled_vehicles,
+                            exclude_symbol_prefixes=exclude_symbol_prefixes,
                         )
                     )
                 else:

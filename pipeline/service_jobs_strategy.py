@@ -274,6 +274,7 @@ def execute_backtest_strategy(
                 "execution_delay_days": int(spec.execution_delay_days),
                 "use_lagged_weights": bool(spec.use_lagged_weights),
                 "turnover_half_l1": bool(spec.turnover_half_l1),
+                "allowed_symbols": list(spec.allowed_symbols),
             },
             "equity_curve": build_equity_curve_from_daily_rows(result.daily_rows),
             "schema": build_schema_metadata(

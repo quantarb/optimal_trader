@@ -199,7 +199,11 @@ def _load_strategy_rows(strategy_artifact: Artifact) -> list[dict[str, Any]]:
         return list(csv.DictReader(fh))
 
 
-def _build_equal_weight_benchmark(strategy_artifact: Artifact) -> dict[str, Any]:
+def _build_equal_weight_benchmark(
+    strategy_artifact: Artifact,
+    *,
+    allowed_symbols: Sequence[str] | None = None,
+) -> dict[str, Any]:
     rows = _load_strategy_rows(strategy_artifact)
     if not rows:
         return {
@@ -217,6 +221,18 @@ def _build_equal_weight_benchmark(strategy_artifact: Artifact) -> dict[str, Any]
             "benchmark_cumulative_return": 0.0,
             "benchmark_max_drawdown": 0.0,
         }
+    if allowed_symbols:
+        allowed = {str(symbol).strip().upper() for symbol in list(allowed_symbols or []) if str(symbol).strip()}
+        if allowed:
+            df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+            df = df[df["symbol"].isin(allowed)].copy()
+            if df.empty:
+                return {
+                    "benchmark_days": 0,
+                    "benchmark_final_equity": 1.0,
+                    "benchmark_cumulative_return": 0.0,
+                    "benchmark_max_drawdown": 0.0,
+                }
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["ret_1"] = pd.to_numeric(df["ret_1"], errors="coerce")
     df = df.dropna(subset=["date", "ret_1"]).copy()
@@ -704,7 +720,10 @@ def run_model_cohort_backtests(
         strategy_meta = dict(strategy_artifact.metadata or {})
         backtest_meta = dict(backtest_artifact.metadata or {})
         backtest_content = dict(backtest_artifact.content or {})
-        benchmark = _build_equal_weight_benchmark(strategy_artifact)
+        benchmark = _build_equal_weight_benchmark(
+            strategy_artifact,
+            allowed_symbols=resolved_backtest_config.get("allowed_symbols"),
+        )
         row = {
             "variant_name": variant_name,
             "fit_job": fit_job_value,

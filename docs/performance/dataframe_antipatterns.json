@@ -383,7 +383,7 @@
     {
       "function_name": "apply_strategy_definition",
       "in_loop": true,
-      "line": 202,
+      "line": 213,
       "message": "`groupby` inside a loop is a scaling risk.",
       "path": "pipeline/strategy_definitions.py",
       "pattern": "groupby",
@@ -393,7 +393,7 @@
     {
       "function_name": "apply_strategy_definition",
       "in_loop": true,
-      "line": 221,
+      "line": 233,
       "message": "`sort_values` inside a loop is a scaling risk.",
       "path": "pipeline/strategy_definitions.py",
       "pattern": "sort_values",
@@ -403,7 +403,7 @@
     {
       "function_name": "apply_strategy_definition",
       "in_loop": true,
-      "line": 237,
+      "line": 249,
       "message": "`sort_values` inside a loop is a scaling risk.",
       "path": "pipeline/strategy_definitions.py",
       "pattern": "sort_values",
@@ -501,7 +501,7 @@
       "snippet": "candidate.to_dict(orient=\"records\")"
     }
   ],
-  "generated_at": "2026-03-11T23:57:04.909450+00:00",
+  "generated_at": "2026-03-12T02:59:44.366833+00:00",
   "kind": "dataframe_patterns",
   "summary": {
     "findings": 50

@@ -1,0 +1,630 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Sequence
+
+import pandas as pd
+from django.utils.text import slugify
+
+from .cohort_runner import (
+    DEFAULT_VALIDATION_CONFIG,
+    _aggregate_walk_forward_rows,
+    _apply_walk_forward_gates,
+    _build_equal_weight_benchmark,
+    _evaluate_variant_gates,
+    _load_cached_payload,
+    _resolve_or_build_feature_artifact,
+    _resolve_or_build_universe_artifact,
+    _run_pipeline_job,
+    _validate_walk_forward_fold,
+    _write_rows_csv,
+)
+from .models import Artifact, StrategyDefinition
+from .strategy_definitions import upsert_strategy_definition
+
+
+DIRECT_STRATEGY_SUMMARY_SCHEMA_VERSION = 2
+
+
+def _summary_output_paths(output_basename: str) -> tuple[Path, Path]:
+    output_dir = Path("data") / "pipeline_artifacts"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{output_basename}.json", output_dir / f"{output_basename}.csv"
+
+
+def _resume_summary_payload(
+    *,
+    json_path: Path,
+    csv_path: Path,
+    required_keys: Sequence[str],
+    resume_existing: bool,
+) -> dict[str, Any] | None:
+    if not resume_existing:
+        return None
+    cached_payload = _load_cached_payload(
+        json_path,
+        required_keys=required_keys,
+        schema_version=DIRECT_STRATEGY_SUMMARY_SCHEMA_VERSION,
+    )
+    if cached_payload is None:
+        return None
+    cached_payload["summary_json_path"] = str(json_path)
+    cached_payload["summary_csv_path"] = str(csv_path)
+    return cached_payload
+
+
+def _read_csv_frame(path: str) -> pd.DataFrame:
+    csv_path = Path(str(path or "").strip())
+    if not csv_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(csv_path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _count_rows_through_date(feature_artifact: Artifact, cutoff_date: str) -> int:
+    if not cutoff_date:
+        return 0
+    feature_df = _read_csv_frame(str(feature_artifact.uri or ""))
+    if feature_df.empty or "date" not in feature_df.columns:
+        return 0
+    feature_df["date"] = pd.to_datetime(feature_df["date"], errors="coerce")
+    feature_df = feature_df.dropna(subset=["date"])
+    if feature_df.empty:
+        return 0
+    return int((feature_df["date"] <= pd.Timestamp(str(cutoff_date))).sum())
+
+
+def _summarize_backtest_artifact(backtest_artifact: Artifact) -> dict[str, Any]:
+    content = dict(backtest_artifact.content or {})
+    daily_rows = list(content.get("daily_rows") or [])
+    if not daily_rows:
+        return {
+            "sharpe": 0.0,
+            "avg_turnover": 0.0,
+            "total_turnover": 0.0,
+            "positive_days": 0,
+            "negative_days": 0,
+        }
+    returns = pd.Series(
+        [float(row.get("net_daily_return") or 0.0) for row in daily_rows],
+        dtype=float,
+    )
+    turnover = pd.Series(
+        [float(row.get("turnover") or 0.0) for row in daily_rows],
+        dtype=float,
+    )
+    volatility = float(returns.std(ddof=0)) if len(returns) > 1 else 0.0
+    sharpe = ((float(returns.mean()) / volatility) * (252.0 ** 0.5)) if volatility > 1e-12 else 0.0
+    return {
+        "sharpe": round(float(sharpe), 8),
+        "avg_turnover": round(float(turnover.mean()) if len(turnover) else 0.0, 8),
+        "total_turnover": round(float(turnover.sum()) if len(turnover) else 0.0, 8),
+        "positive_days": int((returns > 0.0).sum()),
+        "negative_days": int((returns < 0.0).sum()),
+    }
+
+
+def _feature_families(feature_artifact: Artifact) -> list[str]:
+    grouped = dict((feature_artifact.metadata or {}).get("feature_family_columns") or {})
+    return [str(key) for key, columns in grouped.items() if list(columns or [])]
+
+
+def _empty_walk_forward_metrics(*, trade_count: int = 0) -> dict[str, Any]:
+    return {
+        "days": 0,
+        "start_date": "",
+        "end_date": "",
+        "sharpe": 0.0,
+        "total_return": 0.0,
+        "final_equity": 1.0,
+        "max_drawdown": 0.0,
+        "avg_turnover": 0.0,
+        "total_turnover": 0.0,
+        "trade_count": int(trade_count),
+        "positive_days": 0,
+        "negative_days": 0,
+    }
+
+
+def _artifact_daily_rows(artifact: Artifact, *, fold_order: int) -> list[dict[str, Any]]:
+    return [
+        {
+            **dict(row),
+            "_fold_order": fold_order,
+        }
+        for row in list((artifact.content or {}).get("daily_rows") or [])
+    ]
+
+
+def _resolve_direct_strategy_definition(
+    *,
+    strategy_definition: StrategyDefinition | None,
+    strategy_definition_slug: str,
+    strategy_definition_name: str,
+    strategy_config: dict[str, Any] | None,
+) -> StrategyDefinition:
+    if strategy_definition is not None:
+        return strategy_definition
+    return upsert_strategy_definition(
+        slug=strategy_definition_slug,
+        name=strategy_definition_name,
+        strategy_type="notebook_topk_v1",
+        description="Direct feature-driven strategy generated by the direct strategy runner.",
+        config=dict(strategy_config or {}),
+    )
+
+
+def _resolve_direct_input_artifacts(
+    *,
+    symbols: Sequence[str],
+    output_basename: str,
+    universe_artifact: Artifact | None,
+    feature_artifact: Artifact | None,
+    feature_config: dict[str, Any] | None,
+) -> tuple[Artifact | None, Artifact]:
+    resolved_universe = universe_artifact
+    resolved_feature = feature_artifact
+    if resolved_universe is None and resolved_feature is None:
+        resolved_universe = _resolve_or_build_universe_artifact(symbols=symbols, output_basename=output_basename)
+    if resolved_feature is None:
+        if resolved_universe is None:
+            raise ValueError("A universe artifact is required when feature_artifact is not provided.")
+        resolved_feature = _resolve_or_build_feature_artifact(
+            universe_artifact=resolved_universe,
+            symbols=symbols,
+            feature_config=feature_config,
+            output_basename=output_basename,
+        )
+    return resolved_universe, resolved_feature
+
+
+def _run_direct_pipeline_jobs(
+    *,
+    output_basename: str,
+    feature_artifact: Artifact,
+    strategy_definition: StrategyDefinition,
+    backtest_start_date: str,
+    backtest_end_date: str,
+    backtest_config: dict[str, Any] | None,
+) -> tuple[Artifact, Artifact]:
+    strategy_artifact = _run_pipeline_job(
+        name=f"{output_basename}-strategy",
+        requested_job="build_strategy_dataset",
+        config={
+            "strategy_definition_id": int(strategy_definition.id),
+            "strategy_start_date": str(backtest_start_date or ""),
+            "strategy_end_date": str(backtest_end_date or ""),
+        },
+        input_ids=[int(feature_artifact.id)],
+    )
+    backtest_artifact = _run_pipeline_job(
+        name=f"{output_basename}-backtest",
+        requested_job="backtest_strategy",
+        config={
+            "backtest_start_date": str(backtest_start_date or ""),
+            "backtest_end_date": str(backtest_end_date or ""),
+            **dict(backtest_config or {}),
+        },
+        input_ids=[int(strategy_artifact.id)],
+    )
+    return strategy_artifact, backtest_artifact
+
+
+def _resolved_backtest_cost(backtest_meta: dict[str, Any], backtest_config: dict[str, Any] | None, key: str) -> float:
+    runtime_config = dict(backtest_meta.get("backtest_config") or {})
+    configured = dict(backtest_config or {})
+    return float(runtime_config.get(key) or configured.get(key) or 0.0)
+
+
+def _build_direct_summary_row(
+    *,
+    train_end_date: str,
+    feature_artifact: Artifact,
+    strategy_definition: StrategyDefinition,
+    strategy_artifact: Artifact,
+    backtest_artifact: Artifact,
+    validation_config: dict[str, Any] | None,
+    backtest_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    backtest_content = dict(backtest_artifact.content or {})
+    backtest_meta = dict(backtest_artifact.metadata or {})
+    strategy_meta = dict(strategy_artifact.metadata or {})
+    benchmark = _build_equal_weight_benchmark(
+        strategy_artifact,
+        allowed_symbols=dict(backtest_config or {}).get("allowed_symbols"),
+    )
+    runtime_summary = _summarize_backtest_artifact(backtest_artifact)
+    row = {
+        "variant_name": str(strategy_definition.slug),
+        "fit_job": "direct_feature_strategy",
+        "score_job": "direct_feature_strategy",
+        "feature_families": _feature_families(feature_artifact),
+        "label_ks": [],
+        "dataset_build_seconds": 0.0,
+        "fit_seconds": 0.0,
+        "score_seconds": 0.0,
+        "strategy_build_seconds": float(strategy_meta.get("strategy_build_seconds") or 0.0),
+        "backtest_seconds": float(backtest_meta.get("backtest_seconds") or 0.0),
+        "coverage_start_date": str((feature_artifact.metadata or {}).get("feature_start_date") or ""),
+        "coverage_end_date": str((feature_artifact.metadata or {}).get("feature_end_date") or ""),
+        "coverage_rows": int((feature_artifact.content or {}).get("rows") or 0),
+        "oracle_cluster_scope": "generalist",
+        "oracle_cluster_keys": [],
+        "oracle_cluster_rows": 0,
+        "trained_rows": _count_rows_through_date(feature_artifact, str(train_end_date or "")),
+        "rows_scored": int((strategy_artifact.content or {}).get("rows") or 0),
+        "selected_rows": int((strategy_artifact.content or {}).get("selected_rows") or 0),
+        "final_equity": float(backtest_content.get("final_equity") or 0.0),
+        "cumulative_return": float(backtest_content.get("cumulative_return") or 0.0),
+        "max_drawdown": float(backtest_content.get("max_drawdown") or 0.0),
+        "trades": int(backtest_content.get("trades") or 0),
+        "sharpe": float(runtime_summary.get("sharpe") or 0.0),
+        "avg_turnover": float(runtime_summary.get("avg_turnover") or 0.0),
+        "total_turnover": float(runtime_summary.get("total_turnover") or 0.0),
+        "positive_days": int(runtime_summary.get("positive_days") or 0),
+        "negative_days": int(runtime_summary.get("negative_days") or 0),
+        "benchmark_days": int(benchmark.get("benchmark_days") or 0),
+        "benchmark_final_equity": float(benchmark.get("benchmark_final_equity") or 0.0),
+        "benchmark_cumulative_return": float(benchmark.get("benchmark_cumulative_return") or 0.0),
+        "benchmark_max_drawdown": float(benchmark.get("benchmark_max_drawdown") or 0.0),
+        "backtest_fee_bps": _resolved_backtest_cost(backtest_meta, backtest_config, "fee_bps"),
+        "backtest_slippage_bps": _resolved_backtest_cost(backtest_meta, backtest_config, "slippage_bps"),
+        "excess_cumulative_return": round(
+            float(backtest_content.get("cumulative_return") or 0.0) - float(benchmark.get("benchmark_cumulative_return") or 0.0),
+            8,
+        ),
+        "relative_final_equity": round(
+            float(backtest_content.get("final_equity") or 0.0) - float(benchmark.get("benchmark_final_equity") or 0.0),
+            8,
+        ),
+        "model_artifact_id": 0,
+        "prediction_artifact_id": 0,
+        "strategy_artifact_id": int(strategy_artifact.id),
+        "backtest_artifact_id": int(backtest_artifact.id),
+    }
+    row["total_runtime_seconds"] = round(
+        float(row["dataset_build_seconds"])
+        + float(row["fit_seconds"])
+        + float(row["score_seconds"])
+        + float(row["strategy_build_seconds"])
+        + float(row["backtest_seconds"]),
+        6,
+    )
+    row.update(_evaluate_variant_gates(row, validation_config=validation_config))
+    return row
+
+
+def _build_single_run_payload(
+    *,
+    universe_artifact: Artifact | None,
+    feature_artifact: Artifact,
+    strategy_definition: StrategyDefinition,
+    validation_config: dict[str, Any] | None,
+    backtest_config: dict[str, Any] | None,
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": DIRECT_STRATEGY_SUMMARY_SCHEMA_VERSION,
+        "mode": "direct_feature_strategy",
+        "base_artifacts": {
+            "universe": int(universe_artifact.id) if universe_artifact is not None else 0,
+            "features": int(feature_artifact.id),
+        },
+        "strategy_definition": {
+            "id": int(strategy_definition.id),
+            "name": str(strategy_definition.name),
+            "slug": str(strategy_definition.slug),
+            "strategy_type": str(strategy_definition.strategy_type),
+        },
+        "validation_config": dict(DEFAULT_VALIDATION_CONFIG | dict(validation_config or {})),
+        "backtest_config": dict(backtest_config or {}),
+        "variants": [
+            {
+                "variant_name": str(strategy_definition.slug),
+                "strategy_artifact_id": int(row["strategy_artifact_id"]),
+                "backtest_artifact_id": int(row["backtest_artifact_id"]),
+            }
+        ],
+        "summary_rows": [row],
+    }
+
+
+def _fold_output_row(fold_summary: dict[str, Any], fold: dict[str, Any], fold_name: str) -> dict[str, Any]:
+    return {
+        "fold_name": fold_name,
+        "train_end_date": str(fold.get("train_end_date") or ""),
+        "backtest_start_date": str(fold.get("backtest_start_date") or ""),
+        "backtest_end_date": str(fold.get("backtest_end_date") or ""),
+        "summary_json_path": str(fold_summary.get("summary_json_path") or ""),
+        "summary_csv_path": str(fold_summary.get("summary_csv_path") or ""),
+    }
+
+
+def _append_fold_summary_rows(
+    summary_rows: list[dict[str, Any]],
+    *,
+    fold_summary: dict[str, Any],
+    fold: dict[str, Any],
+    fold_name: str,
+) -> None:
+    for row in list(fold_summary.get("summary_rows") or []):
+        item = dict(row)
+        item["fold_name"] = fold_name
+        item["train_end_date"] = str(fold.get("train_end_date") or "")
+        item["backtest_start_date"] = str(fold.get("backtest_start_date") or "")
+        item["backtest_end_date"] = str(fold.get("backtest_end_date") or "")
+        summary_rows.append(item)
+
+
+def _hydrate_artifact_refs_from_fold(
+    *,
+    fold_summary: dict[str, Any],
+    universe_artifact: Artifact | None,
+    feature_artifact: Artifact | None,
+    strategy_definition: StrategyDefinition | None,
+) -> tuple[Artifact | None, Artifact | None, StrategyDefinition | None]:
+    base_artifacts = dict(fold_summary.get("base_artifacts") or {})
+    if universe_artifact is None:
+        universe_id = int(base_artifacts.get("universe") or 0)
+        if universe_id > 0:
+            universe_artifact = Artifact.objects.filter(pk=universe_id).first()
+    if feature_artifact is None:
+        feature_id = int(base_artifacts.get("features") or 0)
+        if feature_id > 0:
+            feature_artifact = Artifact.objects.filter(pk=feature_id).first()
+    if strategy_definition is None:
+        strategy_id = int((fold_summary.get("strategy_definition") or {}).get("id") or 0)
+        if strategy_id > 0:
+            strategy_definition = StrategyDefinition.objects.filter(pk=strategy_id).first()
+    return universe_artifact, feature_artifact, strategy_definition
+
+
+def _summarize_walk_forward_metrics(summary_rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    trade_count = sum(int(row.get("trades") or 0) for row in summary_rows)
+    if not summary_rows:
+        return _empty_walk_forward_metrics(trade_count=trade_count)
+
+    ordered_rows = sorted(
+        [dict(row) for row in summary_rows],
+        key=lambda item: (
+            str(item.get("backtest_start_date") or ""),
+            str(item.get("fold_name") or ""),
+            int(item.get("backtest_artifact_id") or 0),
+        ),
+    )
+    backtest_ids = [
+        int(row.get("backtest_artifact_id") or 0)
+        for row in ordered_rows
+        if int(row.get("backtest_artifact_id") or 0) > 0
+    ]
+    backtest_lookup = Artifact.objects.in_bulk(backtest_ids)
+    daily_rows: list[dict[str, Any]] = []
+    for fold_index, row in enumerate(ordered_rows):
+        artifact = backtest_lookup.get(int(row.get("backtest_artifact_id") or 0))
+        if artifact is None:
+            continue
+        daily_rows.extend(_artifact_daily_rows(artifact, fold_order=fold_index))
+
+    if not daily_rows:
+        return _empty_walk_forward_metrics(trade_count=trade_count)
+
+    daily_df = pd.DataFrame(daily_rows)
+    if "date" not in daily_df.columns:
+        return _empty_walk_forward_metrics(trade_count=trade_count)
+    if "net_daily_return" not in daily_df.columns and "daily_return" in daily_df.columns:
+        daily_df["net_daily_return"] = daily_df["daily_return"]
+    if "net_daily_return" not in daily_df.columns:
+        daily_df["net_daily_return"] = 0.0
+    if "turnover" not in daily_df.columns:
+        daily_df["turnover"] = 0.0
+    daily_df["date"] = pd.to_datetime(daily_df["date"], errors="coerce")
+    daily_df["net_daily_return"] = pd.to_numeric(daily_df["net_daily_return"], errors="coerce").fillna(0.0)
+    daily_df["turnover"] = pd.to_numeric(daily_df["turnover"], errors="coerce").fillna(0.0)
+    daily_df = daily_df.dropna(subset=["date"]).sort_values(["date", "_fold_order"]).reset_index(drop=True)
+    if daily_df.empty:
+        return _empty_walk_forward_metrics(trade_count=trade_count)
+
+    returns = daily_df["net_daily_return"].astype(float)
+    turnover = daily_df["turnover"].astype(float)
+    equity_curve = (1.0 + returns).cumprod()
+    running_max = equity_curve.cummax()
+    drawdown = (equity_curve / running_max) - 1.0
+    volatility = float(returns.std(ddof=0)) if len(returns) > 1 else 0.0
+    sharpe = ((float(returns.mean()) / volatility) * (252.0 ** 0.5)) if volatility > 1e-12 else 0.0
+    return {
+        "days": int(len(daily_df)),
+        "start_date": str(daily_df["date"].min().strftime("%Y-%m-%d")),
+        "end_date": str(daily_df["date"].max().strftime("%Y-%m-%d")),
+        "sharpe": round(float(sharpe), 8),
+        "total_return": round(float(equity_curve.iloc[-1] - 1.0), 8),
+        "final_equity": round(float(equity_curve.iloc[-1]), 8),
+        "max_drawdown": round(float(drawdown.min()), 8),
+        "avg_turnover": round(float(turnover.mean()), 8),
+        "total_turnover": round(float(turnover.sum()), 8),
+        "trade_count": int(trade_count),
+        "positive_days": int((returns > 0.0).sum()),
+        "negative_days": int((returns < 0.0).sum()),
+    }
+
+
+def run_direct_feature_strategy_backtests(
+    *,
+    symbols: Sequence[str],
+    train_end_date: str,
+    backtest_start_date: str,
+    backtest_end_date: str,
+    universe_artifact: Artifact | None = None,
+    feature_artifact: Artifact | None = None,
+    feature_config: dict[str, Any] | None = None,
+    strategy_definition: StrategyDefinition | None = None,
+    strategy_definition_slug: str = "direct-feature-strategy",
+    strategy_definition_name: str = "Direct Feature Strategy",
+    strategy_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
+    backtest_config: dict[str, Any] | None = None,
+    output_basename: str = "direct_feature_strategy_summary",
+    resume_existing: bool = False,
+) -> dict[str, Any]:
+    json_path, csv_path = _summary_output_paths(output_basename)
+    cached_payload = _resume_summary_payload(
+        json_path=json_path,
+        csv_path=csv_path,
+        required_keys=("summary_rows", "base_artifacts"),
+        resume_existing=resume_existing,
+    )
+    if cached_payload is not None:
+        return cached_payload
+
+    resolved_strategy_definition = _resolve_direct_strategy_definition(
+        strategy_definition=strategy_definition,
+        strategy_definition_slug=strategy_definition_slug,
+        strategy_definition_name=strategy_definition_name,
+        strategy_config=strategy_config,
+    )
+    resolved_universe, resolved_feature = _resolve_direct_input_artifacts(
+        symbols=symbols,
+        output_basename=output_basename,
+        universe_artifact=universe_artifact,
+        feature_artifact=feature_artifact,
+        feature_config=feature_config,
+    )
+    strategy_artifact, backtest_artifact = _run_direct_pipeline_jobs(
+        output_basename=output_basename,
+        feature_artifact=resolved_feature,
+        strategy_definition=resolved_strategy_definition,
+        backtest_start_date=backtest_start_date,
+        backtest_end_date=backtest_end_date,
+        backtest_config=backtest_config,
+    )
+    row = _build_direct_summary_row(
+        train_end_date=train_end_date,
+        feature_artifact=resolved_feature,
+        strategy_definition=resolved_strategy_definition,
+        strategy_artifact=strategy_artifact,
+        backtest_artifact=backtest_artifact,
+        validation_config=validation_config,
+        backtest_config=backtest_config,
+    )
+    payload = _build_single_run_payload(
+        universe_artifact=resolved_universe,
+        feature_artifact=resolved_feature,
+        strategy_definition=resolved_strategy_definition,
+        validation_config=validation_config,
+        backtest_config=backtest_config,
+        row=row,
+    )
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    _write_rows_csv(csv_path, [row])
+    payload["summary_json_path"] = str(json_path)
+    payload["summary_csv_path"] = str(csv_path)
+    return payload
+
+
+def run_walk_forward_direct_strategy_backtests(
+    *,
+    symbols: Sequence[str],
+    folds: Sequence[dict[str, Any]],
+    universe_artifact: Artifact | None = None,
+    feature_artifact: Artifact | None = None,
+    feature_config: dict[str, Any] | None = None,
+    strategy_definition: StrategyDefinition | None = None,
+    strategy_definition_slug: str = "walk-forward-direct-feature-strategy",
+    strategy_definition_name: str = "Walk Forward Direct Feature Strategy",
+    strategy_config: dict[str, Any] | None = None,
+    validation_config: dict[str, Any] | None = None,
+    backtest_config: dict[str, Any] | None = None,
+    output_basename: str = "walk_forward_direct_feature_strategy",
+    resume_existing: bool = False,
+) -> dict[str, Any]:
+    if not folds:
+        raise ValueError("run_walk_forward_direct_strategy_backtests requires at least one fold.")
+    for fold in folds:
+        _validate_walk_forward_fold(dict(fold))
+
+    json_path, csv_path = _summary_output_paths(output_basename)
+    cached_payload = _resume_summary_payload(
+        json_path=json_path,
+        csv_path=csv_path,
+        required_keys=("folds", "aggregate_rows", "summary_rows"),
+        resume_existing=resume_existing,
+    )
+    if cached_payload is not None:
+        return cached_payload
+
+    all_summary_rows: list[dict[str, Any]] = []
+    fold_outputs: list[dict[str, Any]] = []
+    shared_kwargs = {
+        "symbols": symbols,
+        "universe_artifact": universe_artifact,
+        "feature_artifact": feature_artifact,
+        "feature_config": dict(feature_config or {}),
+        "strategy_definition": strategy_definition,
+        "strategy_definition_slug": strategy_definition_slug,
+        "strategy_definition_name": strategy_definition_name,
+        "strategy_config": dict(strategy_config or {}),
+        "validation_config": dict(validation_config or {}),
+        "backtest_config": dict(backtest_config or {}),
+    }
+    for index, fold in enumerate(folds, start=1):
+        fold_name = str(fold.get("name") or fold.get("fold_name") or f"fold_{index}").strip()
+        fold_summary = run_direct_feature_strategy_backtests(
+            **shared_kwargs,
+            train_end_date=str(fold.get("train_end_date") or ""),
+            backtest_start_date=str(fold.get("backtest_start_date") or ""),
+            backtest_end_date=str(fold.get("backtest_end_date") or ""),
+            output_basename=f"{output_basename}__{slugify(fold_name) or index}",
+            resume_existing=resume_existing,
+        )
+        _append_fold_summary_rows(
+            all_summary_rows,
+            fold_summary=fold_summary,
+            fold=fold,
+            fold_name=fold_name,
+        )
+        fold_outputs.append(_fold_output_row(fold_summary, fold, fold_name))
+        universe_artifact, feature_artifact, strategy_definition = _hydrate_artifact_refs_from_fold(
+            fold_summary=fold_summary,
+            universe_artifact=universe_artifact,
+            feature_artifact=feature_artifact,
+            strategy_definition=strategy_definition,
+        )
+
+    aggregate_rows = _apply_walk_forward_gates(
+        _aggregate_walk_forward_rows(all_summary_rows),
+        validation_config=validation_config,
+    )
+    payload = {
+        "schema_version": DIRECT_STRATEGY_SUMMARY_SCHEMA_VERSION,
+        "mode": "direct_feature_strategy",
+        "base_artifacts": {
+            "universe": int(universe_artifact.id) if universe_artifact is not None else 0,
+            "features": int(feature_artifact.id) if feature_artifact is not None else 0,
+        },
+        "strategy_definition": {
+            "id": int(strategy_definition.id) if strategy_definition is not None else 0,
+            "name": str(strategy_definition.name) if strategy_definition is not None else "",
+            "slug": str(strategy_definition.slug) if strategy_definition is not None else "",
+            "strategy_type": str(strategy_definition.strategy_type) if strategy_definition is not None else "",
+        },
+        "folds": fold_outputs,
+        "summary_rows": all_summary_rows,
+        "aggregate_rows": aggregate_rows,
+        "validation_config": dict(DEFAULT_VALIDATION_CONFIG | dict(validation_config or {})),
+        "backtest_config": dict(backtest_config or {}),
+        "walk_forward_metrics": _summarize_walk_forward_metrics(all_summary_rows),
+    }
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    _write_rows_csv(csv_path, aggregate_rows)
+    payload["summary_json_path"] = str(json_path)
+    payload["summary_csv_path"] = str(csv_path)
+    return payload
+
+
+__all__ = [
+    "DIRECT_STRATEGY_SUMMARY_SCHEMA_VERSION",
+    "run_direct_feature_strategy_backtests",
+    "run_walk_forward_direct_strategy_backtests",
+]

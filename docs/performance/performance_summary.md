@@ -1,7 +1,7 @@
 # Performance Summary
 
 - Top runtime stage: `labels.generate`
-- Peak memory: `672.16 MB`
+- Peak memory: `615.31 MB`
 - Top complexity module: `analysis/alpha_flavors.py`
 - Most central dependency: `pipeline/models.py`
 - DataFrame findings: `50`

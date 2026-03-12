@@ -1,8 +1,8 @@
 {
   "cycles": [
     [
-      "fmp.tasks",
-      "fmp.views"
+      "fmp.views",
+      "fmp.tasks"
     ]
   ],
   "edges": [
@@ -1172,19 +1172,7 @@
     ],
     [
       "ml",
-      "ml.autoencoder"
-    ],
-    [
-      "ml",
       "ml.base"
-    ],
-    [
-      "ml",
-      "ml.frameworks"
-    ],
-    [
-      "ml",
-      "ml.rl"
     ],
     [
       "ml.admin",
@@ -1281,14 +1269,6 @@
     [
       "ml.execution",
       "pipeline.models"
-    ],
-    [
-      "ml.frameworks",
-      "ml.frameworks.autogluon"
-    ],
-    [
-      "ml.frameworks",
-      "ml.frameworks.sklearn"
     ],
     [
       "ml.frameworks.autogluon.classifier",
@@ -1527,6 +1507,18 @@
       "pipeline.strategy_definitions"
     ],
     [
+      "pipeline.direct_strategy_runner",
+      "pipeline.cohort_runner"
+    ],
+    [
+      "pipeline.direct_strategy_runner",
+      "pipeline.models"
+    ],
+    [
+      "pipeline.direct_strategy_runner",
+      "pipeline.strategy_definitions"
+    ],
+    [
       "pipeline.experiments",
       "ml.execution"
     ],
@@ -1705,6 +1697,14 @@
     [
       "pipeline.management.commands.run_scalability_benchmarks",
       "pipeline.scalability"
+    ],
+    [
+      "pipeline.management.commands.run_time_series_momentum_research",
+      "fmp.models"
+    ],
+    [
+      "pipeline.management.commands.run_time_series_momentum_research",
+      "pipeline.direct_strategy_runner"
     ],
     [
       "pipeline.management.commands.run_us_market_cap_tier_research",
@@ -2060,7 +2060,15 @@
     ],
     [
       "pipeline.tests_mag7",
+      "pipeline.direct_strategy_runner"
+    ],
+    [
+      "pipeline.tests_mag7",
       "pipeline.experiments"
+    ],
+    [
+      "pipeline.tests_mag7",
+      "pipeline.management.commands.run_time_series_momentum_research"
     ],
     [
       "pipeline.tests_mag7",
@@ -2285,6 +2293,10 @@
     [
       "tests.test_research_core_unit",
       "domain.features.specs"
+    ],
+    [
+      "tests.test_research_core_unit",
+      "domain.features.technical"
     ],
     [
       "tests.test_research_core_unit",
@@ -2655,6 +2667,242 @@
       "tools.performance_analysis.models"
     ],
     [
+      "tools.product_quality_analysis.analyzers.data_completeness",
+      "tools.product_quality_analysis.integrations.data_quality_runner"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.data_completeness",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.design_token_analysis",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.dom_complexity",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.empty_state_detection",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.layout_similarity",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.pagination_detection",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.scalability_analysis",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.table_readability",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.analyzers.ui_consistency",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.data_completeness"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.design_token_analysis"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.dom_complexity"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.empty_state_detection"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.layout_similarity"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.pagination_detection"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.scalability_analysis"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.table_readability"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.analyzers.ui_consistency"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.config"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.crawlers.page_crawler"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.crawlers.route_discovery"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.integrations.axe_runner"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.integrations.data_quality_runner"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.integrations.lighthouse_runner"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.integrations.stylelint_runner"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.integrations.visual_regression"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.data_quality_report"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.fix_verification"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.issue_ranking"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.quality_summary"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.scalability_report"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.reports.ui_consistency_report"
+    ],
+    [
+      "tools.product_quality_analysis.cli",
+      "tools.product_quality_analysis.utils.report_utils"
+    ],
+    [
+      "tools.product_quality_analysis.config",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.crawlers.page_crawler",
+      "tools.product_quality_analysis.integrations.playwright_runner"
+    ],
+    [
+      "tools.product_quality_analysis.crawlers.page_crawler",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.crawlers.route_discovery",
+      "tools.product_quality_analysis.config"
+    ],
+    [
+      "tools.product_quality_analysis.crawlers.route_discovery",
+      "tools.product_quality_analysis.integrations.data_quality_runner"
+    ],
+    [
+      "tools.product_quality_analysis.crawlers.route_discovery",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.data_quality_runner",
+      "tools.product_quality_analysis.config"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.data_quality_runner",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.lighthouse_runner",
+      "tools.product_quality_analysis.utils.path_utils"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.playwright_runner",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.playwright_runner",
+      "tools.product_quality_analysis.utils.dom_utils"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.playwright_runner",
+      "tools.product_quality_analysis.utils.path_utils"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.visual_regression",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.visual_regression",
+      "tools.product_quality_analysis.utils.path_utils"
+    ],
+    [
+      "tools.product_quality_analysis.integrations.visual_regression",
+      "tools.product_quality_analysis.utils.screenshot_utils"
+    ],
+    [
+      "tools.product_quality_analysis.reports.data_quality_report",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.reports.fix_verification",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.reports.issue_ranking",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.reports.quality_summary",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.reports.scalability_report",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.reports.ui_consistency_report",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.utils.dom_utils",
+      "tools.product_quality_analysis.models"
+    ],
+    [
+      "tools.product_quality_analysis.utils.report_utils",
+      "tools.product_quality_analysis.utils.path_utils"
+    ],
+    [
+      "tools.product_quality_analysis.utils.screenshot_utils",
+      "tools.product_quality_analysis.utils.path_utils"
+    ],
+    [
       "urls",
       "fmp.views"
     ],
@@ -2792,237 +3040,237 @@
     ]
   ],
   "engine": "networkx",
-  "generated_at": "2026-03-11T23:57:00.061019+00:00",
+  "generated_at": "2026-03-12T02:59:39.582301+00:00",
   "nodes": [
     {
       "betweenness": 0.0,
-      "fan_in": 42,
+      "fan_in": 43,
       "fan_out": 0,
       "module": "pipeline.models",
-      "pagerank": 0.0367034563409049,
+      "pagerank": 0.034632759936760106,
       "path": "pipeline/models.py",
-      "score": 87.670346
+      "score": 89.463276
     },
     {
       "betweenness": 0.0,
-      "fan_in": 36,
+      "fan_in": 37,
       "fan_out": 0,
       "module": "fmp.models",
-      "pagerank": 0.04587766912987569,
+      "pagerank": 0.04231335617649145,
       "path": "fmp/models.py",
-      "score": 76.587767
+      "score": 78.231336
     },
     {
       "betweenness": 0.0,
       "fan_in": 31,
       "fan_out": 0,
       "module": "fmp.endpoints.base",
-      "pagerank": 0.03274272334007075,
+      "pagerank": 0.029749193120364687,
       "path": "fmp/endpoints/base.py",
-      "score": 65.274272
+      "score": 64.974919
     },
     {
-      "betweenness": 0.021851444963227436,
+      "betweenness": 0.0,
+      "fan_in": 23,
+      "fan_out": 0,
+      "module": "tools.product_quality_analysis.models",
+      "pagerank": 0.026700051159771275,
+      "path": "tools/product_quality_analysis/models.py",
+      "score": 48.670005
+    },
+    {
+      "betweenness": 0.018796871200051614,
       "fan_in": 13,
       "fan_out": 9,
       "module": "pipeline.services",
-      "pagerank": 0.00806282452793747,
+      "pagerank": 0.007399575428253147,
       "path": "pipeline/services.py",
-      "score": 36.352569
+      "score": 36.209879
     },
     {
       "betweenness": 0.0,
       "fan_in": 17,
       "fan_out": 0,
       "module": "fmp.endpoints.helpers",
-      "pagerank": 0.012841505281941126,
+      "pagerank": 0.011667536026496696,
       "path": "fmp/endpoints/helpers.py",
-      "score": 35.284151
+      "score": 35.166754
     },
     {
       "betweenness": 0.0,
       "fan_in": 16,
       "fan_out": 1,
       "module": "features.section_utils",
-      "pagerank": 0.011948457684152786,
+      "pagerank": 0.01085625086941431,
       "path": "features/section_utils.py",
-      "score": 34.194846
+      "score": 34.085625
     },
     {
-      "betweenness": 0.0007804632426988924,
+      "betweenness": 0.0006458361251321452,
       "fan_in": 15,
       "fan_out": 2,
       "module": "pipeline.service_runtime",
-      "pagerank": 0.008509555310666345,
+      "pagerank": 0.007736605034078697,
       "path": "pipeline/service_runtime.py",
-      "score": 32.870467
+      "score": 32.789806
     },
     {
       "betweenness": 0.0,
       "fan_in": 0,
       "fan_out": 32,
       "module": "pipeline.tests",
-      "pagerank": 0.0015529207594437756,
+      "pagerank": 0.0014110649873192794,
       "path": "pipeline/tests.py",
-      "score": 32.155292
+      "score": 32.141106
     },
     {
       "betweenness": 0.0,
       "fan_in": 0,
       "fan_out": 31,
       "module": "fmp.endpoints.registry",
-      "pagerank": 0.0015529207594437756,
+      "pagerank": 0.0014110649873192794,
       "path": "fmp/endpoints/registry.py",
-      "score": 31.155292
+      "score": 31.141106
     },
     {
       "betweenness": 0.0,
       "fan_in": 14,
       "fan_out": 0,
       "module": "tools.performance_analysis.models",
-      "pagerank": 0.009484295741634747,
+      "pagerank": 0.008617306736338912,
       "path": "tools/performance_analysis/models.py",
-      "score": 28.94843
+      "score": 28.861731
     },
     {
-      "betweenness": 0.008435411516982516,
+      "betweenness": 0.0070829797054838385,
       "fan_in": 8,
       "fan_out": 8,
       "module": "ml.execution",
-      "pagerank": 0.013610188696220727,
+      "pagerank": 0.012405294063116632,
       "path": "ml/execution.py",
-      "score": 25.571904
+      "score": 25.417604
     },
     {
-      "betweenness": 0.0006713662302786171,
+      "betweenness": 0.0,
+      "fan_in": 0,
+      "fan_out": 25,
+      "module": "tools.product_quality_analysis.cli",
+      "pagerank": 0.0014110649873192794,
+      "path": "tools/product_quality_analysis/cli.py",
+      "score": 25.141106
+    },
+    {
+      "betweenness": 0.0005757309549689056,
       "fan_in": 10,
       "fan_out": 2,
       "module": "ml.base",
-      "pagerank": 0.010743229937369992,
+      "pagerank": 0.011616212032368194,
       "path": "ml/base.py",
-      "score": 23.091107
+      "score": 23.176014
     },
     {
       "betweenness": 0.0,
       "fan_in": 11,
       "fan_out": 0,
       "module": "tools.performance_analysis.utils.report_utils",
-      "pagerank": 0.006240912772719218,
+      "pagerank": 0.0056704552677656166,
       "path": "tools/performance_analysis/utils/report_utils.py",
-      "score": 22.624091
+      "score": 22.567046
     },
     {
-      "betweenness": 0.0058729286825963565,
+      "betweenness": 0.004984291478685547,
       "fan_in": 2,
       "fan_out": 18,
       "module": "features.feature_builders",
-      "pagerank": 0.0023025248484203325,
+      "pagerank": 0.0020921909229144504,
       "path": "features/feature_builders.py",
-      "score": 22.377076
+      "score": 22.333826
     },
     {
-      "betweenness": 0.0027388690530684486,
+      "betweenness": 0.0022570142394147392,
       "fan_in": 8,
       "fan_out": 3,
       "module": "analysis.market_state",
-      "pagerank": 0.013896456445062383,
+      "pagerank": 0.012623399290013078,
       "path": "analysis/market_state.py",
-      "score": 20.458117
+      "score": 20.318765
     },
     {
-      "betweenness": 0.002490158381397052,
+      "betweenness": 0.0018351424189633867,
       "fan_in": 8,
       "fan_out": 3,
       "module": "pipeline.research_suite",
-      "pagerank": 0.005728394281610551,
+      "pagerank": 0.005180608276688438,
       "path": "pipeline/research_suite.py",
-      "score": 19.635093
+      "score": 19.563939
     },
     {
-      "betweenness": 0.0012816991668955415,
+      "betweenness": 0.0010422715564092255,
       "fan_in": 8,
       "fan_out": 2,
       "module": "analysis.market_insight_schema",
-      "pagerank": 0.010271808896493914,
+      "pagerank": 0.009333221975008575,
       "path": "analysis/market_insight_schema.py",
-      "score": 19.059223
+      "score": 18.959379
     },
     {
-      "betweenness": 0.0021224327870853553,
+      "betweenness": 0.004641830824436801,
+      "fan_in": 6,
+      "fan_out": 5,
+      "module": "pipeline.cohort_runner",
+      "pagerank": 0.005944629337475655,
+      "path": "pipeline/cohort_runner.py",
+      "score": 17.710509
+    },
+    {
+      "betweenness": 0.0017296744638505483,
       "fan_in": 7,
       "fan_out": 2,
       "module": "pipeline.feature_presentation",
-      "pagerank": 0.011284818092669778,
+      "pagerank": 0.010253105609596693,
       "path": "pipeline/feature_presentation.py",
-      "score": 17.181543
+      "score": 17.068552
     },
     {
       "betweenness": 0.0,
       "fan_in": 8,
       "fan_out": 0,
       "module": "ml.models",
-      "pagerank": 0.009853817773101995,
+      "pagerank": 0.00896151459827685,
       "path": "ml/models.py",
-      "score": 16.985382
+      "score": 16.896151
     },
     {
       "betweenness": 0.0,
       "fan_in": 8,
       "fan_out": 0,
       "module": "domain.features.specs",
-      "pagerank": 0.009347346521464713,
+      "pagerank": 0.008530172066738735,
       "path": "domain/features/specs.py",
-      "score": 16.934735
+      "score": 16.853017
     },
     {
       "betweenness": 0.0,
       "fan_in": 8,
       "fan_out": 0,
       "module": "tools.performance_analysis.config",
-      "pagerank": 0.005593084436421139,
+      "pagerank": 0.005081869179913551,
       "path": "tools/performance_analysis/config.py",
-      "score": 16.559308
+      "score": 16.508187
     },
     {
       "betweenness": 0.0,
       "fan_in": 8,
       "fan_out": 0,
       "module": "pipeline.contracts",
-      "pagerank": 0.005408212361654978,
+      "pagerank": 0.0049241640734834615,
       "path": "pipeline/contracts.py",
-      "score": 16.540821
-    },
-    {
-      "betweenness": 0.0012130367115261375,
-      "fan_in": 2,
-      "fan_out": 12,
-      "module": "pipeline.views",
-      "pagerank": 0.00291403939241918,
-      "path": "pipeline/views.py",
-      "score": 16.32173
-    },
-    {
-      "betweenness": 0.0,
-      "fan_in": 0,
-      "fan_out": 16,
-      "module": "tools.performance_analysis.cli",
-      "pagerank": 0.0015529207594437756,
-      "path": "tools/performance_analysis/cli.py",
-      "score": 16.155292
-    },
-    {
-      "betweenness": 6.408495834477706e-05,
-      "fan_in": 7,
-      "fan_out": 1,
-      "module": "tools.code_analysis.repository",
-      "pagerank": 0.009127374508047433,
-      "path": "tools/code_analysis/repository.py",
-      "score": 15.91434
+      "score": 16.492416
     }
   ],
   "summary": {
     "cycles_detected": 1,
-    "edges": 696,
-    "modules_analyzed": 332
+    "edges": 758,
+    "modules_analyzed": 368
   }
 }

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
+from .factor_signals import evaluate_signal_expression
 from .models import StrategyDefinition
 
 
@@ -204,6 +206,14 @@ def _resolve_bucket(raw_value: Any, *, bucket_count: int, default: int) -> int:
     return min(max(bucket, 1), int(bucket_count))
 
 
+def _resolve_quantile_share(raw_value: Any, *, default: float) -> float:
+    try:
+        quantile = float(raw_value) if raw_value not in (None, "") else float(default)
+    except Exception:
+        quantile = float(default)
+    return min(max(quantile, 0.0), 1.0)
+
+
 def _quantile_bucket_weights(
     group: pd.DataFrame,
     *,
@@ -248,6 +258,60 @@ def _quantile_bucket_weights(
     return weights, best_rank, buckets, eligible
 
 
+def _factor_quantile_weights(
+    group: pd.DataFrame,
+    *,
+    score_field: str,
+    long_quantile: float,
+    short_quantile: float,
+    gross_exposure: float,
+    selection_side: str,
+    higher_score_is_better: bool,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    scores = pd.to_numeric(group.get(score_field), errors="coerce")
+    valid_scores = scores.dropna()
+    weights = pd.Series(0.0, index=group.index, dtype=float)
+    best_rank = pd.Series("", index=group.index, dtype=object)
+    buckets = pd.Series(0, index=group.index, dtype=int)
+    eligible = pd.Series(0, index=group.index, dtype=int)
+    if valid_scores.empty:
+        return weights, best_rank, buckets, eligible
+
+    ranking_signal = valid_scores if higher_score_is_better else (-1.0 * valid_scores)
+    ordered = ranking_signal.sort_values(ascending=False, kind="mergesort")
+    ordered_index = ordered.index.tolist()
+    universe_size = len(ordered_index)
+    long_count = min(universe_size, max(0, int(math.ceil(float(universe_size) * float(long_quantile) - 1e-12))))
+    short_count = min(universe_size, max(0, int(math.ceil(float(universe_size) * float(short_quantile) - 1e-12))))
+    if float(long_quantile) > 0.0 and long_count == 0:
+        long_count = 1
+    if float(short_quantile) > 0.0 and short_count == 0:
+        short_count = 1
+
+    long_index = ordered_index[:long_count]
+    short_start = max(long_count, universe_size - short_count)
+    short_index = ordered_index[short_start:] if short_count > 0 else []
+    display_rank = ranking_signal.rank(method="first", ascending=False).astype(int)
+
+    eligible.loc[valid_scores.index] = 1
+    best_rank.loc[display_rank.index] = display_rank.astype(str)
+    if long_index:
+        buckets.loc[long_index] = 2
+    if short_index:
+        buckets.loc[short_index] = 1
+
+    if selection_side == "long_only":
+        if long_index:
+            weights.loc[long_index] = float(gross_exposure) / float(len(long_index))
+        return weights, best_rank, buckets, eligible
+
+    if long_index and short_index:
+        half_gross = float(gross_exposure) / 2.0
+        weights.loc[long_index] = half_gross / float(len(long_index))
+        weights.loc[short_index] = -half_gross / float(len(short_index))
+    return weights, best_rank, buckets, eligible
+
+
 def _combine_cross_sectional_sleeves(active_sleeves: list[dict[str, Any]]) -> dict[str, float]:
     if not active_sleeves:
         return {}
@@ -282,12 +346,15 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
     action_source_field = str(config.get("action_source_field") or "").strip()
     action_threshold = max(0.0, float(config.get("action_threshold") or 0.0))
     action_transform = str(config.get("action_transform") or "identity").strip().lower() or "identity"
-    portfolio_construction = str(config.get("portfolio_construction") or "").strip().lower()
+    portfolio_construction = str(config.get("portfolio_construction") or config.get("factor_construction") or "").strip().lower()
     cross_sectional_score_field = str(config.get("cross_sectional_score_field") or "").strip()
     cross_sectional_bucket_count = max(2, int(config.get("cross_sectional_bucket_count") or 10))
     holding_period_rebalances = max(1, int(config.get("holding_period_rebalances") or 1))
     ranking_lag_days = max(0, int(config.get("ranking_lag_days") or 0))
     higher_score_is_better = bool(config.get("higher_score_is_better", True))
+    factor_signal = str(config.get("factor_signal") or "").strip()
+    long_quantile = _resolve_quantile_share(config.get("long_quantile"), default=0.5)
+    short_quantile = _resolve_quantile_share(config.get("short_quantile"), default=0.5)
     long_bucket = _resolve_bucket(
         config.get("long_bucket"),
         bucket_count=cross_sectional_bucket_count,
@@ -326,29 +393,49 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
         out["_cross_sectional_score"] = pd.to_numeric(out.get(score_field), errors="coerce")
         if ranking_lag_days > 0:
             out["_cross_sectional_score"] = out.groupby("symbol", sort=False)["_cross_sectional_score"].shift(ranking_lag_days)
+    elif portfolio_construction == "long_short_factor":
+        resolved_factor_signal = factor_signal or cross_sectional_score_field or action_source_field or "strategy_score"
+        out["_cross_sectional_score"] = evaluate_signal_expression(
+            out,
+            expression=resolved_factor_signal,
+            strict=True,
+        )
+        if ranking_lag_days > 0:
+            out["_cross_sectional_score"] = out.groupby("symbol", sort=False)["_cross_sectional_score"].shift(ranking_lag_days)
 
     for date_value, group in out.groupby("date", sort=True):
         idxs = group.index.tolist()
         if date_value in rebalance_dates:
             out.loc[idxs, "rebalance_date"] = 1
-            if portfolio_construction == "cross_sectional_quantiles":
+            if portfolio_construction in {"cross_sectional_quantiles", "long_short_factor"}:
                 current_rebalance_index = int(rebalance_order.get(date_value, 0))
                 active_sleeves = [
                     sleeve
                     for sleeve in active_sleeves
                     if int(sleeve.get("end_rebalance_index") or -1) >= current_rebalance_index
                 ]
-                quantile_weights, display_rank, bucket_labels, eligible = _quantile_bucket_weights(
-                    group,
-                    score_field="_cross_sectional_score",
-                    bucket_count=cross_sectional_bucket_count,
-                    long_bucket=long_bucket,
-                    short_bucket=short_bucket,
-                    gross_exposure=gross_exposure,
-                    selection_side=portfolio_side,
-                    higher_score_is_better=higher_score_is_better,
-                )
-                selected = quantile_weights[quantile_weights != 0.0]
+                if portfolio_construction == "long_short_factor":
+                    selected_weights, display_rank, bucket_labels, eligible = _factor_quantile_weights(
+                        group,
+                        score_field="_cross_sectional_score",
+                        long_quantile=long_quantile,
+                        short_quantile=short_quantile,
+                        gross_exposure=gross_exposure,
+                        selection_side=portfolio_side,
+                        higher_score_is_better=higher_score_is_better,
+                    )
+                else:
+                    selected_weights, display_rank, bucket_labels, eligible = _quantile_bucket_weights(
+                        group,
+                        score_field="_cross_sectional_score",
+                        bucket_count=cross_sectional_bucket_count,
+                        long_bucket=long_bucket,
+                        short_bucket=short_bucket,
+                        gross_exposure=gross_exposure,
+                        selection_side=portfolio_side,
+                        higher_score_is_better=higher_score_is_better,
+                    )
+                selected = selected_weights[selected_weights != 0.0]
                 out.loc[eligible[eligible == 1].index.tolist(), "eligible"] = 1
                 out.loc[display_rank.index.tolist(), "rank"] = display_rank
                 out.loc[bucket_labels.index.tolist(), "cross_sectional_bucket"] = bucket_labels
@@ -443,6 +530,9 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
             "cross_sectional_bucket_count": int(cross_sectional_bucket_count),
             "long_bucket": int(long_bucket),
             "short_bucket": int(short_bucket),
+            "factor_signal": factor_signal,
+            "long_quantile": float(long_quantile),
+            "short_quantile": float(short_quantile),
             "holding_period_rebalances": int(holding_period_rebalances),
             "ranking_lag_days": int(ranking_lag_days),
             "higher_score_is_better": bool(higher_score_is_better),

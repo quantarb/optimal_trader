@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 
 from domain.backtests import StrategyBacktestSpec, StrategyDatasetSpec
+from domain.features.technical import compute_features_worldclass
 from domain.features.panel import representation_embedding_dataset_rows
 from domain.features.specs import FeatureBuildSpec
 from domain.trades.operations import apply_trade_deduplication
@@ -89,3 +90,20 @@ class ResearchCoreUnitTests(unittest.TestCase):
         )
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades.iloc[0]["symbol"], "AAPL")
+
+    def test_compute_features_worldclass_adds_21_day_return(self):
+        dates = pd.bdate_range("2024-01-01", periods=30)
+        prices = pd.DataFrame(
+            {
+                "open": pd.Series(range(100, 130), index=dates, dtype=float),
+                "high": pd.Series(range(101, 131), index=dates, dtype=float),
+                "low": pd.Series(range(99, 129), index=dates, dtype=float),
+                "close": pd.Series(range(100, 130), index=dates, dtype=float),
+                "volume": pd.Series([1_000_000] * len(dates), index=dates, dtype=float),
+            },
+            index=dates,
+        )
+        feature_df = compute_features_worldclass(prices)
+        self.assertIn("Ret21d", feature_df.columns)
+        expected = (129.0 / 108.0) - 1.0
+        self.assertAlmostEqual(float(feature_df.iloc[-1]["Ret21d"]), expected, places=10)

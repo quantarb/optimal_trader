@@ -232,7 +232,9 @@ def score_artifact_rows(
             except Exception:
                 pass
     if prediction_cols:
-        prediction_df = prediction_df.assign(**prediction_cols)
+        # Add all prediction outputs in one concat to avoid repeated column inserts.
+        prediction_frame = pd.DataFrame(prediction_cols, index=prediction_df.index)
+        prediction_df = pd.concat([prediction_df, prediction_frame], axis=1)
 
     if label_df is not None and not label_df.empty:
         label_df = dedupe_label_frame(label_df)

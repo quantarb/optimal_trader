@@ -261,6 +261,16 @@
       "snippet": "rows"
     },
     {
+      "function_name": "resolve_candidate_symbols",
+      "in_loop": true,
+      "line": 107,
+      "message": "Nested loops over trading dimensions can grow poorly with universe size.",
+      "path": "tools/product_quality_analysis/integrations/data_quality_runner.py",
+      "pattern": "nested_loop",
+      "severity": 0.8500000000000001,
+      "snippet": "symbol_examples(frame)"
+    },
+    {
       "function_name": "_download_and_store_adjusted_prices",
       "in_loop": true,
       "line": 171,
@@ -489,19 +499,9 @@
       "pattern": "loop_merge",
       "severity": 0.8,
       "snippet": "joined.merge(renamed_df, on=[\"date\", \"symbol\"], how=\"left\")"
-    },
-    {
-      "function_name": "summarize_event_windows",
-      "in_loop": true,
-      "line": 183,
-      "message": "`sort_values` is running inside a loop and likely scales poorly.",
-      "path": "ml/autoencoder/diagnostics.py",
-      "pattern": "loop_sort_values",
-      "severity": 0.8,
-      "snippet": "win.mean().sort_values(ascending=False)"
     }
   ],
-  "generated_at": "2026-03-11T23:57:05.370685+00:00",
+  "generated_at": "2026-03-12T02:59:44.812514+00:00",
   "kind": "scaling_risks",
   "summary": {
     "findings": 50

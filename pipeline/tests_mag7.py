@@ -9,6 +9,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from .cohort_runner import COHORT_SUMMARY_SCHEMA_VERSION, _expand_cluster_specialist_variants, run_model_cohort_backtests, run_walk_forward_model_cohort_backtests
+from .direct_strategy_runner import run_walk_forward_direct_strategy_backtests
 from .experiments import expand_model_cohort_configs
 from analysis.feature_attribution import run_feature_family_attribution_suite
 from .models import Artifact, PipelineRun, StrategyDefinition
@@ -1118,6 +1119,88 @@ class Mag7PipelineSuiteTests(Mag7FixtureMixin, TestCase):
         self.assertGreater(by_symbol["AAPL"], 0.0)
         self.assertLess(by_symbol["MSFT"], 0.0)
 
+    def test_direct_strategy_definition_supports_expression_and_sign_transform(self):
+        from .models import StrategyDefinition
+
+        direct_definition = StrategyDefinition.objects.create(
+            name="Direct Expression Sign Test",
+            slug="direct-expression-sign-test",
+            strategy_type="notebook_topk_v1",
+            gate_quantile=0.0,
+            top_k=4,
+            rebalance_freq="D",
+            gross_exposure=1.0,
+            selection_side="long_short",
+            signal_combination="direct",
+            action_source_field="",
+            action_threshold=0.0,
+            config={
+                "signal_combination": "direct",
+                "selection_side": "long_short",
+                "gross_exposure": 1.0,
+                "rebalance_freq": "D",
+                "combined_score_expr": "(1.0 + px__ret_252_d) / (1.0 + px__ret_21_d) - 1.0",
+                "action_transform": "sign",
+            },
+            is_active=True,
+        )
+        feature_run = PipelineRun.objects.create(
+            name="direct-expression-feature-source",
+            requested_job="features",
+            mode=PipelineRun.Mode.STRICT,
+            status=PipelineRun.Status.SUCCEEDED,
+        )
+        feature_uri = self.write_csv(
+            "direct_expression_features",
+            ["date", "symbol", "close", "ret_1", "px__ret_252_d", "px__ret_21_d"],
+            [
+                {
+                    "date": "2024-01-01",
+                    "symbol": "AAPL",
+                    "close": 100.0,
+                    "ret_1": 0.01,
+                    "px__ret_252_d": 0.24,
+                    "px__ret_21_d": 0.02,
+                },
+                {
+                    "date": "2024-01-01",
+                    "symbol": "MSFT",
+                    "close": 100.0,
+                    "ret_1": -0.01,
+                    "px__ret_252_d": -0.18,
+                    "px__ret_21_d": 0.01,
+                },
+            ],
+        )
+        feature_artifact = Artifact.objects.create(
+            pipeline_run=feature_run,
+            artifact_type="FEATURES",
+            key="direct_expression_features",
+            uri=feature_uri,
+            content={"rows": 2},
+            metadata={},
+        )
+        strategy_run = PipelineRun.objects.create(
+            name="direct-expression-strategy",
+            requested_job="build_strategy_dataset",
+            mode=PipelineRun.Mode.STRICT,
+            status=PipelineRun.Status.PENDING,
+            config={"strategy_definition_id": direct_definition.id},
+        )
+        with patch("pipeline.services.ARTIFACT_DIR", self.temp_path):
+            strategy_artifact = execute_pipeline_run(
+                pipeline_run=strategy_run,
+                target_job="build_strategy_dataset",
+                mode="strict",
+                config=dict(strategy_run.config or {}),
+                input_artifact_ids=[feature_artifact.id],
+            )
+        rows = list(csv.DictReader(Path(strategy_artifact.uri).open("r", encoding="utf-8", newline="")))
+        by_symbol = {row["symbol"]: float(row["target_weight"]) for row in rows}
+        self.assertAlmostEqual(by_symbol["AAPL"], 0.5, places=8)
+        self.assertAlmostEqual(by_symbol["MSFT"], -0.5, places=8)
+        self.assertEqual(strategy_artifact.metadata["strategy_config"]["action_transform"], "sign")
+
     def test_mean_signal_combination_uses_average_score(self):
         from .models import StrategyDefinition
 
@@ -1841,6 +1924,156 @@ class Mag7PipelineSuiteTests(Mag7FixtureMixin, TestCase):
         self.assertIn("mean_fold_excess_cumulative_return", aggregate)
         self.assertIn("fold_excess_cumulative_return_std", aggregate)
         self.assertIn("strategy_artifact_id", aggregate)
+
+    def test_walk_forward_direct_strategy_runner_writes_aggregate_summary(self):
+        feature_run = PipelineRun.objects.create(
+            name="wf-direct-feature-source",
+            requested_job="features",
+            mode=PipelineRun.Mode.STRICT,
+            status=PipelineRun.Status.SUCCEEDED,
+        )
+        feature_rows = []
+        for date_value, aapl_ret, msft_ret in [
+            ("2024-01-02", 0.01, -0.01),
+            ("2024-01-03", 0.02, -0.02),
+            ("2024-01-04", 0.03, -0.01),
+            ("2024-01-05", 0.01, -0.03),
+            ("2024-01-08", 0.02, -0.01),
+            ("2024-01-09", 0.01, -0.02),
+        ]:
+            feature_rows.extend(
+                [
+                    {
+                        "date": date_value,
+                        "symbol": "AAPL",
+                        "close": 100.0,
+                        "ret_1": aapl_ret,
+                        "px__ret_252_d": 0.20,
+                        "px__ret_21_d": 0.01,
+                    },
+                    {
+                        "date": date_value,
+                        "symbol": "MSFT",
+                        "close": 100.0,
+                        "ret_1": msft_ret,
+                        "px__ret_252_d": -0.15,
+                        "px__ret_21_d": 0.01,
+                    },
+                ]
+            )
+        feature_artifact = Artifact.objects.create(
+            pipeline_run=feature_run,
+            artifact_type="FEATURES",
+            key="wf_direct_features",
+            uri=self.write_csv(
+                "wf_direct_features",
+                ["date", "symbol", "close", "ret_1", "px__ret_252_d", "px__ret_21_d"],
+                feature_rows,
+            ),
+            content={"rows": len(feature_rows)},
+            metadata={"feature_family_columns": {"prices_div_adj": ["close", "ret_1", "px__ret_252_d", "px__ret_21_d"]}},
+        )
+
+        with patch("pipeline.services.ARTIFACT_DIR", self.temp_path):
+            summary = run_walk_forward_direct_strategy_backtests(
+                symbols=["AAPL", "MSFT"],
+                folds=[
+                    {"name": "fold_1", "train_end_date": "2024-01-03", "backtest_start_date": "2024-01-04", "backtest_end_date": "2024-01-05"},
+                    {"name": "fold_2", "train_end_date": "2024-01-05", "backtest_start_date": "2024-01-08", "backtest_end_date": "2024-01-09"},
+                ],
+                feature_artifact=feature_artifact,
+                strategy_config={
+                    "rebalance_freq": "D",
+                    "gross_exposure": 1.0,
+                    "selection_side": "long_short",
+                    "signal_combination": "direct",
+                    "combined_score_expr": "(1.0 + px__ret_252_d) / (1.0 + px__ret_21_d) - 1.0",
+                    "action_transform": "sign",
+                },
+                validation_config={
+                    "min_trained_rows": 1,
+                    "min_rows_scored": 1,
+                    "min_selected_rows": 1,
+                    "min_trades": 1,
+                    "min_benchmark_days": 1,
+                    "min_valid_fold_rate": 0.5,
+                },
+                backtest_config={
+                    "fee_bps": 0.0,
+                    "slippage_bps": 0.0,
+                    "execution_delay_days": 1,
+                },
+                output_basename="wf_direct_strategy_summary",
+            )
+
+        self.assertEqual(len(summary["folds"]), 2)
+        self.assertEqual(len(summary["aggregate_rows"]), 1)
+        aggregate = summary["aggregate_rows"][0]
+        self.assertEqual(aggregate["fold_count"], 2)
+        self.assertIn("walk_forward_cumulative_return", aggregate)
+        self.assertIn("walk_forward_excess_cumulative_return", aggregate)
+        self.assertIn("passed_stability_gates", aggregate)
+        self.assertIn("strategy_artifact_id", aggregate)
+        self.assertTrue(any("sharpe" in row for row in summary["summary_rows"]))
+        self.assertIn("walk_forward_metrics", summary)
+        self.assertGreater(summary["walk_forward_metrics"]["days"], 0)
+        self.assertEqual(
+            summary["walk_forward_metrics"]["trade_count"],
+            sum(int(row.get("trades") or 0) for row in summary["summary_rows"]),
+        )
+
+    def test_time_series_momentum_report_includes_walk_forward_metrics(self):
+        from pipeline.management.commands.run_time_series_momentum_research import _write_report
+
+        report_path = self.temp_path / "time_series_momentum_report.md"
+        _write_report(
+            report_path=report_path,
+            payload={
+                "aggregate_rows": [
+                    {
+                        "fold_count": 2,
+                        "walk_forward_cumulative_return": 0.12,
+                        "walk_forward_max_drawdown": -0.08,
+                        "walk_forward_excess_cumulative_return": 0.03,
+                        "mean_fold_excess_cumulative_return": 0.01,
+                    }
+                ],
+                "summary_rows": [
+                    {"fold_name": "wf_2024", "cumulative_return": 0.05, "sharpe": 0.8, "trades": 10},
+                    {"fold_name": "wf_2025", "cumulative_return": -0.01, "sharpe": -0.2, "trades": 12},
+                ],
+                "folds": [
+                    {"backtest_start_date": "2024-01-01", "backtest_end_date": "2024-12-31"},
+                    {"backtest_start_date": "2025-01-01", "backtest_end_date": "2025-12-31"},
+                ],
+                "walk_forward_metrics": {
+                    "start_date": "2024-01-02",
+                    "end_date": "2025-12-31",
+                    "sharpe": 0.42,
+                    "total_return": 0.12,
+                    "final_equity": 1.12,
+                    "max_drawdown": -0.09,
+                    "avg_turnover": 0.03,
+                    "total_turnover": 5.4,
+                    "trade_count": 22,
+                },
+            },
+            available_symbols=["AAPL", "MSFT"],
+            missing_symbols=[],
+            strategy_config={"rebalance_freq": "M", "gross_exposure": 1.0},
+            backtest_config={
+                "fee_bps": 2.0,
+                "slippage_bps": 8.0,
+                "short_borrow_bps_annual": 25.0,
+                "execution_delay_days": 1,
+            },
+        )
+
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("Walk-forward Sharpe ratio: 0.420", report_text)
+        self.assertIn("Walk-forward total return: 12.00%", report_text)
+        self.assertIn("Trade count: 22", report_text)
+        self.assertIn("Train/test split: yearly walk-forward validation", report_text)
 
     def test_fit_model_respects_trade_return_and_hold_filters(self):
         feature_run = PipelineRun.objects.create(

@@ -46,6 +46,24 @@ def _normalize_ids(values: list[Any] | tuple[Any, ...] | None) -> tuple[int, ...
     return tuple(out)
 
 
+def _normalize_symbols(values: Any) -> tuple[str, ...]:
+    if values in (None, ""):
+        return ()
+    raw_values: list[Any]
+    if isinstance(values, str):
+        raw_values = values.split(",")
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = [values]
+    out: list[str] = []
+    for value in raw_values:
+        normalized = str(value or "").strip().upper()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class StrategyDatasetSpec:
     """Typed config for building a strategy dataset from features and predictions."""
@@ -86,6 +104,7 @@ class StrategyBacktestSpec:
     execution_delay_days: int = 1
     turnover_half_l1: bool = True
     use_lagged_weights: bool = True
+    allowed_symbols: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any] | None = None) -> "StrategyBacktestSpec":
@@ -103,6 +122,7 @@ class StrategyBacktestSpec:
             execution_delay_days=_as_int(raw.get("execution_delay_days"), 1, minimum=0),
             turnover_half_l1=_as_bool(raw.get("turnover_half_l1"), True),
             use_lagged_weights=_as_bool(raw.get("use_lagged_weights"), True),
+            allowed_symbols=_normalize_symbols(raw.get("allowed_symbols")),
         )
 
     def effective_slippage_bps(self) -> float:

@@ -1,7 +1,7 @@
 # Complexity Hotspots
 
 - Engine: `radon`
-- Files analyzed: `332`
+- Files analyzed: `368`
 
 ## Modules
 
@@ -27,11 +27,11 @@
 | pipeline/management/commands/run_market_insight_reasoning.py | 41.00 | F | 38.23 | 105 | 213.26 |
 | workflows/modeling.py | 43.00 | F | 29.00 | 167 | 211.77 |
 | pipeline/progress.py | 45.00 | F | 18.24 | 220 | 208.15 |
+| tools/product_quality_analysis/analyzers/data_completeness.py | 38.00 | E | 34.24 | 160 | 201.22 |
 | analysis/feature_attribution.py | 40.00 | E | 18.93 | 267 | 200.51 |
 | analysis/insight_composer.py | 38.00 | E | 26.38 | 215 | 194.22 |
 | pipeline/management/commands/run_market_situation_clustering.py | 35.00 | E | 37.97 | 100 | 183.27 |
-| analysis/situation_clustering.py | 38.00 | E | 20.57 | 329 | 180.26 |
-| backtest/strategies/stateful.py | 37.00 | E | 27.95 | 289 | 171.63 |
+| pipeline/strategy_definitions.py | 39.00 | E | 19.73 | 286 | 180.77 |
 
 ## Functions
 

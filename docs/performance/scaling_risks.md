@@ -28,6 +28,7 @@
 | pipeline/test_support.py | 172 | nested_loop | 0.85 | seed_scalability_universe | Nested loops over trading dimensions can grow poorly with universe size. |
 | pipeline/tests.py | 482 | nested_loop | 0.85 | _build_insight_strategy_artifact | Nested loops over trading dimensions can grow poorly with universe size. |
 | pipeline/views_insights.py | 355 | nested_loop | 0.85 | symbol_research_view | Nested loops over trading dimensions can grow poorly with universe size. |
+| tools/product_quality_analysis/integrations/data_quality_runner.py | 107 | nested_loop | 0.85 | resolve_candidate_symbols | Nested loops over trading dimensions can grow poorly with universe size. |
 | workflows/labels.py | 171 | nested_loop | 0.85 | _download_and_store_adjusted_prices | Nested loops over trading dimensions can grow poorly with universe size. |
 | analysis/cluster_explanations.py | 56 | loop_groupby | 0.80 | build_cluster_feature_explanations | `groupby` is running inside a loop and likely scales poorly. |
 | analysis/diagnostics.py | 46 | loop_groupby | 0.80 | _quantile_bucket_report | `groupby` is running inside a loop and likely scales poorly. |
@@ -51,4 +52,3 @@
 | infra/fmp/client.py | 188 | loop_groupby | 0.80 | fundamentals_to_daily_panel | `groupby` is running inside a loop and likely scales poorly. |
 | ml/artifact_datasets.py | 78 | loop_load_artifact_csv_frame | 0.80 | _join_feature_panels | `load_artifact_csv_frame` is running inside a loop and likely scales poorly. |
 | ml/artifact_datasets.py | 83 | loop_merge | 0.80 | _join_feature_panels | `merge` is running inside a loop and likely scales poorly. |
-| ml/autoencoder/diagnostics.py | 183 | loop_sort_values | 0.80 | summarize_event_windows | `sort_values` is running inside a loop and likely scales poorly. |
