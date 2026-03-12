@@ -91,7 +91,7 @@ def compute_features_worldclass(df: pd.DataFrame) -> pd.DataFrame:
     feats: dict[str, pd.Series] = {}
     ret_1d = close.pct_change()
     feats["Ret1d"] = ret_1d
-    for window in [2, 3, 5, 10, 20, 63, 126, 252]:
+    for window in [2, 3, 5, 10, 20, 21, 63, 126, 189, 252]:
         feats[f"Ret{window}d"] = close.pct_change(window)
 
     for window in [5, 10, 20, 50, 100, 200]:
@@ -237,4 +237,3 @@ def _to_snake(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
     return text.lower()
-
