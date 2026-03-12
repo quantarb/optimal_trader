@@ -8,6 +8,15 @@ import pandas as pd
 
 from .factor_signals import evaluate_signal_expression
 from .models import StrategyDefinition
+from .portfolio_optimization import (
+    build_expected_return_series,
+    build_neutrality_matrix,
+    build_portfolio_optimization_config,
+    build_return_panel,
+    ensure_constraint_columns,
+    estimate_risk_model,
+    optimize_mean_variance_portfolio,
+)
 
 
 DEFAULT_NOTEBOOK_TOPK_SLUG = "notebook-topk-v1"
@@ -332,6 +341,78 @@ def _combine_cross_sectional_sleeves(active_sleeves: list[dict[str, Any]]) -> di
     }
 
 
+def _optimized_portfolio_weights(
+    group: pd.DataFrame,
+    *,
+    date_value: pd.Timestamp,
+    score_field: str,
+    current_weights: dict[str, float],
+    portfolio_optimization_config,
+    higher_score_is_better: bool,
+    return_panel: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, dict[str, Any]]:
+    normalized_symbols = group["symbol"].astype(str).str.strip().str.upper()
+    expected_returns, display_rank, bucket_labels = build_expected_return_series(
+        group,
+        score_field=score_field,
+        config=portfolio_optimization_config,
+        higher_score_is_better=higher_score_is_better,
+    )
+    eligible = pd.to_numeric(group.get(score_field), errors="coerce").notna().astype(int)
+    expected_by_symbol = pd.Series(expected_returns.to_numpy(dtype=float), index=normalized_symbols, dtype=float)
+    neutrality_matrix, neutrality_labels = build_neutrality_matrix(
+        group,
+        columns=portfolio_optimization_config.constraints.neutrality_columns,
+    )
+    risk_model = estimate_risk_model(
+        return_panel,
+        as_of_date=pd.Timestamp(date_value),
+        symbols=normalized_symbols.tolist(),
+        config=portfolio_optimization_config.risk_model,
+    )
+    optimization_result = optimize_mean_variance_portfolio(
+        expected_by_symbol,
+        risk_model=risk_model,
+        previous_weights=current_weights,
+        config=portfolio_optimization_config,
+        neutrality_matrix=neutrality_matrix,
+        neutrality_labels=neutrality_labels,
+    )
+    weights = pd.Series(0.0, index=group.index, dtype=float)
+    previous_weight = pd.Series(0.0, index=group.index, dtype=float)
+    expected_estimate = pd.Series(0.0, index=group.index, dtype=float)
+    for idx, symbol in zip(group.index.tolist(), normalized_symbols.tolist()):
+        weights.loc[idx] = float(optimization_result.weights.get(symbol, 0.0))
+        previous_weight.loc[idx] = float(current_weights.get(symbol, 0.0))
+        expected_estimate.loc[idx] = float(optimization_result.expected_returns.get(symbol, 0.0))
+    return weights, display_rank, bucket_labels, eligible, {
+        "expected_return_estimate": expected_estimate,
+        "previous_weight": previous_weight,
+        "optimization_status": str(optimization_result.status),
+        "optimization_success": int(bool(optimization_result.success)),
+        "optimization_objective": float(optimization_result.objective_value),
+        "optimization_variance": float(optimization_result.portfolio_variance),
+        "optimization_expected_portfolio_return": float(optimization_result.expected_portfolio_return),
+        "optimization_turnover": float(optimization_result.turnover),
+        "optimization_gross_exposure": float(optimization_result.gross_exposure),
+        "optimization_net_exposure": float(optimization_result.net_exposure),
+        "optimization_max_abs_weight": float(optimization_result.max_abs_weight),
+        "optimization_constraint_violation": float(optimization_result.constraint_violation),
+        "optimization_iterations": int(optimization_result.iterations),
+        "risk_model_type": str(optimization_result.risk_model.model_type),
+        "risk_model_observations": int(optimization_result.risk_model.observations),
+        "risk_model_condition_number": float(optimization_result.risk_model.condition_number),
+        "risk_model_min_eigenvalue": float(optimization_result.risk_model.min_eigenvalue),
+        "risk_model_max_eigenvalue": float(optimization_result.risk_model.max_eigenvalue),
+        "risk_model_shrinkage": float(optimization_result.risk_model.shrinkage),
+        "risk_model_variance_floor": float(optimization_result.risk_model.variance_floor),
+        "neutrality_exposure_summary": ", ".join(
+            f"{label}={value:.6f}"
+            for label, value in sorted(optimization_result.neutrality_exposures.items())
+        ),
+    }
+
+
 def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStrategyDefinition) -> tuple[pd.DataFrame, dict[str, Any]]:
     if feature_df.empty:
         return feature_df.copy(), {"strategy_config": dict(definition.config)}
@@ -365,6 +446,8 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
         bucket_count=cross_sectional_bucket_count,
         default=1,
     )
+    optimized_portfolio_constructions = {"optimized_mean_variance", "optimized_portfolio", "mean_variance"}
+    portfolio_optimization_config = None
 
     out = feature_df.copy()
     out["strategy_signal"] = 0
@@ -387,6 +470,7 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
     current_symbols: list[str] = []
     current_weights: dict[str, float] = {}
     active_sleeves: list[dict[str, Any]] = []
+    return_panel = pd.DataFrame()
 
     if portfolio_construction == "cross_sectional_quantiles":
         score_field = _resolve_score_field(out, cross_sectional_score_field or action_source_field)
@@ -402,6 +486,54 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
         )
         if ranking_lag_days > 0:
             out["_cross_sectional_score"] = out.groupby("symbol", sort=False)["_cross_sectional_score"].shift(ranking_lag_days)
+    elif portfolio_construction in optimized_portfolio_constructions:
+        portfolio_optimization_config = build_portfolio_optimization_config(
+            config,
+            gross_exposure=gross_exposure,
+            selection_side=portfolio_side,
+        )
+        resolved_signal = factor_signal or cross_sectional_score_field or action_source_field or "strategy_score"
+        if resolved_signal in out.columns:
+            out["_cross_sectional_score"] = pd.to_numeric(out.get(resolved_signal), errors="coerce")
+        else:
+            out["_cross_sectional_score"] = evaluate_signal_expression(
+                out,
+                expression=resolved_signal,
+                strict=True,
+            )
+        if ranking_lag_days > 0:
+            out["_cross_sectional_score"] = out.groupby("symbol", sort=False)["_cross_sectional_score"].shift(ranking_lag_days)
+        out = ensure_constraint_columns(
+            out,
+            columns=portfolio_optimization_config.constraints.neutrality_columns,
+        )
+        return_panel, _return_source = build_return_panel(
+            out,
+            return_col_candidates=portfolio_optimization_config.return_col_candidates,
+            price_col_candidates=portfolio_optimization_config.price_col_candidates,
+        )
+        out["expected_return_estimate"] = 0.0
+        out["previous_weight"] = 0.0
+        out["weight_change"] = 0.0
+        out["optimization_status"] = ""
+        out["optimization_success"] = 0
+        out["optimization_objective"] = 0.0
+        out["optimization_variance"] = 0.0
+        out["optimization_expected_portfolio_return"] = 0.0
+        out["optimization_turnover"] = 0.0
+        out["optimization_gross_exposure"] = 0.0
+        out["optimization_net_exposure"] = 0.0
+        out["optimization_max_abs_weight"] = 0.0
+        out["optimization_constraint_violation"] = 0.0
+        out["optimization_iterations"] = 0
+        out["risk_model_type"] = ""
+        out["risk_model_observations"] = 0
+        out["risk_model_condition_number"] = 0.0
+        out["risk_model_min_eigenvalue"] = 0.0
+        out["risk_model_max_eigenvalue"] = 0.0
+        out["risk_model_shrinkage"] = 0.0
+        out["risk_model_variance_floor"] = 0.0
+        out["neutrality_exposure_summary"] = ""
 
     for date_value, group in out.groupby("date", sort=True):
         idxs = group.index.tolist()
@@ -451,6 +583,51 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
                         }
                     )
                 current_weights = _combine_cross_sectional_sleeves(active_sleeves)
+                current_symbols = sorted(current_weights.keys())
+            elif portfolio_construction in optimized_portfolio_constructions and portfolio_optimization_config is not None:
+                selected_weights, display_rank, bucket_labels, eligible, optimization_meta = _optimized_portfolio_weights(
+                    group,
+                    date_value=date_value,
+                    score_field="_cross_sectional_score",
+                    current_weights=current_weights,
+                    portfolio_optimization_config=portfolio_optimization_config,
+                    higher_score_is_better=higher_score_is_better,
+                    return_panel=return_panel,
+                )
+                selected = selected_weights[selected_weights.abs() > 1e-12]
+                out.loc[eligible[eligible == 1].index.tolist(), "eligible"] = 1
+                out.loc[display_rank.index.tolist(), "rank"] = display_rank
+                out.loc[bucket_labels.index.tolist(), "cross_sectional_bucket"] = bucket_labels
+                out.loc[selected.index.tolist(), "selected_on_rebalance"] = 1
+                out.loc[idxs, "expected_return_estimate"] = optimization_meta["expected_return_estimate"]
+                out.loc[idxs, "previous_weight"] = optimization_meta["previous_weight"]
+                out.loc[idxs, "weight_change"] = selected_weights - optimization_meta["previous_weight"]
+                for field in [
+                    "optimization_status",
+                    "optimization_success",
+                    "optimization_objective",
+                    "optimization_variance",
+                    "optimization_expected_portfolio_return",
+                    "optimization_turnover",
+                    "optimization_gross_exposure",
+                    "optimization_net_exposure",
+                    "optimization_max_abs_weight",
+                    "optimization_constraint_violation",
+                    "optimization_iterations",
+                    "risk_model_type",
+                    "risk_model_observations",
+                    "risk_model_condition_number",
+                    "risk_model_min_eigenvalue",
+                    "risk_model_max_eigenvalue",
+                    "risk_model_shrinkage",
+                    "risk_model_variance_floor",
+                    "neutrality_exposure_summary",
+                ]:
+                    out.loc[idxs, field] = optimization_meta[field]
+                current_weights = {
+                    str(group.loc[idx, "symbol"]).strip().upper(): float(weight)
+                    for idx, weight in selected.items()
+                }
                 current_symbols = sorted(current_weights.keys())
             elif str(definition.strategy_type) == StrategyDefinition.StrategyType.RL_POLICY_V1 or signal_combination == "direct":
                 signal_field = action_source_field or "signal_score"
@@ -536,5 +713,10 @@ def apply_strategy_definition(feature_df: pd.DataFrame, definition: ResolvedStra
             "holding_period_rebalances": int(holding_period_rebalances),
             "ranking_lag_days": int(ranking_lag_days),
             "higher_score_is_better": bool(higher_score_is_better),
+            "portfolio_optimization": (
+                portfolio_optimization_config.as_dict()
+                if portfolio_optimization_config is not None
+                else {}
+            ),
         }
     }
