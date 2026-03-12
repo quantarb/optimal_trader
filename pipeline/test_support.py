@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import tempfile
+from functools import lru_cache
 from pathlib import Path
-
-import pandas as pd
 
 from fmp.models import Symbol, SymbolSectionHistorical
 
@@ -19,9 +19,124 @@ MAG7_SYMBOLS = [
     "NVDA",
     "TSLA",
 ]
+REAL_MARKET_FIXTURE_DIR = Path(__file__).resolve().parent / "testdata" / "real_market"
 
 
-class Mag7FixtureMixin:
+def _parse_optional_float(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return float(text)
+
+
+@lru_cache(maxsize=None)
+def _load_fixture_rows(name: str, *, compressed: bool = False) -> list[dict[str, str]]:
+    path = REAL_MARKET_FIXTURE_DIR / name
+    opener = gzip.open if compressed else open
+    with opener(path, "rt", encoding="utf-8", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+@lru_cache(maxsize=None)
+def _load_fixture_manifest(name: str) -> dict:
+    return json.loads((REAL_MARKET_FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def market_cap_tier_symbols(tier_name: str, *, limit: int | None = None) -> list[str]:
+    manifest = _load_fixture_manifest("scalability_manifest.json")
+    key = str(tier_name or "").strip().lower()
+    symbols = list(manifest.get(key) or [])
+    if limit is not None and int(limit) > 0:
+        return symbols[: int(limit)]
+    return symbols
+
+
+def _ensure_symbol_rows(rows: list[dict[str, str]]) -> list[Symbol]:
+    ordered_symbols = [str(row["symbol"]).strip().upper() for row in rows if str(row.get("symbol") or "").strip()]
+    existing = set(Symbol.objects.filter(symbol__in=ordered_symbols).values_list("symbol", flat=True))
+    create_rows: list[Symbol] = []
+    for row in rows:
+        symbol = str(row["symbol"]).strip().upper()
+        if not symbol or symbol in existing:
+            continue
+        create_rows.append(
+            Symbol(
+                symbol=symbol,
+                company_name=str(row.get("company_name") or ""),
+                exchange=str(row.get("exchange") or ""),
+                country=str(row.get("country") or ""),
+                sector=str(row.get("sector") or ""),
+                industry=str(row.get("industry") or ""),
+                market_cap=_parse_optional_float(row.get("market_cap")),
+                price=_parse_optional_float(row.get("price")),
+                beta=_parse_optional_float(row.get("beta")),
+                volume=_parse_optional_float(row.get("volume")),
+                dividend=_parse_optional_float(row.get("dividend")),
+                dividend_yield=_parse_optional_float(row.get("dividend_yield")),
+                payload=json.loads(str(row.get("payload") or "{}")),
+            )
+        )
+        existing.add(symbol)
+    if create_rows:
+        Symbol.objects.bulk_create(create_rows, batch_size=1000, ignore_conflicts=True)
+    symbol_map = {
+        str(row.symbol): row
+        for row in Symbol.objects.filter(symbol__in=ordered_symbols).only("id", "symbol")
+    }
+    return [symbol_map[symbol] for symbol in ordered_symbols if symbol in symbol_map]
+
+
+def _ensure_price_rows(rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    symbol_map = {
+        str(row.symbol): row
+        for row in Symbol.objects.filter(symbol__in=sorted({str(item["symbol"]).strip().upper() for item in rows})).only("id", "symbol")
+    }
+    history_rows: list[SymbolSectionHistorical] = []
+    for row in rows:
+        symbol = str(row["symbol"]).strip().upper()
+        symbol_obj = symbol_map.get(symbol)
+        date_value = str(row.get("date") or "").strip()
+        if symbol_obj is None or not date_value:
+            continue
+        history_rows.append(
+            SymbolSectionHistorical(
+                symbol=symbol_obj,
+                section_key="prices_div_adj",
+                record_key=f"{symbol}:{date_value}",
+                record_date=date_value,
+                payload={
+                    "date": date_value,
+                    "adjOpen": _parse_optional_float(row.get("adj_open")),
+                    "adjHigh": _parse_optional_float(row.get("adj_high")),
+                    "adjLow": _parse_optional_float(row.get("adj_low")),
+                    "adjClose": _parse_optional_float(row.get("adj_close")),
+                    "volume": int(float(row.get("volume") or 0.0)),
+                },
+            )
+        )
+    if history_rows:
+        SymbolSectionHistorical.objects.bulk_create(history_rows, batch_size=5000, ignore_conflicts=True)
+
+
+def _slice_price_rows(
+    rows: list[dict[str, str]],
+    *,
+    start_date: str | None = None,
+    days: int | None = None,
+) -> list[dict[str, str]]:
+    if not rows:
+        return []
+    filtered = [dict(row) for row in rows if not start_date or str(row.get("date") or "") >= str(start_date)]
+    ordered_dates = sorted({str(row["date"]) for row in filtered})
+    if days is not None and int(days) > 0:
+        allowed_dates = set(ordered_dates[: int(days)])
+        filtered = [row for row in filtered if str(row["date"]) in allowed_dates]
+    return filtered
+
+
+class ArtifactTestMixin:
     maxDiff = None
 
     def setUp(self):
@@ -32,76 +147,6 @@ class Mag7FixtureMixin:
     def tearDown(self):
         self.temp_dir.cleanup()
         super().tearDown()
-
-    def create_mag7_symbols(self) -> list[Symbol]:
-        rows: list[tuple[str, str]] = [
-            ("AAPL", "Apple Inc."),
-            ("AMZN", "Amazon.com, Inc."),
-            ("GOOGL", "Alphabet Inc."),
-            ("META", "Meta Platforms, Inc."),
-            ("MSFT", "Microsoft Corporation"),
-            ("NVDA", "NVIDIA Corporation"),
-            ("TSLA", "Tesla, Inc."),
-        ]
-        return [Symbol.objects.create(symbol=symbol, company_name=name) for symbol, name in rows]
-
-    def create_screened_symbols(self) -> list[Symbol]:
-        rows = [
-            ("AAPL", "Apple Inc.", "NASDAQ", "US", 3_000_000_000_000.0),
-            ("MSFT", "Microsoft Corporation", "NASDAQ", "US", 2_900_000_000_000.0),
-            ("NVDA", "NVIDIA Corporation", "NASDAQ", "US", 1_500_000_000_000.0),
-            ("ORCL", "Oracle Corporation", "NYSE", "US", 320_000_000_000.0),
-            ("CRM", "Salesforce, Inc.", "NYSE", "US", 250_000_000_000.0),
-            ("UBER", "Uber Technologies, Inc.", "NYSE", "US", 150_000_000_000.0),
-            ("VOO", "Vanguard S&P 500 ETF", "AMEX", "US", 500_000_000_000.0),
-            ("VTSAX", "Vanguard Total Stock Market Index Fund Admiral Shares", "NASDAQ", "US", 400_000_000_000.0),
-            ("SHOP", "Shopify Inc.", "NYSE", "CA", 120_000_000_000.0),
-            ("PLTR", "Palantir Technologies Inc.", "NASDAQ", "US", 60_000_000_000.0),
-            ("SNOW", "Snowflake Inc.", "NYSE", "US", 55_000_000_000.0),
-            ("DDOG", "Datadog, Inc.", "NASDAQ", "US", 42_000_000_000.0),
-            ("NET", "Cloudflare, Inc.", "NYSE", "US", 35_000_000_000.0),
-            ("DUOL", "Duolingo, Inc.", "NASDAQ", "US", 10_500_000_000.0),
-            ("RKLB", "Rocket Lab USA, Inc.", "NASDAQ", "US", 9_500_000_000.0),
-            ("NVO", "Novo Nordisk A/S", "NYSE", "DK", 500_000_000_000.0),
-            ("RY", "Royal Bank of Canada", "NYSE", "CA", 140_000_000_000.0),
-        ]
-        return [
-            Symbol.objects.create(
-                symbol=symbol,
-                company_name=name,
-                exchange=exchange,
-                country=country,
-                market_cap=market_cap,
-                payload={"isEtf": True} if "ETF" in name else {},
-            )
-            for symbol, name, exchange, country, market_cap in rows
-        ]
-
-    def seed_mag7_price_history(self, start_date: str = "2024-01-01", days: int = 5) -> None:
-        symbols = {row.symbol: row for row in Symbol.objects.filter(symbol__in=MAG7_SYMBOLS)}
-        for symbol_index, symbol in enumerate(MAG7_SYMBOLS, start=1):
-            symbol_obj = symbols[symbol]
-            base = 100.0 + (symbol_index * 25.0)
-            for offset in range(days):
-                date_value = f"2024-01-0{offset + 1}"
-                open_px = base + offset
-                close_px = open_px + (0.75 if offset % 2 == 0 else -0.25)
-                high_px = max(open_px, close_px) + 1.0
-                low_px = min(open_px, close_px) - 1.0
-                SymbolSectionHistorical.objects.create(
-                    symbol=symbol_obj,
-                    section_key="prices_div_adj",
-                    record_key=f"{symbol}:{date_value}",
-                    record_date=date_value,
-                    payload={
-                        "date": date_value,
-                        "adjOpen": round(open_px, 4),
-                        "adjHigh": round(high_px, 4),
-                        "adjLow": round(low_px, 4),
-                        "adjClose": round(close_px, 4),
-                        "volume": int(1_000_000 + symbol_index * 10_000 + offset * 1_000),
-                    },
-                )
 
     def write_csv(self, name: str, fieldnames: list[str], rows: list[dict]) -> str:
         path = self.temp_path / f"{name}.csv"
@@ -120,6 +165,58 @@ class Mag7FixtureMixin:
         self.assertGreater(len(rows), 0, "Expected at least one row to validate schema.")
         for col in expected_columns:
             self.assertIn(col, rows[0], f"Missing expected column {col!r} in first row.")
+
+
+class MarketCapTierFixtureMixin(ArtifactTestMixin):
+    def create_screened_symbols(self) -> list[Symbol]:
+        return _ensure_symbol_rows(_load_fixture_rows("screened_symbols.csv"))
+
+    def create_market_cap_tier_symbols(self, tier_name: str, *, limit: int | None = None) -> list[Symbol]:
+        selected_symbols = market_cap_tier_symbols(tier_name, limit=limit)
+        row_map = {
+            str(row["symbol"]): row
+            for row in _load_fixture_rows("scalability_symbols.csv.gz", compressed=True)
+        }
+        ordered_rows = [row_map[symbol] for symbol in selected_symbols if symbol in row_map]
+        return _ensure_symbol_rows(ordered_rows)
+
+    def seed_market_cap_tier_price_history(
+        self,
+        tier_name: str,
+        *,
+        start_date: str = "2024-01-02",
+        business_days: int = 90,
+        limit: int | None = None,
+    ) -> None:
+        selected_symbols = set(market_cap_tier_symbols(tier_name, limit=limit))
+        self.create_market_cap_tier_symbols(tier_name, limit=limit)
+        rows = [
+            row
+            for row in _load_fixture_rows("scalability_prices.csv.gz", compressed=True)
+            if str(row.get("symbol") or "") in selected_symbols
+        ]
+        _ensure_price_rows(
+            _slice_price_rows(
+                rows,
+                start_date=start_date,
+                days=business_days,
+            )
+        )
+
+
+class Mag7FixtureMixin(ArtifactTestMixin):
+    def create_mag7_symbols(self) -> list[Symbol]:
+        return _ensure_symbol_rows(_load_fixture_rows("mag7_symbols.csv"))
+
+    def seed_mag7_price_history(self, start_date: str = "2024-01-01", days: int = 5) -> None:
+        self.create_mag7_symbols()
+        _ensure_price_rows(
+            _slice_price_rows(
+                _load_fixture_rows("mag7_prices.csv"),
+                start_date=start_date,
+                days=days,
+            )
+        )
 
 
 class ScalabilityFixtureMixin:
@@ -141,59 +238,17 @@ class ScalabilityFixtureMixin:
         start_date: str = "2024-01-02",
         business_days: int = 90,
     ) -> dict[str, list[str]]:
-        tier_symbols: dict[str, list[str]] = {key: [] for key in cls.SCALABILITY_TIER_COUNTS}
-        symbols_to_create: list[Symbol] = []
-        for tier_name, count in cls.SCALABILITY_TIER_COUNTS.items():
-            base_market_cap = float(cls.SCALABILITY_TIER_MARKET_CAPS[tier_name])
-            prefix = tier_name.upper()
-            for index in range(count):
-                symbol = f"{prefix}{index:04d}"
-                tier_symbols[tier_name].append(symbol)
-                symbols_to_create.append(
-                    Symbol(
-                        symbol=symbol,
-                        company_name=f"{tier_name} synthetic {index:04d}",
-                        exchange="NASDAQ",
-                        country="US",
-                        market_cap=base_market_cap - float(index * 1_000_000.0),
-                        payload={},
-                    )
-                )
-        Symbol.objects.bulk_create(symbols_to_create, batch_size=1000)
-
-        dates = pd.bdate_range(start=start_date, periods=business_days)
-        symbol_map = {
-            str(row.symbol): row
-            for row in Symbol.objects.filter(symbol__in=[symbol for symbols in tier_symbols.values() for symbol in symbols]).only("id", "symbol")
+        manifest = _load_fixture_manifest("scalability_manifest.json")
+        tier_symbols = {
+            tier_name: list(manifest.get(tier_name) or [])[: int(cls.SCALABILITY_TIER_COUNTS[tier_name])]
+            for tier_name in cls.SCALABILITY_TIER_COUNTS
         }
-        history_rows: list[SymbolSectionHistorical] = []
-        for tier_name, symbols in tier_symbols.items():
-            tier_bias = 0.002 if tier_name == "tier1" else (0.001 if tier_name == "tier2" else 0.0005)
-            for symbol_index, symbol in enumerate(symbols):
-                symbol_obj = symbol_map[symbol]
-                base_price = 40.0 + (symbol_index % 50) * 1.5 + (10.0 if tier_name == "tier1" else 5.0)
-                for day_index, date_value in enumerate(dates):
-                    seasonal = ((day_index % 10) - 5) * 0.08
-                    drift = tier_bias * day_index
-                    open_px = base_price + seasonal + drift
-                    close_px = open_px * (1.0 + tier_bias + ((symbol_index % 7) - 3) * 0.0007)
-                    high_px = max(open_px, close_px) + 0.6
-                    low_px = min(open_px, close_px) - 0.6
-                    history_rows.append(
-                        SymbolSectionHistorical(
-                            symbol=symbol_obj,
-                            section_key="prices_div_adj",
-                            record_key=f"{symbol}:{date_value.date().isoformat()}",
-                            record_date=date_value.date(),
-                            payload={
-                                "date": date_value.date().isoformat(),
-                                "adjOpen": round(open_px, 6),
-                                "adjHigh": round(high_px, 6),
-                                "adjLow": round(low_px, 6),
-                                "adjClose": round(close_px, 6),
-                                "volume": int(1_000_000 + (symbol_index % 25) * 25_000 + day_index * 500),
-                            },
-                        )
-                    )
-        SymbolSectionHistorical.objects.bulk_create(history_rows, batch_size=5000)
+        _ensure_symbol_rows(_load_fixture_rows("scalability_symbols.csv.gz", compressed=True))
+        _ensure_price_rows(
+            _slice_price_rows(
+                _load_fixture_rows("scalability_prices.csv.gz", compressed=True),
+                start_date=start_date,
+                days=business_days,
+            )
+        )
         return tier_symbols

@@ -16,16 +16,27 @@ def _bootstrap() -> None:
 
 def _ensure_fixture() -> None:
     _bootstrap()
-    from fmp.models import Symbol
-    from pipeline.test_support import ScalabilityFixtureMixin
+    from pipeline.scalability import SCALABILITY_TIERS
+    from pipeline.universe_selection import resolve_market_cap_tier_symbols
 
-    enough = (
-        Symbol.objects.filter(symbol__startswith="TIER1").count() >= 10
-        and Symbol.objects.filter(symbol__startswith="TIER2").count() >= 100
-        and Symbol.objects.filter(symbol__startswith="TIER3").count() >= 1000
-    )
-    if not enough:
-        ScalabilityFixtureMixin.seed_scalability_universe(start_date="2024-01-02", business_days=90)
+    availability: dict[str, int] = {}
+    for tier in SCALABILITY_TIERS.values():
+        symbols = resolve_market_cap_tier_symbols(
+            tier_key=tier.market_cap_key,
+            limit=tier.target_symbol_count,
+            exclude_pooled_vehicles=False,
+        )
+        availability[tier.key] = len(symbols)
+    missing = {key: count for key, count in availability.items() if count < int(SCALABILITY_TIERS[key].target_symbol_count)}
+    if missing:
+        details = ", ".join(
+            f"{key}={count}/{SCALABILITY_TIERS[key].target_symbol_count}"
+            for key, count in sorted(missing.items())
+        )
+        raise RuntimeError(
+            "Performance analysis requires enough real symbols in the live FMP database "
+            f"and will not seed synthetic fixtures. Missing coverage: {details}."
+        )
 
 
 def prepare_profile_environment() -> None:

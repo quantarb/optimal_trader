@@ -20,11 +20,14 @@ from .test_support import MAG7_SYMBOLS, Mag7FixtureMixin
 from .research_suite import RESEARCH_REPORT_SCHEMA_VERSION, run_optimal_trade_research_suite
 
 
+MAG7_REAL_FIXTURE_DAYS = 4
+
+
 class Mag7PipelineSuiteTests(Mag7FixtureMixin, TestCase):
     def setUp(self):
         super().setUp()
         self.create_mag7_symbols()
-        self.seed_mag7_price_history(days=5)
+        self.seed_mag7_price_history(days=MAG7_REAL_FIXTURE_DAYS)
 
     def test_mag7_universe_run_persists_all_symbols(self):
         run = PipelineRun.objects.create(
@@ -94,7 +97,7 @@ class Mag7PipelineSuiteTests(Mag7FixtureMixin, TestCase):
         self.assertGreaterEqual(int(feature_artifact.content.get("feature_column_count") or 0), 1)
         with Path(feature_artifact.uri).open("r", encoding="utf-8", newline="") as fh:
             rows = list(csv.DictReader(fh))
-        self.assertEqual(len(rows), len(MAG7_SYMBOLS) * 5)
+        self.assertEqual(len(rows), len(MAG7_SYMBOLS) * MAG7_REAL_FIXTURE_DAYS)
         self.assertEqual(sorted({row["symbol"] for row in rows}), sorted(MAG7_SYMBOLS))
         self.assert_rows_have_columns(
             rows,
@@ -318,7 +321,7 @@ class Mag7PipelineSuiteTests(Mag7FixtureMixin, TestCase):
             prediction_rows = list(csv.DictReader(fh))
 
         self.assertGreater(len(label_rows), 0)
-        self.assertEqual(len(feature_rows), len(MAG7_SYMBOLS) * 5)
+        self.assertEqual(len(feature_rows), len(MAG7_SYMBOLS) * MAG7_REAL_FIXTURE_DAYS)
         self.assertGreater(len(prediction_rows), 0)
         self.assertEqual(sorted({row["symbol"] for row in prediction_rows}), sorted(MAG7_SYMBOLS))
         self.assertTrue(any(row["symbol"] == "AAPL" for row in label_rows))

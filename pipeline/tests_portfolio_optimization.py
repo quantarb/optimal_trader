@@ -19,7 +19,7 @@ from pipeline.portfolio_optimization_research import (
     write_portfolio_optimization_report,
 )
 from pipeline.strategy_definitions import ResolvedStrategyDefinition, apply_strategy_definition
-from pipeline.test_support import Mag7FixtureMixin
+from pipeline.test_support import ArtifactTestMixin
 
 
 class PortfolioOptimizationCapabilityTests(SimpleTestCase):
@@ -263,7 +263,7 @@ class PortfolioOptimizationCapabilityTests(SimpleTestCase):
         self.assertGreaterEqual(float(result.turnover.sum()), 0.0)
 
 
-class PortfolioOptimizationResearchTests(Mag7FixtureMixin, TestCase):
+class PortfolioOptimizationResearchTests(ArtifactTestMixin, TestCase):
     def test_collect_weight_and_diagnostic_rows_uses_strategy_and_backtest_artifacts(self):
         run = PipelineRun.objects.create(
             name="portfolio-opt-test",

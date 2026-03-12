@@ -361,6 +361,87 @@ def _build_variant_row(
     )
 
 
+def _build_empty_variant_row(
+    *,
+    base_row: Mapping[str, Any],
+    strategy_artifact: Artifact,
+    backtest_config: Mapping[str, Any],
+    validation_config: Mapping[str, Any],
+    universe_key: str,
+    universe_label: str,
+    strategy_name: str,
+    filter_name: str,
+    selected_symbols: Sequence[str],
+    selection_metadata: Mapping[str, Any] | None = None,
+    training_prep_row: Mapping[str, Any] | None = None,
+    filter_training_time_sec: float = 0.0,
+    variant_error: str = "no_active_portfolio_rows",
+) -> dict[str, Any]:
+    row = dict(base_row)
+    benchmark = _build_equal_weight_benchmark(
+        strategy_artifact,
+        allowed_symbols=selected_symbols,
+    )
+    rows_scored, selected_rows = _strategy_row_counts(strategy_artifact, allowed_symbols=selected_symbols)
+    row.update(
+        {
+            "rows_scored": int(rows_scored),
+            "selected_rows": int(selected_rows),
+            "final_equity": 1.0,
+            "cumulative_return": 0.0,
+            "max_drawdown": 0.0,
+            "trades": 0,
+            "sharpe": 0.0,
+            "avg_turnover": 0.0,
+            "total_turnover": 0.0,
+            "positive_days": 0,
+            "negative_days": 0,
+            "benchmark_days": int(benchmark.get("benchmark_days") or 0),
+            "benchmark_final_equity": float(benchmark.get("benchmark_final_equity") or 0.0),
+            "benchmark_cumulative_return": float(benchmark.get("benchmark_cumulative_return") or 0.0),
+            "benchmark_max_drawdown": float(benchmark.get("benchmark_max_drawdown") or 0.0),
+            "backtest_seconds": 0.0,
+            "backtest_fee_bps": _safe_float(dict(backtest_config).get("fee_bps")),
+            "backtest_slippage_bps": _safe_float(dict(backtest_config).get("slippage_bps")),
+            "excess_cumulative_return": round(0.0 - float(benchmark.get("benchmark_cumulative_return") or 0.0), 8),
+            "relative_final_equity": round(1.0 - float(benchmark.get("benchmark_final_equity") or 0.0), 8),
+            "backtest_artifact_id": 0,
+            "variant_error": str(variant_error),
+        }
+    )
+    pipeline_runtime_seconds = round(
+        _safe_float(row.get("dataset_build_seconds"))
+        + _safe_float(row.get("fit_seconds"))
+        + _safe_float(row.get("score_seconds"))
+        + _safe_float(row.get("strategy_build_seconds")),
+        6,
+    )
+    prep_total_runtime = _safe_float((training_prep_row or {}).get("total_runtime_seconds"))
+    prep_fit_seconds = _safe_float((training_prep_row or {}).get("fit_seconds"))
+    prep_backtest_seconds = _safe_float((training_prep_row or {}).get("backtest_seconds"))
+    row["pipeline_runtime_seconds"] = pipeline_runtime_seconds
+    row["filter_preparation_time_sec"] = round(prep_total_runtime, 6)
+    row["filter_training_time_sec"] = round(_safe_float(filter_training_time_sec), 6)
+    row["model_training_time_sec"] = round(_safe_float(row.get("fit_seconds")) + prep_fit_seconds, 6)
+    row["backtest_time_sec"] = round(prep_backtest_seconds, 6)
+    row["total_runtime_seconds"] = round(pipeline_runtime_seconds + prep_total_runtime + _safe_float(filter_training_time_sec), 6)
+    row.update(_evaluate_variant_gates(row, validation_config=dict(validation_config)))
+    gate_reasons = list(row.get("gate_reasons") or [])
+    if str(variant_error) not in gate_reasons:
+        gate_reasons.append(str(variant_error))
+    row["gate_reasons"] = gate_reasons
+    row["passed_validity_gates"] = False
+    return _annotate_variant_row(
+        row,
+        universe_key=universe_key,
+        universe_label=universe_label,
+        strategy_name=strategy_name,
+        filter_name=filter_name,
+        selected_symbols=selected_symbols,
+        selection_metadata=selection_metadata,
+    )
+
+
 def _stage_seconds(tracer: PerformanceTracer, previous_count: int) -> float:
     stages = tracer.stages
     if len(stages) <= previous_count:
@@ -827,6 +908,28 @@ def _run_single_universe_experiment(
         for filter_name, _target_col in FILTER_VARIANTS:
             filter_result = dict(baseline_filters[filter_name])
             selected_symbols = [str(symbol) for symbol in list(filter_result.get("selected_symbols") or [])]
+            filtered_rows_scored, filtered_selected_rows = _strategy_row_counts(
+                baseline_strategy_artifact,
+                allowed_symbols=selected_symbols,
+            )
+            if not selected_symbols or filtered_rows_scored <= 0 or filtered_selected_rows <= 0:
+                summary_rows.append(
+                    _build_empty_variant_row(
+                        base_row=baseline_base_row,
+                        strategy_artifact=baseline_strategy_artifact,
+                        backtest_config={**dict(backtest_config), "allowed_symbols": selected_symbols},
+                        validation_config=dict(validation_config),
+                        universe_key=universe_key,
+                        universe_label=universe_label,
+                        strategy_name="baseline",
+                        filter_name=filter_name,
+                        selected_symbols=selected_symbols,
+                        selection_metadata=filter_result,
+                        training_prep_row=baseline_train_row,
+                        filter_training_time_sec=_safe_float(filter_result.get("filter_training_time_sec")),
+                    )
+                )
+                continue
             stage_count = len(tracer.stages)
             with tracer.stage(
                 f"backtest.{universe_key}.baseline.{filter_name}.{fold_name}",
@@ -1022,6 +1125,28 @@ def _run_single_universe_experiment(
         for filter_name, _target_col in FILTER_VARIANTS:
             filter_result = dict(model_filters[filter_name])
             selected_symbols = [str(symbol) for symbol in list(filter_result.get("selected_symbols") or [])]
+            filtered_rows_scored, filtered_selected_rows = _strategy_row_counts(
+                model_strategy_artifact,
+                allowed_symbols=selected_symbols,
+            )
+            if not selected_symbols or filtered_rows_scored <= 0 or filtered_selected_rows <= 0:
+                summary_rows.append(
+                    _build_empty_variant_row(
+                        base_row=model_base_row,
+                        strategy_artifact=model_strategy_artifact,
+                        backtest_config={**dict(backtest_config), "allowed_symbols": selected_symbols},
+                        validation_config=dict(validation_config),
+                        universe_key=universe_key,
+                        universe_label=universe_label,
+                        strategy_name="model",
+                        filter_name=filter_name,
+                        selected_symbols=selected_symbols,
+                        selection_metadata=filter_result,
+                        training_prep_row=model_train_row,
+                        filter_training_time_sec=_safe_float(filter_result.get("filter_training_time_sec")),
+                    )
+                )
+                continue
             stage_count = len(tracer.stages)
             with tracer.stage(
                 f"backtest.{universe_key}.model.{filter_name}.{fold_name}",

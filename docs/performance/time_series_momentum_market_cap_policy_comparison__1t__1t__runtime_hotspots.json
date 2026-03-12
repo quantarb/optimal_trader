@@ -1,0 +1,229 @@
+{
+  "engine": "performance_tracer",
+  "generated_at": "2026-03-12T16:42:56.373263+00:00",
+  "hotspots": [],
+  "notes": [
+    "Generated from the experiment's existing PerformanceTracer stages and rendered with tools/performance_analysis."
+  ],
+  "raw_output_path": "",
+  "stage_hotspots": [
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.985115,
+      "cpu_seconds": 44.084277,
+      "metadata": {
+        "fold_name": "wf_2025",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2025",
+      "read_bytes": 0,
+      "rss_delta_mb": -923.0312,
+      "rss_end_mb": 1749.7812,
+      "rss_start_mb": 2672.8125,
+      "wall_seconds": 44.750389,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.98216,
+      "cpu_seconds": 39.293547,
+      "metadata": {
+        "fold_name": "wf_2024",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2024",
+      "read_bytes": 0,
+      "rss_delta_mb": -1320.4844,
+      "rss_end_mb": 1772.625,
+      "rss_start_mb": 3093.1094,
+      "wall_seconds": 40.007273,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.98699,
+      "cpu_seconds": 39.212168,
+      "metadata": {
+        "fold_name": "wf_2023",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2023",
+      "read_bytes": 0,
+      "rss_delta_mb": -744.2188,
+      "rss_end_mb": 1899.6719,
+      "rss_start_mb": 2643.8906,
+      "wall_seconds": 39.729037,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.988788,
+      "cpu_seconds": 37.432887,
+      "metadata": {
+        "fold_name": "wf_2022",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2022",
+      "read_bytes": 0,
+      "rss_delta_mb": -624.0781,
+      "rss_end_mb": 2250.0156,
+      "rss_start_mb": 2874.0938,
+      "wall_seconds": 37.857337,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.986665,
+      "cpu_seconds": 36.144369,
+      "metadata": {
+        "fold_name": "wf_2021",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2021",
+      "read_bytes": 0,
+      "rss_delta_mb": -799.4375,
+      "rss_end_mb": 2013.6562,
+      "rss_start_mb": 2813.0938,
+      "wall_seconds": 36.632851,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.989527,
+      "cpu_seconds": 35.066921,
+      "metadata": {
+        "fold_name": "wf_2020",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2020",
+      "read_bytes": 0,
+      "rss_delta_mb": -958.5312,
+      "rss_end_mb": 2045.6406,
+      "rss_start_mb": 3004.1719,
+      "wall_seconds": 35.438052,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.987849,
+      "cpu_seconds": 33.903216,
+      "metadata": {
+        "fold_name": "wf_2019",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2019",
+      "read_bytes": 0,
+      "rss_delta_mb": -438.0625,
+      "rss_end_mb": 1886.9375,
+      "rss_start_mb": 2325.0,
+      "wall_seconds": 34.320257,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 0.984153,
+      "cpu_seconds": 32.496032,
+      "metadata": {
+        "fold_name": "wf_2018",
+        "policy": "model",
+        "scope": "train"
+      },
+      "name": "model.train.1t.wf_2018",
+      "read_bytes": 0,
+      "rss_delta_mb": 108.375,
+      "rss_end_mb": 1894.6406,
+      "rss_start_mb": 1786.2656,
+      "wall_seconds": 33.019276,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "backtest",
+      "cpu_ratio": 0.992385,
+      "cpu_seconds": 20.344434,
+      "metadata": {
+        "fold_name": "wf_2025",
+        "policy": "baseline",
+        "scope": "train"
+      },
+      "name": "baseline.train.1t.wf_2025",
+      "read_bytes": 0,
+      "rss_delta_mb": -784.0781,
+      "rss_end_mb": 2395.7188,
+      "rss_start_mb": 3179.7969,
+      "wall_seconds": 20.500553,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "backtest",
+      "cpu_ratio": 0.996715,
+      "cpu_seconds": 18.700093,
+      "metadata": {
+        "fold_name": "wf_2024",
+        "policy": "baseline",
+        "scope": "train"
+      },
+      "name": "baseline.train.1t.wf_2024",
+      "read_bytes": 0,
+      "rss_delta_mb": -594.4375,
+      "rss_end_mb": 2845.4062,
+      "rss_start_mb": 3439.8438,
+      "wall_seconds": 18.761734,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "backtest",
+      "cpu_ratio": 0.99482,
+      "cpu_seconds": 18.370728,
+      "metadata": {
+        "fold_name": "wf_2023",
+        "policy": "baseline",
+        "scope": "train"
+      },
+      "name": "baseline.train.1t.wf_2023",
+      "read_bytes": 0,
+      "rss_delta_mb": -56.6406,
+      "rss_end_mb": 2517.7969,
+      "rss_start_mb": 2574.4375,
+      "wall_seconds": 18.466376,
+      "workload_type": "1t",
+      "write_bytes": 0
+    },
+    {
+      "category": "backtest",
+      "cpu_ratio": 0.992458,
+      "cpu_seconds": 17.954852,
+      "metadata": {
+        "fold_name": "wf_2022",
+        "policy": "baseline",
+        "scope": "train"
+      },
+      "name": "baseline.train.1t.wf_2022",
+      "read_bytes": 0,
+      "rss_delta_mb": -461.5,
+      "rss_end_mb": 2760.125,
+      "rss_start_mb": 3221.625,
+      "wall_seconds": 18.091296,
+      "workload_type": "1t",
+      "write_bytes": 0
+    }
+  ],
+  "target": "tsmom_market_cap_policy_comparison__1t",
+  "total_seconds": 525.581502
+}

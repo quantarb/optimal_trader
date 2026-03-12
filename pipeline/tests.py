@@ -49,7 +49,7 @@ from . import service_runtime
 from .artifact_support import _load_artifact_preview_rows
 from .progress import ProgressReporter, progress_from_config
 from .run_support import serialize_pipeline_run
-from .test_support import Mag7FixtureMixin
+from .test_support import MarketCapTierFixtureMixin
 from .universe_selection import resolve_market_cap_tier_symbols, resolve_symbol_universe
 from .views import _build_equity_curve_context
 
@@ -2051,7 +2051,7 @@ class PipelineResearchTests(TestCase):
         self.assertIn("portfolio_insight", portfolio_payload)
 
 
-class UniverseScalingTests(Mag7FixtureMixin, TestCase):
+class UniverseScalingTests(MarketCapTierFixtureMixin, TestCase):
     def setUp(self):
         super().setUp()
         self.create_screened_symbols()
@@ -2063,51 +2063,36 @@ class UniverseScalingTests(Mag7FixtureMixin, TestCase):
             exchanges=["NASDAQ", "NYSE"],
             exclude_pooled_vehicles=True,
         )
-        self.assertEqual(symbols, ["AAPL", "MSFT", "NVDA", "ORCL", "CRM", "UBER"])
+        self.assertEqual(symbols, ["GOOG", "AVGO", "BRK-B", "BRK-A", "WMT", "LLY", "JPM", "ORCL", "PLTR", "CRM", "UBER"])
 
     def test_market_cap_tier_resolution_scales_symbol_counts(self):
         tier_1t = resolve_market_cap_tier_symbols(tier_key="1t", country="US", exchanges=["NASDAQ", "NYSE"])
         tier_100b = resolve_market_cap_tier_symbols(tier_key="100b", country="US", exchanges=["NASDAQ", "NYSE"])
         tier_10b = resolve_market_cap_tier_symbols(tier_key="10b", country="US", exchanges=["NASDAQ", "NYSE"])
-        self.assertEqual(tier_1t, ["AAPL", "MSFT", "NVDA"])
+        self.assertEqual(tier_1t, ["GOOG", "AVGO", "BRK-B", "BRK-A"])
         self.assertGreater(len(tier_100b), len(tier_1t))
         self.assertGreater(len(tier_10b), len(tier_100b))
-        self.assertEqual(tier_10b[-1], "DUOL")
+        self.assertEqual(tier_10b[-1], "RKLB")
 
     def test_resolve_symbol_universe_excludes_payload_funds_when_requested(self):
-        Symbol.objects.create(
-            symbol="FUNDX",
-            company_name="Broad Market Index Vehicle",
-            exchange="NASDAQ",
-            country="US",
-            market_cap=600_000_000_000.0,
-            payload={"isFund": True},
-        )
         symbols = resolve_symbol_universe(
             min_market_cap=100_000_000_000.0,
             country="US",
             exchanges=["NASDAQ", "NYSE"],
             exclude_pooled_vehicles=True,
         )
-        self.assertNotIn("FUNDX", symbols)
+        self.assertNotIn("VTSAX", symbols)
 
     def test_resolve_symbol_universe_excludes_requested_symbol_prefixes(self):
-        Symbol.objects.create(
-            symbol="TIER1234",
-            company_name="tier1 synthetic 1234",
-            exchange="NASDAQ",
-            country="US",
-            market_cap=700_000_000_000.0,
-            payload={},
-        )
         symbols = resolve_symbol_universe(
             min_market_cap=100_000_000_000.0,
             country="US",
             exchanges=["NASDAQ", "NYSE"],
             exclude_pooled_vehicles=True,
-            exclude_symbol_prefixes=["TIER"],
+            exclude_symbol_prefixes=["BRK"],
         )
-        self.assertNotIn("TIER1234", symbols)
+        self.assertNotIn("BRK-A", symbols)
+        self.assertNotIn("BRK-B", symbols)
 
     def test_universe_job_supports_screen_filters(self):
         run = PipelineRun.objects.create(
@@ -2130,7 +2115,7 @@ class UniverseScalingTests(Mag7FixtureMixin, TestCase):
                 },
             )
         payload = json.loads(Path(artifact.uri).read_text(encoding="utf-8"))
-        self.assertEqual(payload["symbols"], ["AAPL", "MSFT", "NVDA", "ORCL", "CRM", "UBER"])
+        self.assertEqual(payload["symbols"], ["GOOG", "AVGO", "BRK-B", "BRK-A", "WMT", "LLY", "JPM", "ORCL", "PLTR", "CRM"])
         self.assertEqual(payload["filters"]["country"], "US")
         self.assertEqual(payload["filters"]["exchanges"], ["NASDAQ", "NYSE"])
 
@@ -2186,5 +2171,5 @@ class UniverseScalingTests(Mag7FixtureMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         runner.assert_called_once()
         kwargs = runner.call_args.kwargs
-        self.assertEqual(kwargs["symbols"], ["AAPL", "MSFT", "NVDA", "ORCL", "CRM", "UBER"])
+        self.assertEqual(kwargs["symbols"], ["GOOG", "AVGO", "BRK-B", "BRK-A", "WMT", "LLY", "JPM", "ORCL", "PLTR", "CRM", "UBER"])
         self.assertEqual(kwargs["profile_name"], "small_universe_fast")

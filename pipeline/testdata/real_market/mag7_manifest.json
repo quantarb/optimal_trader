@@ -1,0 +1,16 @@
+{
+  "symbols": [
+    "AAPL",
+    "AMZN",
+    "GOOGL",
+    "META",
+    "MSFT",
+    "NVDA",
+    "TSLA"
+  ],
+  "price_rows": 28,
+  "date_range": {
+    "start": "2024-01-02",
+    "end": "2024-01-05"
+  }
+}

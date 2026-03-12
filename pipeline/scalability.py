@@ -170,7 +170,13 @@ def run_scalability_benchmark(
     if feature_profile not in FEATURE_PROFILES:
         raise ValueError(f"Unknown feature profile {feature_profile!r}. Available: {', '.join(sorted(FEATURE_PROFILES))}")
 
-    symbols = resolve_market_cap_tier_symbols(tier_key=tier.market_cap_key, limit=tier.target_symbol_count)
+    # The scalability suite is about real-world workload size, so it uses the
+    # broad real market-cap tiers instead of seeding synthetic stock-only rows.
+    symbols = resolve_market_cap_tier_symbols(
+        tier_key=tier.market_cap_key,
+        limit=tier.target_symbol_count,
+        exclude_pooled_vehicles=False,
+    )
     if not symbols:
         raise ValueError(f"No symbols were resolved for {tier.key}.")
 

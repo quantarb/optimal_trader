@@ -8,10 +8,10 @@ from django.test import TestCase
 
 from pipeline.models import Artifact, PipelineRun, StrategyDefinition
 from pipeline.services import execute_pipeline_run
-from pipeline.test_support import Mag7FixtureMixin
+from pipeline.test_support import ArtifactTestMixin
 
 
-class StrategyRebalanceTests(Mag7FixtureMixin, TestCase):
+class StrategyRebalanceTests(ArtifactTestMixin, TestCase):
     def test_weekly_strategy_rebalances_on_first_available_day(self):
         weekly_definition = StrategyDefinition.objects.create(
             name="Weekly First-Day Test",

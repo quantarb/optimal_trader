@@ -12,12 +12,12 @@ from .symbol_filters import (
     select_symbols_with_metadata_filter,
     select_top_symbols_from_diagnostics,
 )
-from .test_support import Mag7FixtureMixin
+from .test_support import ArtifactTestMixin
 from .time_series_momentum_market_cap_policy_comparison import write_market_cap_policy_comparison_report
 from .time_series_momentum_policy_comparison import write_policy_comparison_report
 
 
-class PolicyComparisonCapabilityTests(Mag7FixtureMixin, TestCase):
+class PolicyComparisonCapabilityTests(ArtifactTestMixin, TestCase):
     def test_run_strategy_backtest_respects_allowed_symbols(self):
         strategy_run = PipelineRun.objects.create(
             name="allowed-symbols-strategy",
