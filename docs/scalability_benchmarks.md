@@ -71,34 +71,34 @@ Tier gating:
 
 Reference run:
 
-- Date window: `2020-01-01` to `2025-12-31`
+- Date window: `2024-01-02` to `2024-05-06`
 - Feature profile: `baseline`
-- Artifact storage: `parquet`
-- Report: [docs/performance/scalability_20260311_202309.md](/Users/johnnylee/PycharmProjects/optimal_trader/docs/performance/scalability_20260311_202309.md)
+- Artifact storage: `csv`
+- Report: [docs/performance/scaling_benchmarks.md](/Users/johnnylee/PycharmProjects/optimal_trader/docs/performance/scaling_benchmarks.md)
+- Raw snapshot: [docs/performance/scaling_benchmarks_tsmom_after_refactor2.json](/Users/johnnylee/PycharmProjects/optimal_trader/docs/performance/scaling_benchmarks_tsmom_after_refactor2.json)
 
-| Tier | Actual Symbols | Runtime |
-| --- | ---: | ---: |
-| `tier1` | 10 | 1.606s |
-| `tier2` | 100 | 10.188s |
-| `tier3` | 863 | 78.327s |
+| Tier | Actual Symbols | Runtime | Top Stage |
+| --- | ---: | ---: | --- |
+| `tier1` | 10 | 0.720s | `model.fit` |
+| `tier2` | 100 | 4.569s | `strategy.serialize_dataset` |
+| `tier3` | 1000 | 40.813s | `strategy.serialize_dataset` |
 
 Top bottlenecks from that run:
 
-- `model.fit` dominated every tier.
-- `labels.generate` remained the largest non-model stage at scale.
-- `features.load_adjusted_prices` is still a material cost for large universes.
-- Serialization is now visible but no longer dominant.
+- `model.fit` remains the heaviest single stage for `tier1`.
+- `strategy.serialize_dataset` now dominates `tier2` and `tier3`.
+- Feature and label generation remain the largest non-serialization costs as the universe grows.
 
 ## Remaining Bottlenecks
 
-- `model.fit` is the primary large-universe bottleneck and should be the next optimization target.
-- `labels.generate` is much faster after the solver rewrite, but still scales linearly with symbol count.
+- Strategy and prediction artifact serialization are now the clearest large-universe bottlenecks.
+- `labels.generate` is much faster after the solver rewrite, but it still scales linearly with symbol count.
 - `features.load_adjusted_prices` still reads the entire requested price panel into memory; chunked reads or symbol partitions would help the `tier3` path.
-- Strategy and prediction artifact serialization still create full materialized outputs; row-grouped parquet writes would reduce peak memory.
+- Model training is no longer the only dominant stage, but lighter benchmark models are still worth evaluating for faster iteration.
 
 ## Recommended Next Optimizations
 
+- Make large benchmark artifact persistence optional, or write partitioned parquet outputs to cut serialization time and peak disk usage.
 - Add date-partitioned / symbol-partitioned feature and label execution for `tier3+` runs.
-- Evaluate `HistGradientBoostingRegressor` or lighter RF settings for the benchmark profile so model fit stops dominating the suite.
-- Push more feature families onto shared batched sparse loaders instead of per-builder reconstruction.
-- Add optional `n_jobs` / worker-level partitioning for symbol-local feature families once correctness coverage is expanded.
+- Evaluate lighter benchmark-only model settings so iterative profiling stays fast.
+- Push more feature families onto shared batched loaders and add worker-level partitioning once correctness coverage is expanded.
