@@ -166,6 +166,49 @@ def compute_symbol_strategy_diagnostics(
     return rows
 
 
+def compute_symbol_buy_hold_diagnostics(
+    artifact_or_frame: Any,
+    *,
+    evaluation_scope: str = "",
+    fold_name: str = "",
+    backtest_start_date: str = "",
+    backtest_end_date: str = "",
+) -> list[dict[str, Any]]:
+    trade_df = load_backtest_trade_frame(artifact_or_frame)
+    if trade_df.empty:
+        return []
+
+    all_dates = _artifact_dates(artifact_or_frame, trade_df)
+    if all_dates.empty:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for symbol, group in trade_df.groupby("symbol", sort=True):
+        panel = (
+            group.drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+            .reindex(all_dates)
+        )
+        asset_return = pd.to_numeric(panel.get("asset_return"), errors="coerce").fillna(0.0)
+        equity_curve = (1.0 + asset_return).cumprod()
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve / running_max) - 1.0
+        rows.append(
+            {
+                "evaluation_scope": str(evaluation_scope or ""),
+                "fold_name": str(fold_name or ""),
+                "backtest_start_date": str(backtest_start_date or ""),
+                "backtest_end_date": str(backtest_end_date or ""),
+                "symbol": str(symbol),
+                "buy_and_hold_return": _round_float(float(equity_curve.iloc[-1] - 1.0)),
+                "buy_and_hold_final_equity": _round_float(float(equity_curve.iloc[-1])),
+                "buy_and_hold_max_drawdown": _round_float(float(drawdown.min()) if len(drawdown) else 0.0),
+                "observed_days": int(len(asset_return)),
+            }
+        )
+    return rows
+
+
 def aggregate_symbol_diagnostic_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -247,6 +290,7 @@ def aggregate_symbol_diagnostic_rows(
 
 __all__ = [
     "aggregate_symbol_diagnostic_rows",
+    "compute_symbol_buy_hold_diagnostics",
     "compute_symbol_strategy_diagnostics",
     "load_backtest_trade_frame",
 ]

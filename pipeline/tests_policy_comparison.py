@@ -1,11 +1,19 @@
 from django.test import TestCase
 
+from fmp.models import Symbol
 from domain.backtests import StrategyBacktestSpec
 from workflows.strategy import run_strategy_backtest
 from .models import Artifact, PipelineRun
 from .symbol_diagnostics import compute_symbol_strategy_diagnostics
-from .symbol_filters import build_symbol_feature_summary, select_symbols_with_learned_filter, select_top_symbols_from_diagnostics
+from .symbol_filters import (
+    build_symbol_feature_summary,
+    build_symbol_metadata_filter_summary,
+    select_symbols_with_learned_filter,
+    select_symbols_with_metadata_filter,
+    select_top_symbols_from_diagnostics,
+)
 from .test_support import Mag7FixtureMixin
+from .time_series_momentum_market_cap_policy_comparison import write_market_cap_policy_comparison_report
 from .time_series_momentum_policy_comparison import write_policy_comparison_report
 
 
@@ -231,3 +239,177 @@ class PolicyComparisonCapabilityTests(Mag7FixtureMixin, TestCase):
         self.assertIn("## 2. Walk-forward comparison", report_text)
         self.assertIn("baseline__simple_filter", report_text)
         self.assertIn("## 5. Symbol-level performance analysis", report_text)
+
+    def test_metadata_filter_uses_symbol_metadata_only(self):
+        for symbol, sector, industry, exchange, market_cap in (
+            ("AAA1", "Technology", "Software", "NASDAQ", 200.0),
+            ("BBB1", "Technology", "Semiconductors", "NASDAQ", 180.0),
+            ("CCC1", "Utilities", "Electric", "NYSE", 90.0),
+            ("DDD1", "Utilities", "Water", "NYSE", 85.0),
+        ):
+            Symbol.objects.update_or_create(
+                symbol=symbol,
+                defaults={
+                    "company_name": f"{symbol} Corp",
+                    "sector": sector,
+                    "industry": industry,
+                    "exchange": exchange,
+                    "country": "US",
+                    "market_cap": market_cap,
+                },
+            )
+
+        feature_run = PipelineRun.objects.create(
+            name="metadata-filter-features",
+            requested_job="features",
+            mode=PipelineRun.Mode.STRICT,
+            status=PipelineRun.Status.SUCCEEDED,
+        )
+        feature_artifact = Artifact.objects.create(
+            pipeline_run=feature_run,
+            artifact_type="FEATURES",
+            key="metadata_filter_features",
+            uri=self.write_csv(
+                "metadata_filter_features",
+                ["date", "symbol", "km__marketcap", "px__ret_252_d", "px__ret_21_d"],
+                [
+                    {"date": "2024-01-01", "symbol": "AAA1", "km__marketcap": 210.0, "px__ret_252_d": 0.15, "px__ret_21_d": 0.02},
+                    {"date": "2024-01-01", "symbol": "BBB1", "km__marketcap": 190.0, "px__ret_252_d": 0.14, "px__ret_21_d": 0.01},
+                    {"date": "2024-01-01", "symbol": "CCC1", "km__marketcap": 88.0, "px__ret_252_d": -0.05, "px__ret_21_d": 0.01},
+                    {"date": "2024-01-01", "symbol": "DDD1", "km__marketcap": 86.0, "px__ret_252_d": -0.04, "px__ret_21_d": 0.01},
+                ],
+            ),
+            content={"rows": 4},
+            metadata={},
+        )
+        metadata_rows = build_symbol_metadata_filter_summary(feature_artifact, end_date="2024-01-01")
+        filter_result = select_symbols_with_metadata_filter(
+            metadata_rows=metadata_rows,
+            target_rows=[
+                {"symbol": "AAA1", "symbol_profitable": 1},
+                {"symbol": "BBB1", "symbol_profitable": 1},
+                {"symbol": "CCC1", "symbol_profitable": 0},
+                {"symbol": "DDD1", "symbol_profitable": 0},
+            ],
+            target_col="symbol_profitable",
+            minimum_selected_symbols=1,
+            max_depth=2,
+            min_samples_leaf=1,
+        )
+
+        self.assertEqual(filter_result["selection_count"], 2)
+        self.assertEqual(set(filter_result["selected_symbols"]), {"AAA1", "BBB1"})
+        self.assertGreaterEqual(int(filter_result["tree_depth"]), 1)
+        self.assertIn("sector", "\n".join(filter_result.get("feature_columns") or []))
+
+    def test_market_cap_policy_comparison_report_includes_runtime_and_conclusions(self):
+        report_path = self.temp_path / "market_cap_policy_comparison_report.md"
+        write_market_cap_policy_comparison_report(
+            report_path=report_path,
+            payload={
+                "universe_rows": [
+                    {
+                        "universe_key": "1t",
+                        "universe_label": "1T+ market cap",
+                        "symbol_count": 2,
+                        "status": "succeeded",
+                    }
+                ],
+                "aggregate_rows": [
+                    {
+                        "universe_key": "1t",
+                        "universe_label": "1T+ market cap",
+                        "policy_name": "baseline",
+                        "strategy_name": "baseline",
+                        "filter_name": "no_filter",
+                        "variant_name": "baseline__no_filter",
+                        "sharpe": 0.25,
+                        "total_return": 0.10,
+                        "max_drawdown": -0.12,
+                        "total_turnover": 5.0,
+                        "trade_count": 12,
+                        "positive_fold_rate": 0.5,
+                        "total_runtime_sec": 2.0,
+                    },
+                    {
+                        "universe_key": "1t",
+                        "universe_label": "1T+ market cap",
+                        "policy_name": "model",
+                        "strategy_name": "model",
+                        "filter_name": "no_filter",
+                        "variant_name": "model__no_filter",
+                        "sharpe": 0.45,
+                        "total_return": 0.18,
+                        "max_drawdown": -0.10,
+                        "total_turnover": 4.0,
+                        "trade_count": 10,
+                        "positive_fold_rate": 1.0,
+                        "total_runtime_sec": 4.0,
+                    },
+                    {
+                        "universe_key": "1t",
+                        "universe_label": "1T+ market cap",
+                        "policy_name": "model",
+                        "strategy_name": "model",
+                        "filter_name": "profitable_filter",
+                        "variant_name": "model__profitable_filter",
+                        "sharpe": 0.35,
+                        "total_return": 0.12,
+                        "max_drawdown": -0.08,
+                        "total_turnover": 3.0,
+                        "trade_count": 8,
+                        "positive_fold_rate": 0.5,
+                        "total_runtime_sec": 5.0,
+                    },
+                ],
+                "symbol_diagnostics_aggregate_rows": [
+                    {"universe_label": "1T+ market cap", "strategy_name": "model", "symbol": "AAA1", "sharpe": 0.8, "avg_trade_return": 0.05, "trade_count": 3}
+                ],
+                "filter_diagnostic_rows": [
+                    {
+                        "universe_key": "1t",
+                        "universe_label": "1T+ market cap",
+                        "strategy_name": "model",
+                        "filter_name": "profitable_filter",
+                        "fold_name": "wf_2024",
+                        "selection_count": 1,
+                        "tree_depth": 1,
+                        "top_features": [("sector_Technology", 1.0)],
+                        "selected_sector_counts": {"Technology": 1},
+                        "selected_industry_counts": {"Software": 1},
+                    }
+                ],
+                "runtime_rows": [
+                    {
+                        "universe_label": "1T+ market cap",
+                        "policy_name": "baseline",
+                        "filter_name": "no_filter",
+                        "total_runtime_sec": 2.0,
+                        "model_training_time_sec": 0.0,
+                        "filter_training_time_sec": 0.0,
+                        "backtest_time_sec": 1.0,
+                    },
+                    {
+                        "universe_label": "1T+ market cap",
+                        "policy_name": "model",
+                        "filter_name": "no_filter",
+                        "total_runtime_sec": 4.0,
+                        "model_training_time_sec": 2.5,
+                        "filter_training_time_sec": 0.0,
+                        "backtest_time_sec": 0.8,
+                    },
+                ],
+                "summary_json_path": "data/pipeline_artifacts/test.json",
+                "summary_csv_path": "data/pipeline_artifacts/test.csv",
+                "fold_results_csv_path": "data/pipeline_artifacts/test_folds.csv",
+                "symbol_diagnostics_test_csv_path": "data/pipeline_artifacts/test_symbols.csv",
+                "symbol_diagnostics_aggregate_csv_path": "data/pipeline_artifacts/test_symbols_agg.csv",
+                "filter_diagnostics_csv_path": "data/pipeline_artifacts/test_filters.csv",
+                "runtime_analysis_csv_path": "data/pipeline_artifacts/test_runtime.csv",
+            },
+        )
+
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("## Runtime Comparison", report_text)
+        self.assertIn("Does added complexity justify runtime cost?", report_text)
+        self.assertIn("Runtime analysis CSV", report_text)

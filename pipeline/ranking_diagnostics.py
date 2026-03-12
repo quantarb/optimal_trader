@@ -51,6 +51,7 @@ def build_symbol_metadata_lookup(symbols: Iterable[str]) -> dict[str, dict[str, 
         "country",
         "sector",
         "industry",
+        "market_cap",
         "payload",
     )
     lookup: dict[str, dict[str, Any]] = {}
@@ -63,6 +64,7 @@ def build_symbol_metadata_lookup(symbols: Iterable[str]) -> dict[str, dict[str, 
             "exchange": str(row.exchange or "").strip() or "Unknown",
             "country": str(row.country or "").strip() or "Unknown",
             "company_name": str(row.company_name or "").strip(),
+            "market_cap": _round_float(row.market_cap) if row.market_cap not in (None, "") else 0.0,
             "is_etf": bool(is_etf),
             "instrument_type": "etf" if is_etf else "stock",
         }
