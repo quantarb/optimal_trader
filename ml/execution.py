@@ -197,10 +197,7 @@ def train_model_from_artifact_inputs(
     oracle_cluster_keys: Sequence[str] = (),
     progress_callback=None,
 ) -> ModelArtifact:
-    merged_params = merge_job_params(
-        dict(params or {}),
-        symbols=sorted(set(load_artifact_csv_frame(feature_artifact)["symbol"].astype(str).tolist())),
-    )
+    merged_params = merge_job_params(dict(params or {}))
     context = dict(merged_params.get(JOB_CONTEXT_KEY) or {})
     context["feature_artifact_id"] = int(feature_artifact.id)
     context["label_artifact_id"] = int(label_artifact.id)

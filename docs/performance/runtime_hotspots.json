@@ -1,0 +1,391 @@
+{
+  "engine": "cProfile",
+  "generated_at": "2026-03-11T23:57:12.961487+00:00",
+  "hotspots": [
+    {
+      "cumulative_seconds": 5.706821,
+      "line": 75,
+      "name": "run_scalability_benchmark_suite",
+      "ncalls": "1/1",
+      "path": "pipeline/scalability.py",
+      "percentage": 97.7981,
+      "total_seconds": 2.6e-05
+    },
+    {
+      "cumulative_seconds": 5.706791,
+      "line": 153,
+      "name": "run_scalability_benchmark",
+      "ncalls": "1/1",
+      "path": "pipeline/scalability.py",
+      "percentage": 97.7976,
+      "total_seconds": 5.1e-05
+    },
+    {
+      "cumulative_seconds": 5.589375,
+      "line": 436,
+      "name": "_run_benchmark_job",
+      "ncalls": "7/7",
+      "path": "pipeline/scalability.py",
+      "percentage": 95.7854,
+      "total_seconds": 2.8e-05
+    },
+    {
+      "cumulative_seconds": 5.585652,
+      "line": 426,
+      "name": "execute_pipeline_run",
+      "ncalls": "7/7",
+      "path": "pipeline/services.py",
+      "percentage": 95.7216,
+      "total_seconds": 0.000128
+    },
+    {
+      "cumulative_seconds": 5.57491,
+      "line": 459,
+      "name": "ensure_job",
+      "ncalls": "7/7",
+      "path": "pipeline/services.py",
+      "percentage": 95.5375,
+      "total_seconds": 0.000139
+    },
+    {
+      "cumulative_seconds": 5.551193,
+      "line": 263,
+      "name": "_run_job_executor",
+      "ncalls": "7/7",
+      "path": "pipeline/services.py",
+      "percentage": 95.1311,
+      "total_seconds": 0.000812
+    },
+    {
+      "cumulative_seconds": 3.057957,
+      "line": 435,
+      "name": "execute_features",
+      "ncalls": "1/1",
+      "path": "pipeline/service_jobs_data.py",
+      "percentage": 52.4044,
+      "total_seconds": 0.000595
+    },
+    {
+      "cumulative_seconds": 2.841222,
+      "line": 18,
+      "name": "build_feature_panel_frame_for_symbols",
+      "ncalls": "1/1",
+      "path": "workflows/features.py",
+      "percentage": 48.6902,
+      "total_seconds": 0.000378
+    },
+    {
+      "cumulative_seconds": 2.522696,
+      "line": 567,
+      "name": "build_feature_panel_frame",
+      "ncalls": "1/1",
+      "path": "workflows/feature_runtime.py",
+      "percentage": 43.2316,
+      "total_seconds": 0.001978
+    },
+    {
+      "cumulative_seconds": 2.407443,
+      "line": 422,
+      "name": "build_symbol_feature_result",
+      "ncalls": "94/94",
+      "path": "workflows/feature_runtime.py",
+      "percentage": 41.2565,
+      "total_seconds": 0.002953
+    },
+    {
+      "cumulative_seconds": 2.03491,
+      "line": 275,
+      "name": "_add_price_features",
+      "ncalls": "94/94",
+      "path": "workflows/feature_runtime.py",
+      "percentage": 34.8724,
+      "total_seconds": 0.000978
+    },
+    {
+      "cumulative_seconds": 1.78523,
+      "line": 25,
+      "name": "build_price_technical_features",
+      "ncalls": "94/94",
+      "path": "features/feature_builders.py",
+      "percentage": 30.5936,
+      "total_seconds": 0.002114
+    },
+    {
+      "cumulative_seconds": 1.783115,
+      "line": 213,
+      "name": "build_price_technical_features",
+      "ncalls": "94/94",
+      "path": "domain/features/technical.py",
+      "percentage": 30.5573,
+      "total_seconds": 0.009374
+    },
+    {
+      "cumulative_seconds": 1.487829,
+      "line": 71,
+      "name": "compute_features_worldclass",
+      "ncalls": "94/94",
+      "path": "domain/features/technical.py",
+      "percentage": 25.497,
+      "total_seconds": 0.013839
+    },
+    {
+      "cumulative_seconds": 0.90209,
+      "line": 138,
+      "name": "write_frame_artifact",
+      "ncalls": "5/5",
+      "path": "pipeline/service_runtime.py",
+      "percentage": 15.4592,
+      "total_seconds": 9.3e-05
+    },
+    {
+      "cumulative_seconds": 0.793173,
+      "line": 62,
+      "name": "execute_build_strategy_dataset",
+      "ncalls": "1/1",
+      "path": "pipeline/service_jobs_strategy.py",
+      "percentage": 13.5926,
+      "total_seconds": 0.000346
+    },
+    {
+      "cumulative_seconds": 0.682931,
+      "line": 8,
+      "name": "load_adjusted_price_frames",
+      "ncalls": "2/2",
+      "path": "data/historical_prices.py",
+      "percentage": 11.7034,
+      "total_seconds": 0.021544
+    },
+    {
+      "cumulative_seconds": 0.607306,
+      "line": 288,
+      "name": "execute_labels",
+      "ncalls": "1/1",
+      "path": "pipeline/service_jobs_data.py",
+      "percentage": 10.4074,
+      "total_seconds": 6.1e-05
+    },
+    {
+      "cumulative_seconds": 0.601665,
+      "line": 133,
+      "name": "build_oracle_labels",
+      "ncalls": "1/1",
+      "path": "workflows/labels.py",
+      "percentage": 10.3108,
+      "total_seconds": 0.000222
+    },
+    {
+      "cumulative_seconds": 0.597206,
+      "line": 36,
+      "name": "build_trade_results",
+      "ncalls": "1/1",
+      "path": "workflows/labels.py",
+      "percentage": 10.2344,
+      "total_seconds": 0.050217
+    }
+  ],
+  "notes": [
+    "Fell back to cProfile because pyinstrument is not installed."
+  ],
+  "raw_output_path": "/Users/johnnylee/PycharmProjects/optimal_trader/docs/performance/runtime_profile_scalability_tier2.txt",
+  "stage_hotspots": [
+    {
+      "category": "label_generation",
+      "cpu_ratio": 0.904649,
+      "cpu_seconds": 0.544322,
+      "metadata": {
+        "symbols": 100
+      },
+      "name": "labels.generate",
+      "read_bytes": 0,
+      "rss_delta_mb": 5.9688,
+      "rss_end_mb": 402.2344,
+      "rss_start_mb": 396.2656,
+      "wall_seconds": 0.601694,
+      "workload_type": "per_symbol",
+      "write_bytes": 0
+    },
+    {
+      "category": "model_training",
+      "cpu_ratio": 1.864938,
+      "cpu_seconds": 0.937802,
+      "metadata": {
+        "algorithm": "random_forest_regressor",
+        "task_type": "regression"
+      },
+      "name": "model.fit",
+      "read_bytes": 0,
+      "rss_delta_mb": 79.0781,
+      "rss_end_mb": 533.0312,
+      "rss_start_mb": 453.9531,
+      "wall_seconds": 0.50286,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "serialization",
+      "cpu_ratio": 0.997821,
+      "cpu_seconds": 0.446349,
+      "metadata": {
+        "rows": 8191,
+        "storage_format": "csv"
+      },
+      "name": "strategy.serialize_dataset",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.0,
+      "rss_end_mb": 616.6406,
+      "rss_start_mb": 616.6406,
+      "wall_seconds": 0.447324,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "data_loading",
+      "cpu_ratio": 0.999972,
+      "cpu_seconds": 0.315636,
+      "metadata": {
+        "symbols_requested": 100
+      },
+      "name": "features.load_adjusted_prices",
+      "read_bytes": 0,
+      "rss_delta_mb": 1.8906,
+      "rss_end_mb": 404.3281,
+      "rss_start_mb": 402.4375,
+      "wall_seconds": 0.315645,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "serialization",
+      "cpu_ratio": 0.998553,
+      "cpu_seconds": 0.229998,
+      "metadata": {
+        "rows": 8191,
+        "storage_format": "csv"
+      },
+      "name": "model.serialize_predictions",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.4375,
+      "rss_end_mb": 570.0781,
+      "rss_start_mb": 569.6406,
+      "wall_seconds": 0.230331,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "serialization",
+      "cpu_ratio": 0.998861,
+      "cpu_seconds": 0.214879,
+      "metadata": {
+        "rows": 8191,
+        "storage_format": "csv"
+      },
+      "name": "features.serialize_artifact",
+      "read_bytes": 0,
+      "rss_delta_mb": 35.1406,
+      "rss_end_mb": 453.9531,
+      "rss_start_mb": 418.8125,
+      "wall_seconds": 0.215124,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "inference",
+      "cpu_ratio": 1.039954,
+      "cpu_seconds": 0.110794,
+      "metadata": {
+        "artifact_type": "REGRESSOR_PREDICTIONS"
+      },
+      "name": "model.score",
+      "read_bytes": 0,
+      "rss_delta_mb": 36.2969,
+      "rss_end_mb": 569.3281,
+      "rss_start_mb": 533.0312,
+      "wall_seconds": 0.106537,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "joins_merges",
+      "cpu_ratio": 1.00001,
+      "cpu_seconds": 0.094919,
+      "metadata": {
+        "extra_prediction_artifacts": 1
+      },
+      "name": "strategy.build_dataset",
+      "read_bytes": 0,
+      "rss_delta_mb": 23.3281,
+      "rss_end_mb": 593.4062,
+      "rss_start_mb": 570.0781,
+      "wall_seconds": 0.094918,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "data_loading",
+      "cpu_ratio": 0.999996,
+      "cpu_seconds": 0.069675,
+      "metadata": {},
+      "name": "backtest.load_inputs",
+      "read_bytes": 0,
+      "rss_delta_mb": 7.0781,
+      "rss_end_mb": 623.7188,
+      "rss_start_mb": 616.6406,
+      "wall_seconds": 0.069675,
+      "workload_type": "batched",
+      "write_bytes": 0
+    },
+    {
+      "category": "feature_generation",
+      "cpu_ratio": 0.999498,
+      "cpu_seconds": 0.030697,
+      "metadata": {
+        "rows": 87,
+        "symbol": "MS"
+      },
+      "name": "features.compute_symbol_panel",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.0,
+      "rss_end_mb": 406.4844,
+      "rss_start_mb": 406.4844,
+      "wall_seconds": 0.030712,
+      "workload_type": "per_symbol",
+      "write_bytes": 0
+    },
+    {
+      "category": "feature_generation",
+      "cpu_ratio": 0.999443,
+      "cpu_seconds": 0.03056,
+      "metadata": {
+        "rows": 87,
+        "symbol": "TMO"
+      },
+      "name": "features.compute_symbol_panel",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.0,
+      "rss_end_mb": 407.3281,
+      "rss_start_mb": 407.3281,
+      "wall_seconds": 0.030577,
+      "workload_type": "per_symbol",
+      "write_bytes": 0
+    },
+    {
+      "category": "feature_generation",
+      "cpu_ratio": 0.999268,
+      "cpu_seconds": 0.030443,
+      "metadata": {
+        "rows": 87,
+        "symbol": "NEE"
+      },
+      "name": "features.compute_symbol_panel",
+      "read_bytes": 0,
+      "rss_delta_mb": 0.1875,
+      "rss_end_mb": 407.3281,
+      "rss_start_mb": 407.1406,
+      "wall_seconds": 0.030465,
+      "workload_type": "per_symbol",
+      "write_bytes": 0
+    }
+  ],
+  "target": "scalability_tier2",
+  "total_seconds": 5.83531
+}

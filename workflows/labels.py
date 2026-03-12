@@ -197,20 +197,20 @@ def _load_adjusted_daily(
     if price_frames is not None:
         cached = price_frames.get(str(symbol_obj.symbol).strip().upper())
         if cached is not None:
-            return cached.copy()
+            return cached
     qs = (
         SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key="prices_div_adj")
         .order_by("record_date", "updated_at")
-        .only("payload", "record_date")
+        .values_list("payload", "record_date")
     )
     if start_date:
         qs = qs.filter(record_date__gte=pd.to_datetime(start_date).date())
     if end_date:
         qs = qs.filter(record_date__lte=pd.to_datetime(end_date).date())
     rows = []
-    for item in qs.iterator():
-        payload = item.payload if isinstance(item.payload, dict) else {}
-        dt = payload.get("date") or (item.record_date.isoformat() if item.record_date else None)
+    for payload_value, record_date in qs.iterator(chunk_size=5000):
+        payload = payload_value if isinstance(payload_value, dict) else {}
+        dt = payload.get("date") or (record_date.isoformat() if record_date else None)
         if not dt:
             continue
         rows.append(
@@ -231,4 +231,3 @@ def _load_adjusted_daily(
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["date"]).set_index("date").sort_index()
     return df[~df.index.duplicated(keep="last")]
-
