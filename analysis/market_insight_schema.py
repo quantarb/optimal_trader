@@ -10,6 +10,8 @@ from .market_state import percentile_rank
 
 
 PRIMARY_ANALOG_HORIZON_DAYS = 60
+DEFAULT_FAMILY_LIMIT = 8
+NEUTRAL_PERCENTILE = 0.5
 
 STATE_METADATA_FIELDS = {
     "date",
@@ -263,11 +265,68 @@ def _safe_float(value: Any) -> float | None:
         if value is None or value == "":
             return None
         parsed = float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
     if pd.isna(parsed):
         return None
     return float(parsed)
+
+
+def _feature_baseline_stats(
+    state_frame: pd.DataFrame,
+    *,
+    feature_name: str,
+    numeric_value: float | None,
+) -> tuple[float | None, float | None]:
+    if numeric_value is None or feature_name not in state_frame.columns:
+        return None, None
+    baseline = pd.to_numeric(state_frame[feature_name], errors="coerce").dropna()
+    if baseline.empty:
+        return None, None
+    percentile = percentile_rank(baseline, numeric_value)
+    std = float(baseline.std(ddof=0) or 0.0)
+    if std <= 0.0:
+        return percentile, None
+    return percentile, (numeric_value - float(baseline.mean())) / std
+
+
+def _feature_priority_score(percentile: float | None, zscore: float | None) -> float:
+    if zscore is not None:
+        return abs(float(zscore))
+    return abs((float(percentile or NEUTRAL_PERCENTILE) - NEUTRAL_PERCENTILE) * 2.0)
+
+
+def _canonical_feature_item(
+    *,
+    family_name: str,
+    definition: FeatureDefinition,
+    raw_value: Any,
+    state_frame: pd.DataFrame,
+) -> tuple[float, CanonicalFeatureValue] | None:
+    if definition.internal_name in STATE_METADATA_FIELDS:
+        return None
+    numeric_value = _safe_float(raw_value)
+    percentile, zscore = _feature_baseline_stats(
+        state_frame,
+        feature_name=definition.internal_name,
+        numeric_value=numeric_value,
+    )
+    item = CanonicalFeatureValue(
+        internal_name=definition.internal_name,
+        display_name=definition.display_name,
+        family=family_name,
+        raw_value=raw_value,
+        rendered_value=format_feature_value(definition.internal_name, raw_value),
+        format=definition.format,
+        decimals=definition.decimals,
+        percentile=percentile,
+        zscore=zscore,
+    )
+    return _feature_priority_score(percentile, zscore), item
+
+
+def _include_family(include_set: set[str], family_name: str) -> bool:
+    return not include_set or family_name in include_set
 
 
 def _row_canonical_features(
@@ -276,67 +335,47 @@ def _row_canonical_features(
     *,
     feature_family_map: Mapping[str, Sequence[str]] | None = None,
     include_families: Sequence[str] | None = None,
-    limit_per_family: int = 8,
+    limit_per_family: int = DEFAULT_FAMILY_LIMIT,
 ) -> dict[str, list[CanonicalFeatureValue]]:
     family_items = group_features_by_family(dict(row), feature_family_map=feature_family_map)
     include_set = {str(value) for value in list(include_families or []) if str(value).strip()}
-    current_series = pd.Series(dict(row))
     output: dict[str, list[CanonicalFeatureValue]] = {}
     for family_name, rows in family_items.items():
-        if include_set and str(family_name) not in include_set:
+        if not _include_family(include_set, str(family_name)):
             continue
-        scoped: list[tuple[float, CanonicalFeatureValue]] = []
-        for definition, raw_value in rows:
-            if definition.internal_name in STATE_METADATA_FIELDS:
-                continue
-            numeric_value = _safe_float(raw_value)
-            percentile = None
-            zscore = None
-            if numeric_value is not None and definition.internal_name in state_frame.columns:
-                baseline = pd.to_numeric(state_frame[definition.internal_name], errors="coerce").dropna()
-                if not baseline.empty:
-                    percentile = percentile_rank(baseline, numeric_value)
-                    std = float(baseline.std(ddof=0) or 0.0)
-                    if std > 0.0:
-                        zscore = (numeric_value - float(baseline.mean())) / std
-            item = CanonicalFeatureValue(
-                internal_name=definition.internal_name,
-                display_name=definition.display_name,
-                family=family_name,
+        scoped = [
+            ranked_item
+            for definition, raw_value in rows
+            if (ranked_item := _canonical_feature_item(
+                family_name=str(family_name),
+                definition=definition,
                 raw_value=raw_value,
-                rendered_value=format_feature_value(definition.internal_name, raw_value),
-                format=definition.format,
-                decimals=definition.decimals,
-                percentile=percentile,
-                zscore=zscore,
-            )
-            score = abs(float(zscore or 0.0)) if zscore is not None else abs((float(percentile or 0.5) - 0.5) * 2.0)
-            scoped.append((score, item))
+                state_frame=state_frame,
+            )) is not None
+        ]
         scoped.sort(key=lambda pair: (-pair[0], pair[1].display_name))
         output[str(family_name)] = [item for _, item in scoped[: max(int(limit_per_family), 1)]]
     return output
 
 
 def _outcome_summary_from_payload(payload: Mapping[str, Any]) -> AnalogOutcomeSummary:
-    horizon_rows: list[OutcomeHorizonSummary] = []
-    for row in list(payload.get("horizon_rows") or []):
-        horizon_rows.append(
-            OutcomeHorizonSummary(
-                horizon_days=int(row.get("horizon_days") or 0),
-                median_return=_safe_float(row.get("median_return")),
-                mean_return=_safe_float(row.get("mean_return")),
-                win_rate=_safe_float(row.get("win_rate")),
-                worst_case=_safe_float(row.get("worst_case")),
-                best_case=_safe_float(row.get("best_case")),
-                tail_risk=_safe_float(row.get("tail_risk")),
-                avg_drawdown=_safe_float(row.get("avg_drawdown")),
-                avg_volatility=_safe_float(row.get("avg_volatility")),
-                sample_size=int(row.get("sample_size") or 0),
-            )
+    horizon_rows = [
+        OutcomeHorizonSummary(
+            horizon_days=int(row.get("horizon_days") or 0),
+            median_return=_safe_float(row.get("median_return")),
+            mean_return=_safe_float(row.get("mean_return")),
+            win_rate=_safe_float(row.get("win_rate")),
+            worst_case=_safe_float(row.get("worst_case")),
+            best_case=_safe_float(row.get("best_case")),
+            tail_risk=_safe_float(row.get("tail_risk")),
+            avg_drawdown=_safe_float(row.get("avg_drawdown")),
+            avg_volatility=_safe_float(row.get("avg_volatility")),
+            sample_size=int(row.get("sample_size") or 0),
         )
-    primary_horizon = int(payload.get("primary_horizon_days") or PRIMARY_ANALOG_HORIZON_DAYS)
+        for row in list(payload.get("horizon_rows") or [])
+    ]
     return AnalogOutcomeSummary(
-        primary_horizon_days=primary_horizon,
+        primary_horizon_days=int(payload.get("primary_horizon_days") or PRIMARY_ANALOG_HORIZON_DAYS),
         median_return=_safe_float(payload.get("median_return")),
         mean_return=_safe_float(payload.get("mean_return")),
         win_rate=_safe_float(payload.get("win_rate")),
@@ -351,32 +390,34 @@ def _outcome_summary_from_payload(payload: Mapping[str, Any]) -> AnalogOutcomeSu
 
 
 def _analogs_from_rows(rows: Sequence[Mapping[str, Any]]) -> list[HistoricalAnalog]:
-    out: list[HistoricalAnalog] = []
-    for row in list(rows or []):
-        out.append(
-            HistoricalAnalog(
-                symbol=str(row.get("symbol") or ""),
-                date=str(row.get("date") or ""),
-                similarity_score=float(row.get("similarity_score") or 0.0),
-                match_type=str(row.get("match_type") or ""),
-                returns_by_horizon={
-                    key: _safe_float(row.get(key))
-                    for key in ("return_5d", "return_20d", "return_60d", "return_90d", "return_180d")
-                },
-                drawdowns_by_horizon={
-                    key: _safe_float(row.get(key))
-                    for key in ("drawdown_20d", "drawdown_60d")
-                },
-                volatility_by_horizon={
-                    key: _safe_float(row.get(key))
-                    for key in ("volatility_20d", "volatility_60d")
-                },
-                explanation_tags=[str((item or {}).get("explanation") or "") for item in list(row.get("explanations") or []) if str((item or {}).get("explanation") or "").strip()],
-                cluster_id=str(row.get("cluster_id") or ""),
-                cluster_description=str(row.get("cluster_description") or ""),
-            )
+    return [
+        HistoricalAnalog(
+            symbol=str(row.get("symbol") or ""),
+            date=str(row.get("date") or ""),
+            similarity_score=float(row.get("similarity_score") or 0.0),
+            match_type=str(row.get("match_type") or ""),
+            returns_by_horizon={
+                key: _safe_float(row.get(key))
+                for key in ("return_5d", "return_20d", "return_60d", "return_90d", "return_180d")
+            },
+            drawdowns_by_horizon={
+                key: _safe_float(row.get(key))
+                for key in ("drawdown_20d", "drawdown_60d")
+            },
+            volatility_by_horizon={
+                key: _safe_float(row.get(key))
+                for key in ("volatility_20d", "volatility_60d")
+            },
+            explanation_tags=[
+                str((item or {}).get("explanation") or "")
+                for item in list(row.get("explanations") or [])
+                if str((item or {}).get("explanation") or "").strip()
+            ],
+            cluster_id=str(row.get("cluster_id") or ""),
+            cluster_description=str(row.get("cluster_description") or ""),
         )
-    return out
+        for row in list(rows or [])
+    ]
 
 
 def _model_scores_from_row(
@@ -420,6 +461,146 @@ def _model_scores_from_row(
     return rows
 
 
+def _mean_similarity(analog_rows: list[Mapping[str, Any]]) -> float:
+    if not analog_rows:
+        return 0.0
+    return sum(float(analog_row.get("similarity_score") or 0.0) for analog_row in analog_rows) / float(len(analog_rows))
+
+
+def _familiarity_signals(
+    *,
+    row: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    analog_rows: list[Mapping[str, Any]],
+) -> FamiliaritySignals:
+    return FamiliaritySignals(
+        market_familiarity_score=_safe_float(opportunity.get("market_familiarity_score")),
+        market_familiarity_label=str(opportunity.get("market_familiarity_label") or ""),
+        confidence_score=_safe_float(opportunity.get("confidence_score")),
+        confidence_label=str(opportunity.get("confidence_label") or ""),
+        ae_familiarity_raw=_safe_float(row.get("ae_familiarity")),
+        analog_density=float(len(analog_rows)),
+        mean_similarity=_mean_similarity(analog_rows),
+    )
+
+
+def _cluster_context(
+    *,
+    current_cluster: Mapping[str, Any] | None,
+    nearest_clusters: Sequence[Mapping[str, Any]],
+) -> ClusterContext:
+    cluster_payload = dict(current_cluster or {})
+    return ClusterContext(
+        cluster_id=str(cluster_payload.get("cluster_id") or ""),
+        description=str(cluster_payload.get("description") or ""),
+        similarity_score_pct=_safe_float(cluster_payload.get("similarity_score_pct")),
+        feature_signature=[str(value) for value in list(cluster_payload.get("feature_signature") or []) if str(value).strip()],
+        outcome_statistics=dict(cluster_payload.get("outcome_statistics") or {}),
+        example_historical_dates=[dict(item) for item in list(cluster_payload.get("example_historical_dates") or [])],
+        nearest_clusters=[dict(item) for item in list(nearest_clusters or [])],
+    )
+
+
+def _feature_family_summaries(
+    canonical_features: dict[str, list[CanonicalFeatureValue]],
+) -> dict[str, list[str]]:
+    return {
+        family: [f"{feature.display_name}: {feature.rendered_value}" for feature in rows]
+        for family, rows in canonical_features.items()
+    }
+
+
+def _market_analog_components(
+    *,
+    same_symbol_analogs: Sequence[Mapping[str, Any]],
+    cross_symbol_analogs: Sequence[Mapping[str, Any]],
+    analog_outcome_summary: Mapping[str, Any],
+    same_symbol_outcome_summary: Mapping[str, Any],
+    cross_symbol_outcome_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "same_symbol_analogs": _analogs_from_rows(same_symbol_analogs),
+        "cross_symbol_analogs": _analogs_from_rows(cross_symbol_analogs),
+        "analog_outcome_summary": _outcome_summary_from_payload(analog_outcome_summary),
+        "same_symbol_outcome_summary": _outcome_summary_from_payload(same_symbol_outcome_summary),
+        "cross_symbol_outcome_summary": _outcome_summary_from_payload(cross_symbol_outcome_summary),
+    }
+
+
+def _market_scoring_components(
+    *,
+    row: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    state_frame: pd.DataFrame,
+    analog_rows: list[Mapping[str, Any]],
+    current_cluster: Mapping[str, Any] | None,
+    nearest_clusters: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "model_scores": _model_scores_from_row(row, opportunity, state_frame),
+        "familiarity_signals": _familiarity_signals(
+            row=row,
+            opportunity=opportunity,
+            analog_rows=analog_rows,
+        ),
+        "cluster_context": _cluster_context(
+            current_cluster=current_cluster,
+            nearest_clusters=nearest_clusters,
+        ),
+    }
+
+
+def _market_insight_components(
+    *,
+    symbol: str,
+    as_of_date: str,
+    row: Mapping[str, Any],
+    state_frame: pd.DataFrame,
+    feature_family_map: Mapping[str, Sequence[str]] | None,
+    same_symbol_analogs: Sequence[Mapping[str, Any]],
+    cross_symbol_analogs: Sequence[Mapping[str, Any]],
+    analog_outcome_summary: Mapping[str, Any],
+    same_symbol_outcome_summary: Mapping[str, Any],
+    cross_symbol_outcome_summary: Mapping[str, Any],
+    opportunity: Mapping[str, Any],
+    current_cluster: Mapping[str, Any] | None = None,
+    nearest_clusters: Sequence[Mapping[str, Any]] = (),
+    optional_notes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    canonical_features = _row_canonical_features(
+        row=row,
+        state_frame=state_frame,
+        feature_family_map=feature_family_map,
+    )
+    analog_rows = list(same_symbol_analogs or []) + list(cross_symbol_analogs or [])
+    return {
+        "symbol": str(symbol).upper(),
+        "as_of_date": str(as_of_date),
+        "canonical_features": canonical_features,
+        "feature_family_summaries": _feature_family_summaries(canonical_features),
+        **_market_analog_components(
+            same_symbol_analogs=same_symbol_analogs,
+            cross_symbol_analogs=cross_symbol_analogs,
+            analog_outcome_summary=analog_outcome_summary,
+            same_symbol_outcome_summary=same_symbol_outcome_summary,
+            cross_symbol_outcome_summary=cross_symbol_outcome_summary,
+        ),
+        **_market_scoring_components(
+            row=row,
+            opportunity=opportunity,
+            state_frame=state_frame,
+            analog_rows=analog_rows,
+            current_cluster=current_cluster,
+            nearest_clusters=nearest_clusters,
+        ),
+        "optional_notes": dict(optional_notes or {}),
+    }
+
+
+def _compose_market_insight(**components: Any) -> MarketInsightInput:
+    return MarketInsightInput(**components)
+
+
 def build_market_insight_input(
     *,
     symbol: str,
@@ -437,51 +618,66 @@ def build_market_insight_input(
     nearest_clusters: Sequence[Mapping[str, Any]] = (),
     optional_notes: Mapping[str, Any] | None = None,
 ) -> MarketInsightInput:
-    canonical_features = _row_canonical_features(
-        row=row,
-        state_frame=state_frame,
-        feature_family_map=feature_family_map,
+    return _compose_market_insight(
+        **_market_insight_components(
+            symbol=symbol,
+            as_of_date=as_of_date,
+            row=row,
+            state_frame=state_frame,
+            feature_family_map=feature_family_map,
+            same_symbol_analogs=same_symbol_analogs,
+            cross_symbol_analogs=cross_symbol_analogs,
+            analog_outcome_summary=analog_outcome_summary,
+            same_symbol_outcome_summary=same_symbol_outcome_summary,
+            cross_symbol_outcome_summary=cross_symbol_outcome_summary,
+            opportunity=opportunity,
+            current_cluster=current_cluster,
+            nearest_clusters=nearest_clusters,
+            optional_notes=optional_notes,
+        )
     )
-    mean_similarity = 0.0
-    analog_rows = list(same_symbol_analogs or []) + list(cross_symbol_analogs or [])
-    if analog_rows:
-        mean_similarity = sum(float(row.get("similarity_score") or 0.0) for row in analog_rows) / float(len(analog_rows))
-    familiarity = FamiliaritySignals(
-        market_familiarity_score=_safe_float(opportunity.get("market_familiarity_score")),
-        market_familiarity_label=str(opportunity.get("market_familiarity_label") or ""),
-        confidence_score=_safe_float(opportunity.get("confidence_score")),
-        confidence_label=str(opportunity.get("confidence_label") or ""),
-        ae_familiarity_raw=_safe_float(row.get("ae_familiarity")),
-        analog_density=float(len(analog_rows)),
-        mean_similarity=mean_similarity,
-    )
-    cluster_context = ClusterContext(
-        cluster_id=str((current_cluster or {}).get("cluster_id") or ""),
-        description=str((current_cluster or {}).get("description") or ""),
-        similarity_score_pct=_safe_float((current_cluster or {}).get("similarity_score_pct")),
-        feature_signature=[str(value) for value in list((current_cluster or {}).get("feature_signature") or []) if str(value).strip()],
-        outcome_statistics=dict((current_cluster or {}).get("outcome_statistics") or {}),
-        example_historical_dates=[dict(item) for item in list((current_cluster or {}).get("example_historical_dates") or [])],
-        nearest_clusters=[dict(item) for item in list(nearest_clusters or [])],
-    )
-    return MarketInsightInput(
-        symbol=str(symbol).upper(),
-        as_of_date=str(as_of_date),
-        canonical_features=canonical_features,
-        feature_family_summaries={
-            family: [f"{feature.display_name}: {feature.rendered_value}" for feature in rows]
-            for family, rows in canonical_features.items()
-        },
-        same_symbol_analogs=_analogs_from_rows(same_symbol_analogs),
-        cross_symbol_analogs=_analogs_from_rows(cross_symbol_analogs),
-        analog_outcome_summary=_outcome_summary_from_payload(analog_outcome_summary),
-        same_symbol_outcome_summary=_outcome_summary_from_payload(same_symbol_outcome_summary),
-        cross_symbol_outcome_summary=_outcome_summary_from_payload(cross_symbol_outcome_summary),
-        model_scores=_model_scores_from_row(row, opportunity, state_frame),
-        familiarity_signals=familiarity,
-        cluster_context=cluster_context,
-        optional_notes=dict(optional_notes or {}),
-    )
+
+
+def _portfolio_holdings(rows: Sequence[Mapping[str, Any]]) -> list[PortfolioHoldingInsightInput]:
+    return [
+        PortfolioHoldingInsightInput(
+            symbol=str(row.get("symbol") or ""),
+            opportunity_score=_safe_float(row.get("opportunity_score")),
+            confidence_score=_safe_float(row.get("confidence_score")),
+            familiarity_score=_safe_float(row.get("market_familiarity_score")),
+            risk_indicator=str(row.get("risk_indicator") or ""),
+            cluster_id=str(row.get("cluster_id") or ""),
+            cluster_description=str(row.get("cluster_description") or ""),
+        )
+        for row in list(rows or [])
+    ]
+
+
+def _portfolio_insight_components(
+    *,
+    symbols: Sequence[str],
+    as_of_date: str,
+    rows: Sequence[Mapping[str, Any]],
+    cluster_exposure_rows: Sequence[Mapping[str, Any]],
+    portfolio_score: float,
+    regime_similarity_score: float,
+    risk_concentration_score: float,
+    optional_notes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "symbols": [str(value).upper() for value in list(symbols or []) if str(value).strip()],
+        "as_of_date": str(as_of_date),
+        "holdings": _portfolio_holdings(rows),
+        "cluster_exposure_rows": [dict(item) for item in list(cluster_exposure_rows or [])],
+        "portfolio_score": float(portfolio_score or 0.0),
+        "regime_similarity_score": float(regime_similarity_score or 0.0),
+        "risk_concentration_score": float(risk_concentration_score or 0.0),
+        "optional_notes": dict(optional_notes or {}),
+    }
+
+
+def _compose_portfolio_insight(**components: Any) -> PortfolioInsightInput:
+    return PortfolioInsightInput(**components)
 
 
 def build_portfolio_insight_input(
@@ -495,25 +691,15 @@ def build_portfolio_insight_input(
     risk_concentration_score: float,
     optional_notes: Mapping[str, Any] | None = None,
 ) -> PortfolioInsightInput:
-    holdings = [
-        PortfolioHoldingInsightInput(
-            symbol=str(row.get("symbol") or ""),
-            opportunity_score=_safe_float(row.get("opportunity_score")),
-            confidence_score=_safe_float(row.get("confidence_score")),
-            familiarity_score=_safe_float(row.get("market_familiarity_score")),
-            risk_indicator=str(row.get("risk_indicator") or ""),
-            cluster_id=str(row.get("cluster_id") or ""),
-            cluster_description=str(row.get("cluster_description") or ""),
+    return _compose_portfolio_insight(
+        **_portfolio_insight_components(
+            symbols=symbols,
+            as_of_date=as_of_date,
+            rows=rows,
+            cluster_exposure_rows=cluster_exposure_rows,
+            portfolio_score=portfolio_score,
+            regime_similarity_score=regime_similarity_score,
+            risk_concentration_score=risk_concentration_score,
+            optional_notes=optional_notes,
         )
-        for row in list(rows or [])
-    ]
-    return PortfolioInsightInput(
-        symbols=[str(value).upper() for value in list(symbols or []) if str(value).strip()],
-        as_of_date=str(as_of_date),
-        holdings=holdings,
-        cluster_exposure_rows=[dict(item) for item in list(cluster_exposure_rows or [])],
-        portfolio_score=float(portfolio_score or 0.0),
-        regime_similarity_score=float(regime_similarity_score or 0.0),
-        risk_concentration_score=float(risk_concentration_score or 0.0),
-        optional_notes=dict(optional_notes or {}),
     )

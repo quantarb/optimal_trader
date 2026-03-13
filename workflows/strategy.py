@@ -11,9 +11,16 @@ from domain.models.datasets import filter_frame_by_date
 from infra.repositories import DjangoArtifactRepository
 from ml.execution import _dedupe_label_frame, build_feature_frame_from_artifacts, load_artifact_csv_frame
 from pipeline.contracts import PREDICTION_ARTIFACT_TYPES
-from pipeline.factor_signals import build_multi_factor_score_frame
 from pipeline.service_runtime import PipelineExecutionError, read_frame_artifact
 from pipeline.strategy_definitions import ResolvedStrategyDefinition, apply_strategy_definition, resolve_strategy_definition
+from .strategy_signal_support import (
+    _collect_prediction_components,
+    _compute_strategy_scores,
+)
+ACTIVE_WEIGHT_EPSILON = 1e-12
+BPS_TO_DECIMAL = 10000.0
+TRADING_DAYS_PER_YEAR = 252.0
+SUMMARY_DECIMALS = 8
 
 
 @dataclass(frozen=True)
@@ -90,12 +97,6 @@ def _numeric_series(frame: pd.DataFrame, column: str, *, default: float) -> pd.S
     return pd.Series(default, index=frame.index, dtype=float)
 
 
-def _mean_or_default(series_list: list[pd.Series], *, default: pd.Series) -> pd.Series:
-    if series_list:
-        return pd.concat(series_list, axis=1).mean(axis=1, skipna=True)
-    return default
-
-
 def _merge_label_columns(feature_df: pd.DataFrame, label_df: pd.DataFrame) -> pd.DataFrame:
     label_df = _dedupe_label_frame(label_df)
     merge_cols = [
@@ -106,135 +107,6 @@ def _merge_label_columns(feature_df: pd.DataFrame, label_df: pd.DataFrame) -> pd
     if "date" not in merge_cols or "symbol" not in merge_cols:
         return feature_df
     return feature_df.merge(label_df[merge_cols], on=["date", "symbol"], how="left")
-
-
-def _collect_prediction_components(feature_df: pd.DataFrame, panel_meta: dict[str, Any]) -> pd.DataFrame:
-    out = feature_df.copy()
-    components: dict[str, list[pd.Series]] = {"prob_buy": [], "ranking": [], "ae_familiarity": []}
-    for source in list(panel_meta.get("extra_panel_sources") or []):
-        artifact_type = str(source.get("artifact_type") or "").strip().upper()
-        columns = list(source.get("columns") or [])
-        for column in columns:
-            numeric = pd.to_numeric(out.get(column), errors="coerce")
-            if artifact_type == "CLASSIFIER_PREDICTIONS" and column.endswith("__prediction_score"):
-                components["prob_buy"].append(numeric)
-            elif artifact_type == "REGRESSOR_PREDICTIONS" and (
-                column.endswith("__prediction") or column.endswith("__prediction_score")
-            ):
-                components["ranking"].append(numeric)
-            elif artifact_type == "AUTOENCODER_SCORES":
-                if column.endswith("__prediction_score"):
-                    components["ae_familiarity"].append(numeric)
-                elif column.endswith("__prediction"):
-                    out["ae_reconstruction_error"] = numeric
-            elif artifact_type == "MTL_PREDICTIONS":
-                if column.endswith("__mtl_prob_buy") or column.endswith("__prediction_score"):
-                    components["prob_buy"].append(numeric)
-                elif column.endswith("__mtl_trade_return") or column.endswith("__prediction"):
-                    components["ranking"].append(numeric)
-                elif column.endswith("__mtl_cluster_confidence"):
-                    components["ae_familiarity"].append(numeric)
-    out["prob_buy"] = _mean_or_default(components["prob_buy"], default=pd.Series(1.0, index=out.index, dtype=float))
-    out["ranking"] = _mean_or_default(components["ranking"], default=pd.to_numeric(out.get("ret_1"), errors="coerce"))
-    out["ae_familiarity"] = _mean_or_default(
-        components["ae_familiarity"],
-        default=pd.Series(1.0, index=out.index, dtype=float),
-    )
-    out["prob_buy"] = pd.to_numeric(out["prob_buy"], errors="coerce").fillna(0.0)
-    out["ranking"] = pd.to_numeric(out["ranking"], errors="coerce").fillna(0.0)
-    out["ae_familiarity"] = pd.to_numeric(out["ae_familiarity"], errors="coerce").fillna(1.0)
-    if "ae_reconstruction_error" in out.columns:
-        out["ae_reconstruction_error"] = pd.to_numeric(out["ae_reconstruction_error"], errors="coerce")
-    return out
-
-
-def _compute_strategy_scores(
-    feature_df: pd.DataFrame,
-    *,
-    strategy_type: str,
-    strategy_config: dict[str, Any],
-) -> tuple[pd.Series, pd.Series, dict[str, Any]]:
-    signal_combination = str(strategy_config.get("signal_combination") or "multiply").strip().lower() or "multiply"
-    combined_score_expr = str(strategy_config.get("combined_score_expr") or "").strip()
-    action_source_field = str(strategy_config.get("action_source_field") or "").strip()
-    factor_components = list(
-        strategy_config.get("factor_components")
-        or strategy_config.get("cross_sectional_factor_components")
-        or []
-    )
-
-    prob_buy = _numeric_series(feature_df, "prob_buy", default=0.0)
-    ranking = _numeric_series(feature_df, "ranking", default=0.0)
-    ae_familiarity = _numeric_series(feature_df, "ae_familiarity", default=1.0)
-
-    if factor_components:
-        factor_frame, factor_meta = build_multi_factor_score_frame(
-            feature_df,
-            factor_components=factor_components,
-            output_col="factor_model_score",
-        )
-        for column in list(factor_meta.get("component_columns") or []) + [str(factor_meta.get("output_col") or "factor_model_score")]:
-            if column in factor_frame.columns:
-                feature_df[column] = pd.to_numeric(factor_frame[column], errors="coerce")
-        combined_score = _numeric_series(feature_df, "factor_model_score", default=0.0)
-        return combined_score, combined_score, {
-            "signal_combination": "factor_components",
-            "score_expression_used": "factor_components",
-            "score_source_field": "factor_model_score",
-            "factor_components": list(factor_meta.get("components") or []),
-        }
-
-    if str(strategy_type) == "rl_policy_v1" or signal_combination == "direct":
-        direct_field = action_source_field or "signal_score"
-        if direct_field in feature_df.columns:
-            direct_score = _numeric_series(feature_df, direct_field, default=0.0)
-            return direct_score, direct_score, {
-                "signal_combination": "direct",
-                "score_expression_used": direct_field,
-                "score_source_field": direct_field,
-            }
-        if combined_score_expr:
-            try:
-                direct_score = pd.to_numeric(feature_df.eval(combined_score_expr, engine="python"), errors="coerce").fillna(0.0)
-                return direct_score, direct_score, {
-                    "signal_combination": "direct",
-                    "score_expression_used": combined_score_expr,
-                    "score_source_field": "",
-                }
-            except Exception:
-                pass
-        if direct_field not in feature_df.columns:
-            direct_field = "ranking" if "ranking" in feature_df.columns else "prob_buy"
-        direct_score = _numeric_series(feature_df, direct_field, default=0.0)
-        return direct_score, direct_score, {
-            "signal_combination": "direct",
-            "score_expression_used": direct_field,
-            "score_source_field": direct_field,
-        }
-
-    if combined_score_expr:
-        try:
-            combined_score = pd.to_numeric(feature_df.eval(combined_score_expr, engine="python"), errors="coerce").fillna(0.0)
-            return combined_score, combined_score, {
-                "signal_combination": signal_combination,
-                "score_expression_used": combined_score_expr,
-                "score_source_field": "",
-            }
-        except Exception:
-            pass
-
-    if signal_combination == "mean":
-        combined_score = pd.concat([prob_buy, ranking, ae_familiarity], axis=1).mean(axis=1, skipna=True).fillna(0.0)
-    else:
-        combined_score = (prob_buy * ranking * ae_familiarity).fillna(0.0)
-        signal_combination = "multiply"
-    return combined_score, combined_score, {
-        "signal_combination": signal_combination,
-        "score_expression_used": combined_score_expr or signal_combination,
-        "score_source_field": "",
-    }
-
-
 def _selected_position_summaries(feature_df: pd.DataFrame) -> tuple[dict[str, int], dict[str, float]]:
     selected_rows = feature_df[feature_df["strategy_signal"] != 0].copy()
     if selected_rows.empty or "date" not in selected_rows.columns:
@@ -246,20 +118,30 @@ def _selected_position_summaries(feature_df: pd.DataFrame) -> tuple[dict[str, in
     return daily_counts, daily_gross
 
 
-def build_strategy_dataset_frame(
+def _strategy_source_artifacts(
+    repo: DjangoArtifactRepository,
     *,
     spec: StrategyDatasetSpec,
-    features_artifact,
-    artifact_repo: DjangoArtifactRepository | None = None,
-    performance_tracer=None,
-) -> StrategyDatasetWorkflowResult:
-    """Build the strategy dataset frame from features, predictions, and optional labels."""
-
-    repo = artifact_repo or DjangoArtifactRepository()
+) -> tuple[list[Any], int, Any | None]:
     extra_prediction_artifacts = repo.list_pipeline_artifacts(
         spec.prediction_artifact_ids,
         artifact_types=tuple(sorted(PREDICTION_ARTIFACT_TYPES)),
     )
+    source_label_artifact_id = int(spec.label_artifact_id or 0)
+    label_artifact = None
+    if spec.label_artifact_id is not None:
+        label_artifact = repo.get_pipeline_artifact(spec.label_artifact_id, artifact_type="LABELS")
+    return extra_prediction_artifacts, source_label_artifact_id, label_artifact
+
+
+def _strategy_feature_frame(
+    *,
+    spec: StrategyDatasetSpec,
+    features_artifact,
+    extra_prediction_artifacts: list[Any],
+    label_artifact,
+    performance_tracer=None,
+) -> tuple[pd.DataFrame, list[str], dict[str, Any]]:
     with _stage(
         performance_tracer,
         "strategy.build_dataset",
@@ -272,13 +154,18 @@ def build_strategy_dataset_frame(
             extra_panel_artifacts=extra_prediction_artifacts,
         )
     feature_df = filter_frame_by_date(feature_df, start_date=spec.start_date, end_date=spec.end_date)
-    source_label_artifact_id = int(spec.label_artifact_id or 0)
-    if spec.label_artifact_id is not None:
-        label_artifact = repo.get_pipeline_artifact(spec.label_artifact_id, artifact_type="LABELS")
-        if label_artifact is not None:
-            feature_df = _merge_label_columns(feature_df, load_artifact_csv_frame(label_artifact))
+    if label_artifact is not None:
+        feature_df = _merge_label_columns(feature_df, load_artifact_csv_frame(label_artifact))
+    return feature_df, list(feature_cols), panel_meta
+
+
+def _apply_strategy_scores_and_definition(
+    feature_df: pd.DataFrame,
+    *,
+    strategy_definition: ResolvedStrategyDefinition,
+    panel_meta: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
     feature_df = _collect_prediction_components(feature_df, panel_meta)
-    strategy_definition = resolve_strategy_definition(spec.strategy_definition_id)
     combined_score, strategy_score, score_meta = _compute_strategy_scores(
         feature_df,
         strategy_type=str(strategy_definition.strategy_type),
@@ -287,6 +174,36 @@ def build_strategy_dataset_frame(
     feature_df["combined_score"] = combined_score
     feature_df["strategy_score"] = strategy_score
     feature_df, strategy_meta = apply_strategy_definition(feature_df, strategy_definition)
+    return feature_df, score_meta, strategy_meta
+
+
+def build_strategy_dataset_frame(
+    *,
+    spec: StrategyDatasetSpec,
+    features_artifact,
+    artifact_repo: DjangoArtifactRepository | None = None,
+    performance_tracer=None,
+) -> StrategyDatasetWorkflowResult:
+    """Build the strategy dataset frame from features, predictions, and optional labels."""
+
+    repo = artifact_repo or DjangoArtifactRepository()
+    extra_prediction_artifacts, source_label_artifact_id, label_artifact = _strategy_source_artifacts(
+        repo,
+        spec=spec,
+    )
+    feature_df, feature_cols, panel_meta = _strategy_feature_frame(
+        spec=spec,
+        features_artifact=features_artifact,
+        extra_prediction_artifacts=extra_prediction_artifacts,
+        label_artifact=label_artifact,
+        performance_tracer=performance_tracer,
+    )
+    strategy_definition = resolve_strategy_definition(spec.strategy_definition_id)
+    feature_df, score_meta, strategy_meta = _apply_strategy_scores_and_definition(
+        feature_df,
+        strategy_definition=strategy_definition,
+        panel_meta=panel_meta,
+    )
     output_frame = feature_df.sort_values(["symbol", "date"]).reset_index(drop=True)
     daily_counts, daily_gross = _selected_position_summaries(output_frame)
     return StrategyDatasetWorkflowResult(
@@ -414,9 +331,9 @@ def _compute_backtest(matrices: BacktestMatrices, *, spec: StrategyBacktestSpec,
         turnover = effective_weights.diff().abs().fillna(effective_weights.abs()).sum(axis=1)
         if spec.turnover_half_l1:
             turnover = turnover * 0.5
-        turnover_cost = turnover * ((float(spec.fee_bps) + float(spec.effective_slippage_bps())) / 10000.0)
+        turnover_cost = turnover * ((float(spec.fee_bps) + float(spec.effective_slippage_bps())) / BPS_TO_DECIMAL)
         short_borrow_cost = effective_weights.clip(upper=0.0).abs().sum(axis=1) * (
-            float(spec.short_borrow_bps_annual) / 10000.0 / 252.0
+            float(spec.short_borrow_bps_annual) / BPS_TO_DECIMAL / TRADING_DAYS_PER_YEAR
         )
         realized_matrix = effective_weights * matrices.returns
         daily_return = realized_matrix.sum(axis=1)
@@ -451,29 +368,28 @@ def _build_trade_frame(matrices: BacktestMatrices, computation: BacktestComputat
     trade_frame["turnover_cost"] = trade_frame["date"].map(computation.turnover_cost.to_dict())
     trade_frame["short_borrow_cost"] = trade_frame["date"].map(computation.short_borrow_cost.to_dict())
     trade_frame = trade_frame[
-        (trade_frame["target_weight"].abs() > 1e-12) | (trade_frame["effective_weight"].abs() > 1e-12)
+        (trade_frame["target_weight"].abs() > ACTIVE_WEIGHT_EPSILON)
+        | (trade_frame["effective_weight"].abs() > ACTIVE_WEIGHT_EPSILON)
     ].copy()
     trade_frame["date"] = pd.to_datetime(trade_frame["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     return trade_frame.sort_values(["date", "symbol"]).reset_index(drop=True)
 
 
 def _build_daily_rows(matrices: BacktestMatrices, computation: BacktestComputation) -> list[dict[str, Any]]:
-    daily_rows: list[dict[str, Any]] = []
-    for date_value in matrices.date_index:
-        daily_rows.append(
-            {
-                "date": str(date_value.date()),
-                "positions": int((computation.effective_weights.loc[date_value].abs() > 1e-12).sum()),
-                "gross_exposure": round(float(computation.effective_weights.loc[date_value].abs().sum()), 8),
-                "turnover": round(float(computation.turnover.loc[date_value]), 8),
-                "turnover_cost": round(float(computation.turnover_cost.loc[date_value]), 8),
-                "short_borrow_cost": round(float(computation.short_borrow_cost.loc[date_value]), 8),
-                "daily_return": round(float(computation.daily_return.loc[date_value]), 8),
-                "net_daily_return": round(float(computation.net_daily_return.loc[date_value]), 8),
-                "equity": round(float(computation.equity_curve.loc[date_value]), 8),
-            }
-        )
-    return daily_rows
+    return [
+        {
+            "date": str(date_value.date()),
+            "positions": int((computation.effective_weights.loc[date_value].abs() > ACTIVE_WEIGHT_EPSILON).sum()),
+            "gross_exposure": round(float(computation.effective_weights.loc[date_value].abs().sum()), SUMMARY_DECIMALS),
+            "turnover": round(float(computation.turnover.loc[date_value]), SUMMARY_DECIMALS),
+            "turnover_cost": round(float(computation.turnover_cost.loc[date_value]), SUMMARY_DECIMALS),
+            "short_borrow_cost": round(float(computation.short_borrow_cost.loc[date_value]), SUMMARY_DECIMALS),
+            "daily_return": round(float(computation.daily_return.loc[date_value]), SUMMARY_DECIMALS),
+            "net_daily_return": round(float(computation.net_daily_return.loc[date_value]), SUMMARY_DECIMALS),
+            "equity": round(float(computation.equity_curve.loc[date_value]), SUMMARY_DECIMALS),
+        }
+        for date_value in matrices.date_index
+    ]
 
 
 def _summarize_backtest(trade_frame: pd.DataFrame, daily_rows: list[dict[str, Any]], equity_curve: pd.Series) -> tuple[int, int, int, float, float, float, float]:

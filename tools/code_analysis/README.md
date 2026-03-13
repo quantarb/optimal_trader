@@ -34,15 +34,45 @@ Run from the repository root:
 
 ```bash
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis analyze_repo --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis analyze_code_health --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis analyze_blast_radius --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_dependency_graph --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_call_graph --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis detect_duplicate_code --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis detect_dead_code --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis analyze_complexity --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis validate_architecture_rules --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis bootstrap_architecture_rules --root . --rules-path tools/code_analysis/architecture_rules.yaml
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_refactor_priority_report --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label baseline --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label after --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis compare_quality_snapshots baseline after --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis build_semantic_index --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis search_code "model training pipeline" --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_repo_overview --output data/code_analysis
 ```
+
+## Refactor Workflow
+
+The toolkit is designed to support measurable, analyzer-guided cleanup instead of one-off reporting.
+
+Typical workflow:
+
+```bash
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label before --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis analyze_blast_radius --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_refactor_priority_report --output data/code_analysis
+# make a focused refactor pass
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label after --root . --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis compare_quality_snapshots before after --output data/code_analysis
+```
+
+Use the reports together:
+
+- `anti_patterns.*` to find concrete structural problems
+- `blast_radius_report.*` to find risky central modules
+- `refactor_priority_report.*` to rank high-value, safer targets
+- `quality_comparison_<baseline>_vs_<after>.*` to verify the refactor actually improved repo health
 
 ## Outputs
 
@@ -64,6 +94,24 @@ Primary reports:
 - `code_metrics_report.md`
 - `module_responsibility_report.json`
 - `module_responsibility_report.md`
+- `architecture_rules_report.json`
+- `architecture_rules_report.md`
+- `anti_patterns.json`
+- `anti_patterns.md`
+- `good_patterns.json`
+- `good_patterns.md`
+- `code_health_metrics.json`
+- `code_health_metrics.md`
+- `quality_scorecard.json`
+- `quality_scorecard.md`
+- `blast_radius_report.json`
+- `blast_radius_report.md`
+- `refactor_priority_report.json`
+- `refactor_priority_report.md`
+- `quality_snapshot_<label>.json`
+- `quality_snapshot_<label>.md`
+- `quality_comparison_<baseline>_vs_<after>.json`
+- `quality_comparison_<baseline>_vs_<after>.md`
 - `semantic_index.faiss`
 - `semantic_chunks.json`
 - `semantic_embeddings.npy`
@@ -74,6 +122,16 @@ Primary reports:
 - `refactoring_hints.md`
 - `semantic_search_<query>.json`
 - `semantic_search_<query>.md`
+
+## Current Dogfood Snapshot
+
+The toolkit has been dogfooded against this repository, including repeated analyzer-driven refactor passes.
+
+- latest snapshot: `quality_snapshot_self_improve_loop10.*`
+- latest cumulative comparison: `quality_comparison_self_improve_loop5_vs_self_improve_loop10.*`
+- latest repo score: `72.59`
+- latest anti-pattern findings: `1083`
+- latest good-pattern findings: `1625`
 
 ## Report Intent
 
@@ -98,6 +156,31 @@ Primary reports:
 - `module_responsibility_report.*`
   - mixed-concern modules
   - likely split candidates
+- `architecture_rules_report.*`
+  - configured layer and package dependency validation
+  - domain boundary violations
+- `anti_patterns.*`
+  - AST-based bad-pattern detection
+  - duplicate-workflow and architecture-burden rollups
+- `good_patterns.*`
+  - pure helper detection
+  - typed/public contract strength
+  - reusable boundary abstractions
+- `code_health_metrics.*`
+  - repo/module/file code-health measurements
+  - editability and change-safety proxy scores
+- `quality_scorecard.*`
+  - weighted repo/module/file health scoring
+- `blast_radius_report.*`
+  - direct and indirect change impact estimates
+  - critical-path, god-module, and change-risk flags
+- `refactor_priority_report.*`
+  - ranked refactor opportunities by badness, centrality, blast radius, and leverage
+  - safest high-value refactor targets
+- `quality_snapshot_<label>.*`
+  - point-in-time health baselines
+- `quality_comparison_<baseline>_vs_<after>.*`
+  - objective before/after deltas
 - `repo_overview.*`
   - top-level architectural summary
   - refactor targets
