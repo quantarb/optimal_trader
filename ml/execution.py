@@ -152,6 +152,7 @@ def build_training_frame_from_panel_artifacts(
     max_hold_days: int | None = None,
     sample_weight_mode: str = "uniform",
     oracle_cluster_keys: Sequence[str] = (),
+    missing_feature_policy: str = "any_coverage",
 ) -> tuple[pd.DataFrame, list[str], dict[str, Any]]:
     dataset_spec = ArtifactTrainingDatasetSpec(
         start_date=start_date,
@@ -164,6 +165,7 @@ def build_training_frame_from_panel_artifacts(
         max_hold_days=max_hold_days,
         sample_weight_mode=sample_weight_mode,
         oracle_cluster_keys=tuple(oracle_cluster_keys),
+        missing_feature_policy=str(missing_feature_policy or "any_coverage").strip().lower() or "any_coverage",
     )
     return _build_training_frame_from_panel_artifacts(
         base_feature_artifact=base_feature_artifact,
@@ -195,6 +197,7 @@ def train_model_from_artifact_inputs(
     max_hold_days: int | None = None,
     sample_weight_mode: str = "uniform",
     oracle_cluster_keys: Sequence[str] = (),
+    missing_feature_policy: str = "any_coverage",
     progress_callback=None,
 ) -> ModelArtifact:
     merged_params = merge_job_params(dict(params or {}))
@@ -223,6 +226,7 @@ def train_model_from_artifact_inputs(
         max_hold_days=max_hold_days,
         sample_weight_mode=sample_weight_mode,
         oracle_cluster_keys=tuple(oracle_cluster_keys),
+        missing_feature_policy=str(missing_feature_policy or "any_coverage").strip().lower() or "any_coverage",
     )
     dataset_started = time.perf_counter()
     train_df, feature_cols, source_meta = _build_training_frame_from_panel_artifacts(
@@ -290,6 +294,7 @@ def train_model_from_artifact_inputs(
         "min_abs_trade_return": source_meta.get("min_abs_trade_return"),
         "max_hold_days": source_meta.get("max_hold_days"),
         "sample_weight_mode": str(source_meta.get("sample_weight_mode") or "uniform"),
+        "missing_feature_policy": str(source_meta.get("missing_feature_policy") or "any_coverage"),
         "oracle_cluster_keys": list(source_meta.get("oracle_cluster_keys") or []),
         "oracle_cluster_scope": str(source_meta.get("oracle_cluster_scope") or "generalist"),
         "cluster_rows_before_filter": int(source_meta.get("cluster_rows_before_filter") or 0),
@@ -322,6 +327,7 @@ def train_model_from_artifact_inputs(
         feature_df=source_meta["feature_df"],
         feature_cols=feature_cols,
         label_df=source_meta["label_df"],
+        missing_feature_policy=str(source_meta.get("missing_feature_policy") or "any_coverage"),
     )
     train_prediction_seconds = time.perf_counter() - prediction_started
     predictions_uri = _write_prediction_rows_csv(name, prediction_df)
@@ -387,6 +393,7 @@ def score_model_from_artifact_inputs(
         feature_df=feature_df,
         feature_cols=list(model_record.feature_cols or feature_cols),
         label_df=label_df,
+        missing_feature_policy=str((model_record.metadata or {}).get("missing_feature_policy") or "any_coverage"),
     )
     if callable(progress_callback):
         progress_callback(

@@ -104,6 +104,35 @@
   - `pipeline.artifact_support` now delegates backtest/equity summarization through `artifact_backtest_support.py`.
   - `analysis.market_insight_schema` dropped to three findings and now uses smaller input-assembly helpers.
 
+## Tooling Feedback Improvements
+
+- I improved the analyzer after dogfooding it on this repository and noticing noisy heuristics during refactor work.
+- Tooling changes:
+  - tightened hidden-side-effect detection so substring matches like `Input` -> `put` and `json.dumps` -> `dump` no longer trigger
+  - stopped treating local-only collection mutation as a hidden external side effect
+  - extended module-responsibility analysis with concern families and dominant-concern share
+  - added `confidence` and `trigger_details` to anti-pattern findings
+  - added changed-scope snapshot comparisons with `--paths` and `--git-range`
+- I then dogfooded the improved tool and used it for another cleanup pass in:
+  - `pipeline.artifact_backtest_support`
+  - `analysis.market_insight_schema`
+- Repo improvement measured with the improved tool:
+  - `quality_comparison_tooling_feedback_baseline_vs_tooling_feedback_after.*`
+  - `repo_score`: `72.57 -> 72.58`
+  - `complexity_health`: `46.07 -> 46.12`
+  - `llm_editability`: `65.97 -> 66.00`
+- Final tooling-refinement pass after reducing hidden-side-effect noise:
+  - `quality_comparison_tooling_feedback_after_vs_tooling_feedback_final.*`
+  - `repo_score`: `72.58 -> 72.61`
+  - `anti_pattern_burden`: `1087 -> 1078`
+  - hidden-side-effect findings: `35 -> 26`
+  - no regressed dimensions in that final comparison
+- Final current snapshot:
+  - `quality_snapshot_tooling_feedback_final.*`
+  - repo score: `72.61`
+  - anti-pattern findings: `1078`
+  - good-pattern findings: `1628`
+
 ## Top 10 Findings In This Repo
 
 1. `analysis.alpha_flavors.cluster_alpha_flavors` is a `428` line function with estimated complexity `98`, deep nesting, and nested loops.
@@ -196,3 +225,14 @@
 - Advisory / model-assisted heuristics:
   - duplicate code clusters
   - dead code count
+
+## Pattern-Fit Pass
+
+- Added metrics-driven pattern-fit recommendations to `refactor_priority_report.*` so the tool now suggests which good pattern best fits each module or major symbol.
+- Tightened dogfood-driven gates so `strategy or policy interface` and `registry pattern` only appear when there is real dispatch-style evidence, and `typed public APIs` only appears when type coverage is meaningfully low.
+- Used the new recommendation output to refactor `utils.workflow` toward an explicit boundary object with `UniverseArtifactRecord`, shared artifact-loading helpers, early returns, and narrower exception handling.
+- Measured result:
+  - repo score: `72.59 -> 72.62`
+  - anti-pattern burden: `1085 -> 1079`
+  - artifact boundary usage: `121 -> 124`
+  - focused module delta: `utils.workflow 64.74 -> 77.52`

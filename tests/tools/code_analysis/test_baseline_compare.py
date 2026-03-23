@@ -55,3 +55,52 @@ class BaselineCompareTests(unittest.TestCase):
         self.assertIn("repo_score", improved_metrics)
         self.assertIn("type_hint_coverage", improved_metrics)
         self.assertIn("architecture_rule_violations", improved_metrics)
+        self.assertEqual(comparison["file_deltas"][0]["file"], "/repo/pkg/a.py")
+
+    def test_compare_quality_snapshots_can_focus_on_paths(self) -> None:
+        before = snapshot_from_reports(
+            label="baseline",
+            root="/repo",
+            metrics_report={"repo_summary": {}},
+            scorecard_report={
+                "repo_score": 50.0,
+                "repo_dimensions": {"complexity_health": 40.0},
+                "module_scores": [
+                    {"module": "pkg.a", "score": 50.0},
+                    {"module": "pkg.b", "score": 45.0},
+                ],
+                "file_scores": [
+                    {"file": "/repo/pkg/a.py", "score": 50.0},
+                    {"file": "/repo/pkg/b.py", "score": 45.0},
+                ],
+            },
+            anti_pattern_report={"summary": {}},
+            good_pattern_report={"summary": {}},
+            architecture_report={"summary": {}},
+        )
+        after = snapshot_from_reports(
+            label="after",
+            root="/repo",
+            metrics_report={"repo_summary": {}},
+            scorecard_report={
+                "repo_score": 52.0,
+                "repo_dimensions": {"complexity_health": 44.0},
+                "module_scores": [
+                    {"module": "pkg.a", "score": 56.0},
+                    {"module": "pkg.b", "score": 46.0},
+                ],
+                "file_scores": [
+                    {"file": "/repo/pkg/a.py", "score": 56.0},
+                    {"file": "/repo/pkg/b.py", "score": 46.0},
+                ],
+            },
+            anti_pattern_report={"summary": {}},
+            good_pattern_report={"summary": {}},
+            architecture_report={"summary": {}},
+        )
+
+        comparison = compare_quality_snapshots(before, after, focus_paths=["pkg/a.py"]).to_dict()
+
+        self.assertEqual(comparison["focus_paths"], ["pkg/a.py"])
+        self.assertEqual([row["module"] for row in comparison["focused_module_deltas"]], ["pkg.a"])
+        self.assertEqual([row["file"] for row in comparison["focused_file_deltas"]], ["/repo/pkg/a.py"])

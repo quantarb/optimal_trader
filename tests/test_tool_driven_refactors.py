@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -51,8 +53,10 @@ django.setup()
 
 from analysis import diagnostics
 from analysis import market_insight_schema
+from pipeline import artifact_backtest_support
 from pipeline import artifact_support
 from tools.product_quality_analysis import cli as product_quality_cli
+from utils import workflow
 from workflows import strategy
 
 
@@ -177,6 +181,66 @@ class ToolDrivenRefactorTests(unittest.TestCase):
         self.assertEqual(summary.horizon_rows[0].sample_size, 3)
         self.assertEqual(analogs[0].symbol, "AAPL")
         self.assertEqual(analogs[0].explanation_tags, ["Momentum aligned"])
+
+    def test_build_equity_curve_context_preserves_series_and_summary(self):
+        backtest_artifact = SimpleNamespace(
+            content={},
+            metadata={
+                "equity_curve": [
+                    {"date": "2024-01-02", "equity": 1.01, "net_daily_return": 0.01},
+                    {"date": "2024-01-03", "equity": 0.9898, "net_daily_return": -0.02},
+                ]
+            },
+        )
+        preview_rows = [
+            {"symbol": "AAPL", "date": "2024-01-02", "realized_return": "0.05"},
+            {"symbol": "MSFT", "date": "2024-01-03", "realized_return": "-0.02"},
+        ]
+        content_payload = {
+            "daily_rows": [
+                {"date": "2024-01-02", "turnover": "0.2", "positions": "2", "net_daily_return": "0.01"},
+                {"date": "2024-01-03", "turnover": "0.1", "positions": "1", "net_daily_return": "-0.02"},
+            ],
+            "max_drawdown": "-0.10",
+        }
+
+        def loader(_artifact, limit):
+            self.assertGreater(limit, 0)
+            return preview_rows, content_payload
+
+        context = artifact_backtest_support.build_equity_curve_context(
+            backtest_artifact,
+            load_artifact_preview_rows=loader,
+            normalized_date=lambda value: str(value or "")[:10],
+            safe_float=_safe_float,
+            to_int=_to_int,
+        )
+
+        self.assertEqual(context["equity_curve_count"], 2)
+        self.assertEqual(len(context["monthly_return_rows"]), 1)
+        self.assertEqual(context["contribution_rows"][0]["symbol"], "AAPL")
+        self.assertIn("turnover_series_json", context)
+        self.assertIn("report_summary", context)
+
+    def test_universe_artifact_record_uses_file_symbols_and_metadata_name(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            payload_path = os.path.join(tmp_dir, "universe.json")
+            with open(payload_path, "w", encoding="utf-8") as handle:
+                json.dump({"name": "Large Cap Universe", "symbols": ["aapl", "MSFT", "aapl"]}, handle)
+
+            artifact = SimpleNamespace(
+                pk=17,
+                uri=payload_path,
+                content={"symbols": ["tsla"]},
+                metadata={"name": "Metadata Name"},
+                pipeline_run=SimpleNamespace(name="Run Name"),
+            )
+
+            record = workflow._build_universe_artifact_record(artifact)
+
+        self.assertEqual(record.artifact_id, 17)
+        self.assertEqual(record.name, "Metadata Name")
+        self.assertEqual(record.symbols, ["AAPL", "MSFT"])
 
 
 if __name__ == "__main__":

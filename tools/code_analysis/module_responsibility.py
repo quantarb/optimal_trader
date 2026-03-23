@@ -18,6 +18,18 @@ CONCERN_RULES = {
     "backtesting": ("backtest", "equity", "turnover", "strategy"),
     "external_data": ("fmp", "endpoint", "requests", "http"),
 }
+CONCERN_FAMILIES = {
+    "web_ui": "interface",
+    "cli_commands": "interface",
+    "reporting": "output",
+    "data_io": "io",
+    "pipeline_orchestration": "coordination",
+    "ml_modeling": "compute",
+    "feature_engineering": "compute",
+    "market_intelligence": "domain",
+    "backtesting": "compute",
+    "external_data": "io",
+}
 
 
 @dataclass
@@ -54,6 +66,11 @@ def analyze_module_responsibilities(
 
         metric_row = metric_map.get(module_name, {})
         concern_count = len(concerns)
+        families = sorted({CONCERN_FAMILIES.get(item["concern"], "other") for item in concerns})
+        family_count = len(families)
+        total_concern_score = sum(int(item["score"]) for item in concerns) or 1
+        dominant_concern = concerns[0]["concern"]
+        dominant_concern_share = round(float(concerns[0]["score"]) / float(total_concern_score), 3)
         max_complexity = int(metric_row.get("max_complexity") or 0)
         maintainability_index = _as_float(metric_row.get("maintainability_index"), 100.0)
         duplicate_count = int(duplicate_hits.get(module_name, 0))
@@ -61,18 +78,26 @@ def analyze_module_responsibilities(
         fan_out = int(outdegree.get(module_name, 0))
 
         mixing_score = round(
-            concern_count * 6.0
+            family_count * 8.0
+            + concern_count * 3.0
             + min(module_record.line_count / 120.0, 12.0)
             + max_complexity * 0.8
             + duplicate_count * 1.5
             + fan_out * 0.5
+            + (6.0 if dominant_concern_share < 0.45 else 0.0)
+            + (3.0 if {"coordination", "io"} <= set(families) else 0.0)
+            + (3.0 if {"compute", "output"} <= set(families) else 0.0)
             + (5.0 if maintainability_index < 20.0 else 0.0)
             + (2.0 if fan_in > 12 and fan_out > 12 else 0.0),
             2,
         )
         reasons: list[str] = []
+        if family_count >= 2:
+            reasons.append(f"spans {family_count} concern families")
         if concern_count >= 3:
-            reasons.append(f"matches {concern_count} concern categories")
+            reasons.append(f"matches {concern_count} named concern categories")
+        if dominant_concern_share < 0.45:
+            reasons.append(f"no dominant concern (top share {dominant_concern_share:.2f})")
         if duplicate_count:
             reasons.append(f"appears in {duplicate_count} duplicate clusters/pairs")
         if maintainability_index < 20.0:
@@ -89,7 +114,11 @@ def analyze_module_responsibilities(
                 "function_count": len(module_record.functions),
                 "class_count": len(module_record.class_records),
                 "concern_count": concern_count,
+                "concern_family_count": family_count,
+                "concern_families": families,
                 "concerns": concerns,
+                "dominant_concern": dominant_concern,
+                "dominant_concern_share": dominant_concern_share,
                 "max_complexity": max_complexity,
                 "maintainability_index": round(maintainability_index, 3),
                 "fan_in": fan_in,
@@ -155,7 +184,7 @@ def module_responsibility_markdown(report: ModuleResponsibilityReport) -> str:
         concern_text = ", ".join(f"{item['concern']}({item['score']})" for item in row["concerns"][:6])
         reason_text = "; ".join(row["reasons"][:4]) or "multiple concerns detected"
         sections.append(
-            f"- `{row['module']}`: mixing_score={row['mixing_score']}, concerns={row['concern_count']}, lines={row['line_count']}, max_complexity={row['max_complexity']} [{concern_text}]"
+            f"- `{row['module']}`: mixing_score={row['mixing_score']}, families={row['concern_family_count']}, concerns={row['concern_count']}, dominant={row['dominant_concern']}({row['dominant_concern_share']:.2f}), lines={row['line_count']}, max_complexity={row['max_complexity']} [{concern_text}]"
         )
         sections.append(f"  - reasons: {reason_text}")
     return "\n".join(sections)

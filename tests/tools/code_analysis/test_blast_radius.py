@@ -51,14 +51,34 @@ def run(values: list[int]) -> int:
                 + "\n",
             )
             _write(
+                root / "sample" / "router.py",
+                """
+from sample.core import helper
+
+
+def route(kind: str, values: list[int]) -> int:
+    if kind == "sum":
+        return sum(helper(value) for value in values)
+    elif kind == "max":
+        return max(helper(value) for value in values)
+    elif kind == "min":
+        return min(helper(value) for value in values)
+    elif kind == "count":
+        return len([helper(value) for value in values])
+    return 0
+""".strip()
+                + "\n",
+            )
+            _write(
                 root / "sample" / "api.py",
                 """
 from sample.core import normalize
+from sample.router import route
 from sample.service import run
 
 
 def handle(values: list[int]) -> int:
-    return run(normalize(values))
+    return run(normalize(values)) + route("sum", values)
 """.strip()
                 + "\n",
             )
@@ -105,10 +125,16 @@ def handle(values: list[int]) -> int:
                 architecture_report=architecture.to_dict(),
                 responsibility_report=responsibility.to_dict(),
             ).to_dict()
-            priority = build_refactor_priority_report(blast).to_dict()
+            priority = build_refactor_priority_report(
+                blast,
+                code_health_report=health.to_dict(),
+                anti_pattern_report=anti.to_dict(),
+                good_pattern_report=good.to_dict(),
+                responsibility_report=responsibility.to_dict(),
+            ).to_dict()
 
             core_row = next(row for row in blast["module_rows"] if row["module"] == "sample.core")
-            self.assertEqual(core_row["direct_dependents"], 2)
+            self.assertEqual(core_row["direct_dependents"], 3)
             self.assertGreaterEqual(core_row["indirect_dependents"], 1)
             self.assertTrue(core_row["critical_execution_path"])
 
@@ -118,6 +144,18 @@ def handle(values: list[int]) -> int:
             ranking_row = next(row for row in priority["rankings"] if row["module"] == "sample.core")
             self.assertGreaterEqual(ranking_row["blast_radius_rank"], 1)
             self.assertIn("suggested_refactor", ranking_row)
+
+            router_row = next(row for row in priority["rankings"] if row["module"] == "sample.router")
+            self.assertEqual(router_row["recommended_pattern"], "strategy or policy interface")
+            self.assertTrue(router_row["pattern_candidates"])
+            self.assertIn("dispatch_chain_count", router_row["pattern_candidates"][0]["metric_drivers"])
+
+            symbol_row = next(
+                row
+                for row in priority["symbol_recommendations"]
+                if row["symbol"] == "sample.router.route"
+            )
+            self.assertIn(symbol_row["recommended_pattern"], {"strategy or policy interface", "registry pattern"})
 
             symbol_names = {row["symbol"] for row in blast["symbol_rows"]}
             self.assertIn("sample.core.helper", symbol_names)

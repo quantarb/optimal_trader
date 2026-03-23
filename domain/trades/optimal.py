@@ -205,6 +205,133 @@ def solve_optimal_joint_trades_generic(
     return out
 
 
+def solve_optimal_joint_trade_sequence_generic(
+    df: pd.DataFrame,
+    *,
+    long_entry_price_col: Optional[str] = None,
+    long_exit_price_col: Optional[str] = None,
+    short_entry_price_col: Optional[str] = None,
+    short_exit_price_col: Optional[str] = None,
+    min_profit_pct: float = 0.01,
+) -> List[Trade]:
+    """Find the best long/short action sequence through time without a per-period k cap."""
+
+    if df is None or len(df) < 2:
+        return []
+
+    le_col = _resolve_required_col(df, long_entry_price_col or "high")
+    lx_col = _resolve_required_col(df, long_exit_price_col or "low")
+    se_col = _resolve_required_col(df, short_entry_price_col or "low")
+    sx_col = _resolve_required_col(df, short_exit_price_col or "high")
+
+    long_entry = df[le_col].astype(float).to_numpy()
+    long_exit = df[lx_col].astype(float).to_numpy()
+    short_entry = df[se_col].astype(float).to_numpy()
+    short_exit = df[sx_col].astype(float).to_numpy()
+    n = len(df)
+
+    min_profit = float(min_profit_pct)
+    cash = _TradePathState(0.0, ())
+    long_hold: _HoldState | None = None
+    short_hold: _HoldState | None = None
+
+    for i in range(n):
+        le = float(long_entry[i])
+        lx = float(long_exit[i])
+        se = float(short_entry[i])
+        sx = float(short_exit[i])
+
+        prev_cash = cash
+        prev_long_hold = long_hold
+        prev_short_hold = short_hold
+
+        best_cash = prev_cash
+
+        if prev_long_hold is not None and prev_long_hold.entry_idx < i:
+            long_pct = _profit_pct("long", prev_long_hold.entry_price, lx)
+            if long_pct >= min_profit:
+                candidate_value = float(prev_long_hold.value + lx)
+                if candidate_value > float(best_cash.value) + 1e-12:
+                    best_cash = _TradePathState(
+                        candidate_value,
+                        prev_long_hold.base_trades
+                        + (
+                            _TradeCandidate(
+                                side="long",
+                                entry_idx=int(prev_long_hold.entry_idx),
+                                exit_idx=i,
+                                entry_price=float(prev_long_hold.entry_price),
+                                exit_price=float(lx),
+                                profit=float(lx - prev_long_hold.entry_price),
+                            ),
+                        ),
+                    )
+
+        if prev_short_hold is not None and prev_short_hold.entry_idx < i:
+            short_pct = _profit_pct("short", prev_short_hold.entry_price, sx)
+            if short_pct >= min_profit:
+                candidate_value = float(prev_short_hold.value - sx)
+                if candidate_value > float(best_cash.value) + 1e-12:
+                    best_cash = _TradePathState(
+                        candidate_value,
+                        prev_short_hold.base_trades
+                        + (
+                            _TradeCandidate(
+                                side="short",
+                                entry_idx=int(prev_short_hold.entry_idx),
+                                exit_idx=i,
+                                entry_price=float(prev_short_hold.entry_price),
+                                exit_price=float(sx),
+                                profit=float(prev_short_hold.entry_price - sx),
+                            ),
+                        ),
+                    )
+
+        cash = best_cash
+
+        if le > 0:
+            candidate_hold_value = float(prev_cash.value - le)
+            if prev_long_hold is None or candidate_hold_value > float(prev_long_hold.value) + 1e-12:
+                long_hold = _HoldState(
+                    value=candidate_hold_value,
+                    entry_idx=i,
+                    entry_price=float(le),
+                    base_trades=prev_cash.trades,
+                )
+            else:
+                long_hold = prev_long_hold
+
+        if se > 0:
+            candidate_hold_value = float(prev_cash.value + se)
+            if prev_short_hold is None or candidate_hold_value > float(prev_short_hold.value) + 1e-12:
+                short_hold = _HoldState(
+                    value=candidate_hold_value,
+                    entry_idx=i,
+                    entry_price=float(se),
+                    base_trades=prev_cash.trades,
+                )
+            else:
+                short_hold = prev_short_hold
+
+    chosen = list(cash.trades)
+    if not chosen:
+        return []
+
+    out: List[Trade] = []
+    for candidate in chosen:
+        out.append(
+            Trade(
+                side=candidate.side,
+                entry_row=df.iloc[candidate.entry_idx],
+                exit_row=df.iloc[candidate.exit_idx],
+                entry_price=float(candidate.entry_price),
+                exit_price=float(candidate.exit_price),
+                profit=float(candidate.profit),
+            )
+        )
+    return out
+
+
 def solve_optimal_trades_generic(
     df: pd.DataFrame,
     k: int,
@@ -367,6 +494,61 @@ def solve_joint_trades_by_frequency(
     return all_trades
 
 
+def solve_joint_trade_sequence_by_frequency(
+    df: pd.DataFrame,
+    freq: str = "QE",
+    min_profit_pct: float = 0.01,
+    long_entry_price_col: Optional[str] = None,
+    long_exit_price_col: Optional[str] = None,
+    short_entry_price_col: Optional[str] = None,
+    short_exit_price_col: Optional[str] = None,
+) -> List[Dict]:
+    if df is None or df.empty:
+        return []
+    freq_resolved, label_freq = _resolve_freq(freq)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if "date" in df.columns:
+            dfi = df.copy()
+            dfi["date"] = pd.to_datetime(dfi["date"], errors="coerce")
+            dfi = dfi.set_index("date")
+        else:
+            raise ValueError("solve_joint_trade_sequence_by_frequency requires a DatetimeIndex or a 'date' column")
+    else:
+        dfi = df
+
+    dfi = dfi.sort_index()
+    all_trades: List[Dict] = []
+    for period, group in dfi.groupby(pd.Grouper(freq=freq_resolved)):
+        if group is None or len(group) < 2:
+            continue
+        try:
+            ts = period.to_timestamp() if hasattr(period, "to_timestamp") else pd.to_datetime(period)
+            period_label = f"{label_freq}:{ts.date()}"
+        except Exception:
+            period_label = str(period)
+        trades = solve_optimal_joint_trade_sequence_generic(
+            group,
+            min_profit_pct=min_profit_pct,
+            long_entry_price_col=long_entry_price_col,
+            long_exit_price_col=long_exit_price_col,
+            short_entry_price_col=short_entry_price_col,
+            short_exit_price_col=short_exit_price_col,
+        )
+        for trade in trades:
+            all_trades.append(
+                {
+                    "side": trade.side,
+                    "entry_row": trade.entry_row,
+                    "exit_row": trade.exit_row,
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "profit": trade.profit,
+                    "period_label": period_label,
+                }
+            )
+    return all_trades
+
+
 def solve_trades_by_frequency(
     df: pd.DataFrame,
     k: int,
@@ -458,4 +640,3 @@ def solve_shorts_by_frequency(
         entry_price_col=entry_price_col,
         exit_price_col=exit_price_col,
     )
-

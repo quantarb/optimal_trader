@@ -179,6 +179,7 @@ def score_artifact_rows(
     feature_df: pd.DataFrame,
     feature_cols: Sequence[str],
     label_df: pd.DataFrame | None = None,
+    missing_feature_policy: str = "any_coverage",
 ) -> pd.DataFrame:
     """Score artifact-backed rows with a fitted model adapter."""
 
@@ -191,7 +192,10 @@ def score_artifact_rows(
     prediction_df = prediction_df.copy()
     for col in used_features:
         prediction_df[col] = pd.to_numeric(prediction_df[col], errors="coerce")
-    if prediction_df[used_features].notna().any(axis=1).sum() == 0:
+    policy_value = str(missing_feature_policy or "any_coverage").strip().lower() or "any_coverage"
+    if policy_value in {"complete_case", "drop_missing"}:
+        prediction_df = prediction_df[prediction_df[used_features].notna().all(axis=1)].copy()
+    if prediction_df.empty or prediction_df[used_features].notna().any(axis=1).sum() == 0:
         return pd.DataFrame()
     prediction_df[used_features] = prediction_df[used_features].fillna(0.0)
 

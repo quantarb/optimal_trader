@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -72,9 +73,7 @@ COMMON_MAGIC_NUMBERS = {
 EFFECTFUL_CALL_MARKERS = (
     "commit",
     "delete",
-    "dump",
     "execute",
-    "insert",
     "log",
     "mkdir",
     "post",
@@ -83,7 +82,6 @@ EFFECTFUL_CALL_MARKERS = (
     "put",
     "remove",
     "rename",
-    "replace",
     "rmdir",
     "save",
     "send",
@@ -92,6 +90,26 @@ EFFECTFUL_CALL_MARKERS = (
     "upload",
     "write",
 )
+PURE_SERIALIZATION_CALLS = {
+    "ast.unparse",
+    "dataclasses.asdict",
+    "dataclasses.astuple",
+    "json.dump",
+    "json.dumps",
+    "yaml.dump",
+    "yaml.safe_dump",
+}
+LOCAL_MUTATION_METHODS = {
+    "append",
+    "clear",
+    "extend",
+    "insert",
+    "pop",
+    "remove",
+    "reverse",
+    "sort",
+    "update",
+}
 EXPENSIVE_CALL_MARKERS = (
     "backtest",
     "collect",
@@ -138,6 +156,7 @@ CHEAP_CALL_MARKERS = (
     "range",
     "sum",
 )
+TOKEN_SPLIT_RE = re.compile(r"(?<!^)(?=[A-Z])|[^A-Za-z0-9]+")
 
 
 @dataclass
@@ -542,15 +561,23 @@ def mutates_nonlocal_state(function: FunctionContext) -> bool:
 
 
 def has_hidden_side_effect(function: FunctionContext) -> bool:
+    return bool(hidden_side_effect_reasons(function))
+
+
+def hidden_side_effect_reasons(function: FunctionContext) -> list[str]:
     if not any(function.name.startswith(prefix) for prefix in QUERY_LIKE_PREFIXES):
-        return False
+        return []
+    reasons: list[str] = []
+    local_names = local_assignment_names(function.node)
     if mutates_nonlocal_state(function):
-        return True
+        reasons.append("mutates non-local state")
     for call in iter_calls(function.node):
         label = expression_name(call.func)
+        if _is_local_mutation_call(call, local_names):
+            continue
         if is_effectful_call(label):
-            return True
-    return False
+            reasons.append(f"effectful call `{label}`")
+    return reasons
 
 
 def local_assignment_names(node: ast.AST) -> set[str]:
@@ -562,8 +589,13 @@ def local_assignment_names(node: ast.AST) -> set[str]:
 
 
 def is_effectful_call(label: str) -> bool:
-    lowered = str(label or "").lower()
-    return any(marker in lowered for marker in EFFECTFUL_CALL_MARKERS)
+    lowered = str(label or "").strip().lower()
+    if not lowered or lowered in PURE_SERIALIZATION_CALLS:
+        return False
+    if any(lowered == marker or lowered.endswith(f".{marker}") for marker in EFFECTFUL_CALL_MARKERS):
+        return True
+    tokens = _call_tokens(lowered)
+    return any(marker in tokens for marker in EFFECTFUL_CALL_MARKERS)
 
 
 def is_expensive_call(label: str) -> bool:
@@ -625,6 +657,23 @@ def artifact_like_name(name: str) -> bool:
 def boundary_object_like_name(name: str) -> bool:
     lowered = str(name or "").lower()
     return artifact_like_name(name) or any(token in lowered for token in ("request", "response", "schema"))
+
+
+def _call_tokens(label: str) -> set[str]:
+    tokens = {token for token in TOKEN_SPLIT_RE.split(label) if token}
+    dotted = [part for part in label.split(".") if part]
+    tokens.update(dotted)
+    return {token.lower() for token in tokens if token}
+
+
+def _is_local_mutation_call(call: ast.Call, local_names: set[str]) -> bool:
+    if not isinstance(call.func, ast.Attribute):
+        return False
+    method_name = str(call.func.attr or "").lower()
+    if method_name not in LOCAL_MUTATION_METHODS:
+        return False
+    base_name = expression_name(call.func.value).split(".", 1)[0]
+    return base_name in local_names
 
 
 def _build_function_context(

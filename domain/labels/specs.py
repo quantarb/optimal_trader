@@ -29,6 +29,7 @@ class LabelBuildSpec:
     """Typed oracle-label generation configuration."""
 
     k_params: dict[str, list[int]] = field(default_factory=lambda: {"YE": [1]})
+    solver_mode: str = "period_top_k"
     min_profit_pct: float = 0.01
     buy_execution: str = "adj_high"
     sell_execution: str = "adj_low"
@@ -60,6 +61,7 @@ class LabelBuildSpec:
         k_params = {freq: ks for freq, ks in k_params.items() if ks} or {"YE": [1]}
         return cls(
             k_params=k_params,
+            solver_mode=_solver_mode(raw.get("solver_mode")),
             min_profit_pct=_min_profit_decimal(raw.get("min_profit_pct")),
             buy_execution=str(raw.get("buy_execution") or "adj_high"),
             sell_execution=str(raw.get("sell_execution") or "adj_low"),
@@ -90,3 +92,9 @@ def _min_profit_decimal(value: Any, default_points: float = 1.0) -> float:
         points = default_points
     return max(0.0, points) / 100.0
 
+
+def _solver_mode(value: Any) -> str:
+    text = str(value or "period_top_k").strip().lower() or "period_top_k"
+    if text not in {"period_top_k", "period_sequence"}:
+        return "period_top_k"
+    return text

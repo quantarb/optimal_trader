@@ -57,8 +57,40 @@ def enrich_scored_panel(
 
     out["pred_rf_reg"] = pd.to_numeric(out["ranking"], errors="coerce").fillna(0.0)
     out["ae_familiarity"] = pd.to_numeric(out["ae_familiarity"], errors="coerce").fillna(1.0)
-    out["buy_score"] = out["prob_buy"] * out["pred_rf_reg"] * out["ae_familiarity"]
-    out["short_score"] = out["prob_short"] * out["pred_rf_reg"] * out["ae_familiarity"]
+
+    def _cross_sectional_pct(series: pd.Series) -> pd.Series:
+        valid = pd.to_numeric(series, errors="coerce")
+        if valid.notna().sum() <= 1:
+            return pd.Series(np.where(valid.notna(), 1.0, np.nan), index=series.index, dtype=float)
+        return valid.rank(pct=True, method="average")
+
+    if isinstance(out.index, pd.MultiIndex) and "date" in out.index.names:
+        out["prob_buy_pct"] = out.groupby(level="date", sort=False)["prob_buy"].transform(_cross_sectional_pct)
+        out["pred_rf_reg_pct"] = out.groupby(level="date", sort=False)["pred_rf_reg"].transform(_cross_sectional_pct)
+        out["ae_familiarity_pct"] = out.groupby(level="date", sort=False)["ae_familiarity"].transform(_cross_sectional_pct)
+        out["prob_short_pct"] = out.groupby(level="date", sort=False)["prob_short"].transform(_cross_sectional_pct)
+    else:
+        out["prob_buy_pct"] = _cross_sectional_pct(out["prob_buy"])
+        out["pred_rf_reg_pct"] = _cross_sectional_pct(out["pred_rf_reg"])
+        out["ae_familiarity_pct"] = _cross_sectional_pct(out["ae_familiarity"])
+        out["prob_short_pct"] = _cross_sectional_pct(out["prob_short"])
+
+    out["buy_score_raw"] = out["prob_buy"] * out["pred_rf_reg"] * out["ae_familiarity"]
+    out["short_score_raw"] = out["prob_short"] * out["pred_rf_reg"] * out["ae_familiarity"]
+    out["buy_score_pct_product"] = out["prob_buy_pct"] * out["pred_rf_reg_pct"] * out["ae_familiarity_pct"]
+    out["short_score_pct_product"] = out["prob_short_pct"] * out["pred_rf_reg_pct"] * out["ae_familiarity_pct"]
+    out["buy_score_pct_mean"] = out[["prob_buy_pct", "pred_rf_reg_pct", "ae_familiarity_pct"]].mean(axis=1, skipna=True)
+    out["short_score_pct_mean"] = out[["prob_short_pct", "pred_rf_reg_pct", "ae_familiarity_pct"]].mean(axis=1, skipna=True)
+    out["buy_score_mean_raw3"] = out[["prob_buy", "pred_rf_reg", "ae_familiarity"]].mean(axis=1, skipna=True)
+    out["buy_score_mean_raw_pct6"] = out[
+        ["prob_buy", "pred_rf_reg", "ae_familiarity", "prob_buy_pct", "pred_rf_reg_pct", "ae_familiarity_pct"]
+    ].mean(axis=1, skipna=True)
+    out["short_score_mean_raw3"] = out[["prob_short", "pred_rf_reg", "ae_familiarity"]].mean(axis=1, skipna=True)
+    out["short_score_mean_raw_pct6"] = out[
+        ["prob_short", "pred_rf_reg", "ae_familiarity", "prob_short_pct", "pred_rf_reg_pct", "ae_familiarity_pct"]
+    ].mean(axis=1, skipna=True)
+    out["buy_score"] = out["buy_score_raw"]
+    out["short_score"] = out["short_score_raw"]
     return out
 
 
@@ -91,7 +123,12 @@ def make_backtest_panel(*, scored_panel: pd.DataFrame, technical_df: pd.DataFram
         (price_df.index.get_level_values("date") >= start)
         & (price_df.index.get_level_values("date") <= end)
     ]
-    return scored_panel.join(price_df, how="left")
+    panel = scored_panel.copy()
+    if "close" in panel.columns:
+        panel["close"] = pd.to_numeric(panel["close"], errors="coerce")
+        panel["close"] = panel["close"].where(panel["close"].notna(), price_df["close"])
+        return panel
+    return panel.join(price_df, how="left")
 
 
 def make_exec_cfg(

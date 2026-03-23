@@ -15,9 +15,13 @@ FACTOR_COMPONENT_SIGNAL_COMBINATION = "factor_components"
 PREDICTION_COMPONENT_DEFAULTS = {
     "prob_buy": 1.0,
     "ae_familiarity": 1.0,
+    "direction": 0.0,
 }
 PREDICTION_COMPONENT_SUFFIX_RULES = {
-    "CLASSIFIER_PREDICTIONS": {"prob_buy": ("__prediction_score",)},
+    "CLASSIFIER_PREDICTIONS": {
+        "prob_buy": ("__prediction_score",),
+        "direction": ("__raw_prediction", "__predicted_class"),
+    },
     "REGRESSOR_PREDICTIONS": {"ranking": ("__prediction", "__prediction_score")},
     "AUTOENCODER_SCORES": {"ae_familiarity": ("__prediction_score",)},
     "MTL_PREDICTIONS": {
@@ -64,7 +68,7 @@ def _source_component_series(
     artifact_type: str,
     columns: list[str],
 ) -> tuple[dict[str, list[pd.Series]], dict[str, pd.Series]]:
-    component_series = {"prob_buy": [], "ranking": [], "ae_familiarity": []}
+    component_series = {"prob_buy": [], "ranking": [], "ae_familiarity": [], "direction": []}
     derived_series: dict[str, pd.Series] = {}
     numeric_columns = out.reindex(columns=columns).apply(pd.to_numeric, errors="coerce") if columns else pd.DataFrame(index=out.index)
     component_rules = PREDICTION_COMPONENT_SUFFIX_RULES.get(artifact_type, {})
@@ -96,7 +100,7 @@ def _apply_derived_columns(out: pd.DataFrame, derived_columns: dict[str, pd.Seri
 
 def _collect_prediction_components(feature_df: pd.DataFrame, panel_meta: dict[str, Any]) -> pd.DataFrame:
     out = feature_df.copy()
-    components: dict[str, list[pd.Series]] = {"prob_buy": [], "ranking": [], "ae_familiarity": []}
+    components: dict[str, list[pd.Series]] = {"prob_buy": [], "ranking": [], "ae_familiarity": [], "direction": []}
     for source in list(panel_meta.get("extra_panel_sources") or []):
         artifact_type = str(source.get("artifact_type") or "").strip().upper()
         source_components, derived_columns = _source_component_series(
@@ -115,10 +119,17 @@ def _collect_prediction_components(feature_df: pd.DataFrame, panel_meta: dict[st
         components["ae_familiarity"],
         default=pd.Series(PREDICTION_COMPONENT_DEFAULTS["ae_familiarity"], index=out.index, dtype=float),
     )
+    out["direction"] = _mean_or_default(
+        components["direction"],
+        default=pd.Series(PREDICTION_COMPONENT_DEFAULTS["direction"], index=out.index, dtype=float),
+    )
     out["prob_buy"] = pd.to_numeric(out["prob_buy"], errors="coerce").fillna(0.0)
     out["ranking"] = pd.to_numeric(out["ranking"], errors="coerce").fillna(0.0)
     out["ae_familiarity"] = pd.to_numeric(out["ae_familiarity"], errors="coerce").fillna(
         PREDICTION_COMPONENT_DEFAULTS["ae_familiarity"]
+    )
+    out["direction"] = pd.to_numeric(out["direction"], errors="coerce").fillna(
+        PREDICTION_COMPONENT_DEFAULTS["direction"]
     )
     if "ae_reconstruction_error" in out.columns:
         out["ae_reconstruction_error"] = pd.to_numeric(out["ae_reconstruction_error"], errors="coerce")

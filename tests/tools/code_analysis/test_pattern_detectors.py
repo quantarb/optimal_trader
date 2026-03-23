@@ -16,6 +16,8 @@ class PatternDetectorTests(unittest.TestCase):
             _write(
                 root / "sample" / "demo.py",
                 """
+import json
+
 from dataclasses import dataclass
 
 REGISTRY = {}
@@ -87,6 +89,10 @@ def nested(matrix):
 
 def build_report(cfg: ModelConfig) -> TradeReport:
     return TradeReport(symbol=str(cfg.window))
+
+
+def build_input_payload(cfg: ModelConfig) -> str:
+    return json.dumps({"symbol": str(cfg.window)})
 """.strip()
                 + "\n",
             )
@@ -102,6 +108,12 @@ def build_report(cfg: ModelConfig) -> TradeReport:
             self.assertIn("loop append simple transform", anti_patterns)
             self.assertIn("repeated if/elif dispatch chains", anti_patterns)
             self.assertIn("magic numbers", anti_patterns)
+            hidden_side_effect_symbols = {
+                row["symbol"]
+                for row in anti_report["findings"]
+                if row["pattern"] == "hidden side effects"
+            }
+            self.assertNotIn("sample.demo.build_input_payload", hidden_side_effect_symbols)
 
             self.assertIn("pure functions", good_patterns)
             self.assertIn("dataclass config pattern", good_patterns)

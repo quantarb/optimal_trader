@@ -60,6 +60,7 @@ class ArtifactTrainingDatasetSpec:
     max_hold_days: int | None = None
     sample_weight_mode: str = "uniform"
     oracle_cluster_keys: tuple[str, ...] = ()
+    missing_feature_policy: str = "any_coverage"
 
     def selected_feature_families(self) -> tuple[str, ...]:
         cleaned = tuple(str(value).strip() for value in self.feature_families if str(value).strip())
@@ -100,6 +101,12 @@ class ArtifactTrainingDatasetSpec:
                 cleaned.append(key)
         return tuple(cleaned)
 
+    def normalized_missing_feature_policy(self) -> str:
+        value = str(self.missing_feature_policy or "any_coverage").strip().lower() or "any_coverage"
+        if value in {"complete_case", "drop_missing"}:
+            return "complete_case"
+        return "any_coverage"
+
 
 @dataclass(frozen=True)
 class ModelTrainingSpec:
@@ -123,6 +130,7 @@ class ModelTrainingSpec:
     sample_weight_mode: str = "uniform"
     oracle_cluster_keys: tuple[str, ...] = ()
     prediction_artifact_ids: tuple[int, ...] = ()
+    missing_feature_policy: str = "any_coverage"
 
 
 @dataclass(frozen=True)

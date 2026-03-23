@@ -8,7 +8,9 @@ from domain.trades.operations import (
 )
 from domain.trades.optimal import (
     Trade,
+    solve_joint_trade_sequence_by_frequency,
     solve_joint_trades_by_frequency,
+    solve_optimal_joint_trade_sequence_generic,
     solve_longs_by_frequency,
     solve_optimal_joint_trades_generic,
     solve_optimal_trades_generic,
@@ -25,12 +27,13 @@ __all__ = [
     "build_label_rows_from_completed_trades",
     "build_label_statistics",
     "labels_panel_to_trades_df",
+    "solve_joint_trade_sequence_by_frequency",
     "solve_joint_trades_by_frequency",
     "solve_longs_by_frequency",
+    "solve_optimal_joint_trade_sequence_generic",
     "solve_optimal_joint_trades_generic",
     "solve_optimal_trades_generic",
     "solve_shorts_by_frequency",
     "solve_trades_by_frequency",
     "trade_return_pct",
 ]
-

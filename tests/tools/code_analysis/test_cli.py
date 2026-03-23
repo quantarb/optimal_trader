@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +106,8 @@ def compute_total(values: list[int]) -> int:
                     "current",
                     "--output",
                     str(output_dir),
+                    "--paths",
+                    "sample/logic.py",
                 ],
                 catch_exceptions=False,
             )
@@ -114,6 +117,9 @@ def compute_total(values: list[int]) -> int:
             self.assertTrue((output_dir / "quality_comparison_baseline_vs_current.md").exists())
             self.assertTrue((output_dir / "blast_radius_report.json").exists())
             self.assertTrue((output_dir / "refactor_priority_report.md").exists())
+            priority_payload = json.loads((output_dir / "refactor_priority_report.json").read_text(encoding="utf-8"))
+            self.assertIn("symbol_recommendations", priority_payload)
+            self.assertIn("pattern_type_counts", priority_payload["summary"])
 
 
 def _write(path: Path, content: str) -> None:

@@ -550,6 +550,22 @@ def _market_scoring_components(
     }
 
 
+def _market_identity_components(
+    *,
+    symbol: str,
+    as_of_date: str,
+    canonical_features: dict[str, list[CanonicalFeatureValue]],
+    optional_notes: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "symbol": str(symbol).upper(),
+        "as_of_date": str(as_of_date),
+        "canonical_features": canonical_features,
+        "feature_family_summaries": _feature_family_summaries(canonical_features),
+        "optional_notes": dict(optional_notes or {}),
+    }
+
+
 def _market_insight_components(
     *,
     symbol: str,
@@ -574,10 +590,12 @@ def _market_insight_components(
     )
     analog_rows = list(same_symbol_analogs or []) + list(cross_symbol_analogs or [])
     return {
-        "symbol": str(symbol).upper(),
-        "as_of_date": str(as_of_date),
-        "canonical_features": canonical_features,
-        "feature_family_summaries": _feature_family_summaries(canonical_features),
+        **_market_identity_components(
+            symbol=symbol,
+            as_of_date=as_of_date,
+            canonical_features=canonical_features,
+            optional_notes=optional_notes,
+        ),
         **_market_analog_components(
             same_symbol_analogs=same_symbol_analogs,
             cross_symbol_analogs=cross_symbol_analogs,
@@ -593,7 +611,6 @@ def _market_insight_components(
             current_cluster=current_cluster,
             nearest_clusters=nearest_clusters,
         ),
-        "optional_notes": dict(optional_notes or {}),
     }
 
 

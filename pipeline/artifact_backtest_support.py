@@ -325,7 +325,7 @@ def _report_summary(
     }
 
 
-def build_equity_curve_context(
+def _equity_context_state(
     backtest_artifact: Artifact,
     *,
     load_artifact_preview_rows: PreviewLoader,
@@ -354,20 +354,31 @@ def build_equity_curve_context(
         normalized_date=normalized_date,
         safe_float=safe_float,
     )
-    report_summary = _report_summary(
-        content_payload=content_payload,
-        points=points,
-        daily_stats=daily_stats,
-        preview_rows=preview_rows,
-        contribution_rows=contribution_rows,
-        benchmark_context=benchmark_context,
-        safe_float=safe_float,
-    )
     return {
-        "equity_curve_points_json": json.dumps(points),
-        "benchmark_curve_points_json": json.dumps(benchmark_context["points"]),
-        "equity_curve_count": int(len(points)),
-        "backtest_daily_rows_full": daily_rows,
+        "points": points,
+        "daily_rows": daily_rows,
+        "daily_stats": daily_stats,
+        "contribution_rows": contribution_rows,
+        "benchmark_context": benchmark_context,
+        "report_summary": _report_summary(
+            content_payload=content_payload,
+            points=points,
+            daily_stats=daily_stats,
+            preview_rows=preview_rows,
+            contribution_rows=contribution_rows,
+            benchmark_context=benchmark_context,
+            safe_float=safe_float,
+        ),
+    }
+
+
+def _equity_context_series_payloads(
+    *,
+    daily_rows: list[dict[str, Any]],
+    normalized_date: StringNormalizer,
+    safe_float: FloatCoercer,
+) -> dict[str, str]:
+    return {
         "turnover_series_json": json.dumps(
             _series_rows(
                 daily_rows,
@@ -388,7 +399,36 @@ def build_equity_curve_context(
                 safe_float=safe_float,
             )
         ),
-        "monthly_return_rows": daily_stats["monthly_return_rows"],
-        "contribution_rows": contribution_rows,
-        "report_summary": report_summary,
+    }
+
+
+def build_equity_curve_context(
+    backtest_artifact: Artifact,
+    *,
+    load_artifact_preview_rows: PreviewLoader,
+    normalized_date: StringNormalizer,
+    safe_float: FloatCoercer,
+    to_int: IntCoercer,
+) -> dict[str, Any]:
+    state = _equity_context_state(
+        backtest_artifact,
+        load_artifact_preview_rows=load_artifact_preview_rows,
+        normalized_date=normalized_date,
+        safe_float=safe_float,
+        to_int=to_int,
+    )
+    series_payloads = _equity_context_series_payloads(
+        daily_rows=list(state["daily_rows"]),
+        normalized_date=normalized_date,
+        safe_float=safe_float,
+    )
+    return {
+        "equity_curve_points_json": json.dumps(state["points"]),
+        "benchmark_curve_points_json": json.dumps(state["benchmark_context"]["points"]),
+        "equity_curve_count": int(len(state["points"])),
+        "backtest_daily_rows_full": list(state["daily_rows"]),
+        **series_payloads,
+        "monthly_return_rows": list(state["daily_stats"]["monthly_return_rows"]),
+        "contribution_rows": list(state["contribution_rows"]),
+        "report_summary": dict(state["report_summary"]),
     }

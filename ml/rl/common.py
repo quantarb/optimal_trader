@@ -20,6 +20,9 @@ class RLConfig:
     drawdown_penalty_lambda: float = 0.10
     seed: int = 42
     force_buy_sell_everything: bool = False
+    episodes_per_symbol: int = 3
+    include_rank_features: bool = True
+    selection_score_col: str = "buy_score"
 
 
 def trade_cost_from_bps(gross: float, fee_bps: float, slippage_bps: float) -> float:
@@ -62,6 +65,11 @@ def make_rebalance_mask(dates: pd.DatetimeIndex, freq: str | None) -> np.ndarray
     ds = pd.Series(dates, index=dates)
     rebalance_dates = ds.groupby(dates.to_period(period_freq)).max().values
     return dates.isin(pd.DatetimeIndex(rebalance_dates))
+
+
+def cross_sectional_rank_pct(df: pd.DataFrame) -> pd.DataFrame:
+    ranked = df.rank(axis=1, pct=True, method="average")
+    return ranked.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def backtest_strategy_per_stock_discrete(
@@ -282,6 +290,391 @@ def summarize_returns(returns: pd.Series, years: list[int], mode: str) -> pd.Dat
             }
         )
     return pd.DataFrame(rows)
+
+
+def run_sb3_per_symbol_workflow(
+    *,
+    bt_panel: pd.DataFrame,
+    cfg: RLConfig,
+    train_split_date: pd.Timestamp,
+    years: list[int],
+    algorithm: str = "a2c",
+) -> dict[str, Any]:
+    try:
+        import gymnasium as gym
+        from gymnasium import spaces
+        from stable_baselines3 import A2C, PPO
+        from stable_baselines3.common.vec_env import DummyVecEnv
+    except ImportError as e:
+        raise ImportError("This workflow requires gymnasium + stable-baselines3.") from e
+
+    symbols = sorted(bt_panel.index.get_level_values("symbol").unique())
+    n_symbols = len(symbols)
+    action_names = np.array(["hold", "buy", "sell"])
+    score_col = str(cfg.selection_score_col)
+    if score_col not in bt_panel.columns:
+        raise KeyError(f"Selection score column '{score_col}' not found in bt_panel.")
+
+    def pivot(col: str) -> pd.DataFrame:
+        return (
+            bt_panel[[col]]
+            .reset_index()
+            .pivot(index="date", columns="symbol", values=col)
+            .reindex(columns=symbols)
+            .sort_index()
+        )
+
+    p_buy = pivot("prob_buy").shift(1)
+    p_reg = pivot("pred_rf_reg").shift(1)
+    ae_fam = pivot("ae_familiarity").shift(1)
+    select_score = pivot(score_col).shift(1)
+    close = pivot("close")
+
+    common_dates = (
+        p_buy.index
+        .intersection(p_reg.index)
+        .intersection(ae_fam.index)
+        .intersection(select_score.index)
+        .intersection(close.index)
+    )
+    p_buy = p_buy.loc[common_dates].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    p_reg = p_reg.loc[common_dates].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    ae_fam = ae_fam.loc[common_dates].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    select_score = select_score.loc[common_dates].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    close = close.loc[common_dates].replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+
+    feature_frames = [p_buy, p_reg, ae_fam]
+    feature_names = ["prob_buy", "pred_rf_reg", "ae_familiarity"]
+    if bool(cfg.include_rank_features):
+        p_buy_rank = cross_sectional_rank_pct(p_buy)
+        p_reg_rank = cross_sectional_rank_pct(p_reg)
+        ae_fam_rank = cross_sectional_rank_pct(ae_fam)
+        feature_frames.extend([p_buy_rank, p_reg_rank, ae_fam_rank])
+        feature_names.extend(["prob_buy_rank", "pred_rf_reg_rank", "ae_fam_rank"])
+
+    eligibility_threshold = select_score.quantile(float(cfg.eligibility_quantile), axis=1)
+    eligible = (
+        select_score.ge(eligibility_threshold, axis=0)
+        & close.gt(0.0)
+    ).fillna(False)
+
+    feat_t = np.stack([frame.to_numpy(dtype=np.float32) for frame in feature_frames], axis=-1)
+
+    lookback = int(cfg.lookback_window)
+    if len(common_dates) <= lookback:
+        raise RuntimeError(f"Not enough rows ({len(common_dates)}) for lookback_window={lookback}.")
+
+    x_seq, c_seq, e_seq, s_seq, d_seq = [], [], [], [], []
+    close_np = close.to_numpy(dtype=np.float32)
+    elig_np = eligible.to_numpy(dtype=bool)
+    score_np = select_score.to_numpy(dtype=np.float32)
+    for t in range(lookback - 1, len(common_dates)):
+        x_seq.append(feat_t[t - lookback + 1 : t + 1])
+        c_seq.append(close_np[t])
+        e_seq.append(elig_np[t])
+        s_seq.append(score_np[t])
+        d_seq.append(common_dates[t])
+
+    x_seq = np.asarray(x_seq, dtype=np.float32)
+    c_seq = np.asarray(c_seq, dtype=np.float32)
+    e_seq = np.asarray(e_seq, dtype=bool)
+    s_seq = np.asarray(s_seq, dtype=np.float32)
+    d_seq = pd.DatetimeIndex(d_seq)
+
+    rebalance_mask = make_rebalance_mask(d_seq, cfg.rebalance_freq)
+    split_ts = pd.Timestamp(train_split_date)
+    train_mask_full = np.asarray(d_seq <= split_ts, dtype=bool)
+    eval_mask_full = np.asarray(d_seq > split_ts, dtype=bool)
+    if train_mask_full.sum() < 30:
+        raise RuntimeError(
+            f"Too few RL training rows before train_split_date={split_ts.date()} "
+            f"(found {int(train_mask_full.sum())}). Provide a panel that includes pre-split history."
+        )
+    if eval_mask_full.sum() < 5:
+        raise RuntimeError(
+            f"Too few RL evaluation rows after train_split_date={split_ts.date()} "
+            f"(found {int(eval_mask_full.sum())})."
+        )
+
+    flat_train = x_seq[train_mask_full].reshape(-1, x_seq.shape[-1])
+    x_mu = flat_train.mean(axis=0, keepdims=True)
+    x_sd = flat_train.std(axis=0, keepdims=True)
+    x_sd = np.where(x_sd < 1e-9, 1.0, x_sd)
+    xn = ((x_seq - x_mu) / x_sd).astype(np.float32)
+
+    x_agent = xn[rebalance_mask]
+    c_agent = c_seq[rebalance_mask]
+    e_agent = e_seq[rebalance_mask]
+    prev_close_agent = np.roll(c_agent, shift=1, axis=0)
+    prev_close_agent[0] = c_agent[0]
+    train_mask_agent = train_mask_full[rebalance_mask]
+    if train_mask_agent.sum() < 20:
+        raise RuntimeError("Too few rebalance training rows.")
+
+    x_train = x_agent[train_mask_agent]
+    c_train = c_agent[train_mask_agent]
+    e_train = e_agent[train_mask_agent]
+    pc_train = prev_close_agent[train_mask_agent]
+
+    class CycledSingleSymbolEnv(gym.Env):
+        metadata = {"render_modes": []}
+
+        def __init__(self, xa: np.ndarray, ca: np.ndarray, ea: np.ndarray, pca: np.ndarray):
+            super().__init__()
+            self.x = np.asarray(xa, dtype=np.float32)
+            self.close_arr = np.asarray(ca, dtype=np.float32)
+            self.elig_arr = np.asarray(ea, dtype=bool)
+            self.prev_close_arr = np.asarray(pca, dtype=np.float32)
+            self.initial_balance = float(cfg.initial_balance)
+            self.fee_bps = float(cfg.fee_bps)
+            self.slippage_bps = float(cfg.slippage_bps)
+            self.n_symbols = self.x.shape[2]
+            self.feature_dim = self.x.shape[3]
+            self.obs_dim = int(self.x.shape[1] * self.feature_dim) + 1
+            self.n = len(self.x)
+            self.action_space = spaces.Discrete(3)
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32)
+            self.rng = np.random.default_rng(int(cfg.seed))
+            self.episode_counter = 0
+            self.symbol_order = np.arange(self.n_symbols, dtype=int)
+            self.reset()
+
+        def _obs(self) -> np.ndarray:
+            symbol_view = self.x[self.t, :, self.symbol_idx, :].reshape(-1).astype(np.float32)
+            position_flag = np.array([1.0 if self.shares > 0.0 else 0.0], dtype=np.float32)
+            return np.concatenate([symbol_view, position_flag], axis=0)
+
+        def reset(self, seed=None, options=None):
+            super().reset(seed=seed)
+            self.t = 0
+            order_pos = self.episode_counter % self.n_symbols
+            if order_pos == 0:
+                self.symbol_order = self.rng.permutation(self.n_symbols)
+            self.symbol_idx = int(self.symbol_order[order_pos])
+            self.episode_counter += 1
+            self.balance = float(self.initial_balance)
+            self.shares = 0.0
+            self.prev_net = float(self.initial_balance)
+            self.peak_net = float(self.initial_balance)
+            return self._obs(), {}
+
+        def step(self, action):
+            at = int(np.clip(np.rint(float(np.asarray(action).reshape(-1)[0])), 0, 2))
+            px = float(self.close_arr[self.t, self.symbol_idx])
+            prev_px = float(self.prev_close_arr[self.t, self.symbol_idx])
+            eligible_t = bool(self.elig_arr[self.t, self.symbol_idx])
+            cost_rate = (self.fee_bps + self.slippage_bps) / 10000.0
+
+            if at == 1 and ((not eligible_t) or self.shares > 0.0 or px <= 0.0):
+                at = 0
+            if at == 2 and self.shares <= 0.0:
+                at = 0
+
+            if at == 2 and self.shares > 0.0 and px > 0.0:
+                gross = self.shares * px
+                fee = trade_cost_from_bps(gross, self.fee_bps, self.slippage_bps)
+                self.balance += gross - fee
+                self.shares = 0.0
+            elif at == 1 and self.shares <= 0.0 and px > 0.0 and self.balance > 0.0:
+                gross = self.balance / (1.0 + cost_rate)
+                fee = trade_cost_from_bps(gross, self.fee_bps, self.slippage_bps)
+                self.shares = gross / px if px > 0.0 else 0.0
+                self.balance = max(0.0, self.balance - gross - fee)
+
+            net_worth = self.balance + (self.shares * px if px > 0.0 else 0.0)
+            self.peak_net = max(self.peak_net, net_worth)
+            daily_ret = (net_worth - self.prev_net) / max(self.prev_net, 1e-9)
+            bh_daily_ret = 0.0
+            if prev_px > 0.0 and px > 0.0:
+                bh_daily_ret = (px - prev_px) / prev_px
+            drawdown = max(0.0, (self.peak_net - net_worth) / max(self.peak_net, 1e-9))
+            reward = (daily_ret - bh_daily_ret) - float(cfg.drawdown_penalty_lambda) * drawdown
+            self.prev_net = net_worth
+
+            self.t += 1
+            terminated = self.t >= self.n
+            truncated = False
+            obs = np.zeros(self.obs_dim, dtype=np.float32) if terminated else self._obs()
+            info = {
+                "net_worth": float(net_worth),
+                "balance": float(self.balance),
+                "symbol_index": int(self.symbol_idx),
+                "action_type": int(at),
+                "eligible": bool(eligible_t),
+                "drawdown": float(drawdown),
+            }
+            return obs, float(reward), terminated, truncated, info
+
+    train_env = DummyVecEnv([lambda: CycledSingleSymbolEnv(x_train, c_train, e_train, pc_train)])
+
+    train_steps_per_episode = int(len(x_train))
+    if train_steps_per_episode <= 0:
+        raise RuntimeError("No training steps available.")
+    episodes_per_symbol = max(int(cfg.episodes_per_symbol), 1)
+    total_symbol_episodes = int(episodes_per_symbol * n_symbols)
+    total_timesteps = int(total_symbol_episodes * train_steps_per_episode)
+
+    algo = str(algorithm).strip().lower()
+    if algo == "a2c":
+        model = A2C("MlpPolicy", train_env, seed=int(cfg.seed), verbose=0)
+    elif algo == "ppo":
+        model = PPO("MlpPolicy", train_env, seed=int(cfg.seed), verbose=0)
+    else:
+        raise ValueError("algorithm must be 'a2c' or 'ppo'.")
+    model.learn(total_timesteps=total_timesteps)
+
+    d_eval = d_seq[eval_mask_full]
+    x_eval = xn[eval_mask_full]
+    c_eval = c_seq[eval_mask_full]
+    e_eval = e_seq[eval_mask_full]
+    s_eval = s_seq[eval_mask_full]
+    rb_eval = rebalance_mask[eval_mask_full]
+
+    raw_action_eval = np.zeros((len(d_eval), n_symbols), dtype=int)
+    portfolio_action_eval = np.zeros((len(d_eval), n_symbols), dtype=int)
+    holdings_count = np.zeros(len(d_eval), dtype=int)
+    held_idx: set[int] = set()
+    for t in range(len(d_eval)):
+        if not bool(rb_eval[t]):
+            holdings_count[t] = len(held_idx)
+            continue
+
+        for j in range(n_symbols):
+            position_flag = np.array([1.0 if j in held_idx else 0.0], dtype=np.float32)
+            obs_t = np.concatenate([x_eval[t, :, j, :].reshape(-1), position_flag], axis=0).reshape(1, -1)
+            act_t, _ = model.predict(obs_t, deterministic=True)
+            raw_action_eval[t, j] = int(np.clip(np.rint(float(np.asarray(act_t).reshape(-1)[0])), 0, 2))
+
+        elig_t = np.asarray(e_eval[t], dtype=bool)
+        score_t = np.asarray(s_eval[t], dtype=float)
+        valid_score = np.isfinite(score_t)
+
+        forced_exits = {
+            j for j in held_idx
+            if raw_action_eval[t, j] == 2 or (not bool(elig_t[j])) or (not bool(valid_score[j]))
+        }
+        retained = [j for j in sorted(held_idx) if j not in forced_exits]
+
+        buy_candidates = [
+            j for j in np.where((raw_action_eval[t] == 1) & elig_t & valid_score)[0]
+            if j not in retained
+        ]
+        ranked_candidates = sorted(buy_candidates, key=lambda j: (-float(score_t[j]), symbols[j]))
+        available_slots = None if cfg.max_stocks_per_day is None else max(0, int(cfg.max_stocks_per_day) - len(retained))
+        additions = ranked_candidates if available_slots is None else ranked_candidates[:available_slots]
+
+        new_holdings = set(retained).union(additions)
+        enter_idx = sorted(new_holdings - held_idx)
+        exit_idx = sorted(held_idx - new_holdings)
+        if enter_idx:
+            portfolio_action_eval[t, enter_idx] = 1
+        if exit_idx:
+            portfolio_action_eval[t, exit_idx] = 2
+        held_idx = new_holdings
+        holdings_count[t] = len(held_idx)
+
+    close_bt = pd.DataFrame(c_eval, index=d_eval, columns=symbols)
+    rl_eq, rl_ret, rl_cash, exec_details = backtest_strategy_per_stock_discrete(
+        action_type=portfolio_action_eval,
+        close_by_day=close_bt,
+        eligible_by_day=e_eval,
+        buy_score_by_day=s_eval,
+        initial_balance=float(cfg.initial_balance),
+        fee_bps=float(cfg.fee_bps),
+        slippage_bps=float(cfg.slippage_bps),
+        max_buys_per_day=None,
+        rebalance_mask=rb_eval,
+        return_execution_stats=True,
+        return_trade_log=True,
+    )
+    rl_cash = rl_cash.mask(rl_cash.abs() < 1e-9, 0.0)
+
+    rl_total_return_pct = float((rl_eq.iloc[-1] / rl_eq.iloc[0] - 1.0) * 100.0) if len(rl_eq) else np.nan
+    rl_sharpe = float((rl_ret.mean() / rl_ret.std(ddof=0)) * np.sqrt(252.0)) if rl_ret.std(ddof=0) > 1e-12 else np.nan
+    rl_mdd = float((((rl_eq / rl_eq.cummax()) - 1.0).min()) * 100.0) if len(rl_eq) else np.nan
+
+    mode_name = f"rl_agent_{algo}_per_symbol_framework_backtest"
+    yearly_df = summarize_returns(rl_ret, years, mode=mode_name)
+    summary_df = pd.DataFrame(
+        [
+            {
+                "mode": mode_name,
+                "years": f"{years[0]}-{years[-1]}",
+                "combined_total_return_pct": rl_total_return_pct,
+                "combined_sharpe": rl_sharpe,
+                "combined_max_drawdown_pct": rl_mdd,
+                "initial_balance": float(cfg.initial_balance),
+                "fee_bps": float(cfg.fee_bps),
+                "slippage_bps": float(cfg.slippage_bps),
+                "symbols": len(symbols),
+                "avg_eligible_names": float(np.mean(e_eval.sum(axis=1))),
+                "avg_selected_names": float(np.mean(holdings_count)),
+                "eligibility_quantile": float(cfg.eligibility_quantile),
+                "max_stocks_per_day": cfg.max_stocks_per_day,
+                "selection_score_col": score_col,
+                "feature_names": ", ".join(feature_names),
+                "reward_objective": "agent_daily_return_minus_symbol_buy_and_hold_minus_drawdown_penalty",
+                "episodes_per_symbol": episodes_per_symbol,
+                "total_symbol_episodes": total_symbol_episodes,
+                "rebalance_freq": cfg.rebalance_freq,
+                "rebalance_days": int(np.sum(rb_eval)),
+            }
+        ]
+    )
+
+    raw_flat_types = raw_action_eval.reshape(-1)
+    raw_action_counts = pd.Series(action_names[raw_flat_types]).value_counts().reindex(action_names, fill_value=0)
+    portfolio_flat_types = portfolio_action_eval.reshape(-1)
+    action_counts = pd.Series(action_names[portfolio_flat_types]).value_counts().reindex(action_names, fill_value=0)
+    executed_action_counts = pd.Series(
+        {
+            "buy": int(exec_details["executed_buy_count"]),
+            "sell": int(exec_details["executed_sell_count"]),
+        },
+        dtype=int,
+    )
+    trade_log = exec_details.get("trade_log", pd.DataFrame())
+    final_holds = np.zeros(n_symbols, dtype=bool)
+    if held_idx:
+        final_holds[np.asarray(sorted(held_idx), dtype=int)] = True
+    last_actions = pd.DataFrame(
+        {
+            "symbol": symbols,
+            "eligible": e_eval[-1],
+            "selection_score": s_eval[-1],
+            "raw_action_type": raw_action_eval[-1],
+            "raw_action_name": action_names[raw_action_eval[-1]],
+            "portfolio_action_type": portfolio_action_eval[-1],
+            "portfolio_action_name": action_names[portfolio_action_eval[-1]],
+            "selected_hold": final_holds,
+        }
+    )
+
+    return {
+        "model": model,
+        "symbols": symbols,
+        "close_bt": close_bt,
+        "policy_action_type": portfolio_action_eval,
+        "raw_policy_action_type": raw_action_eval,
+        "eligible_by_day": e_eval,
+        "buy_score_by_day": s_eval,
+        "dates": d_eval,
+        "rebalance_mask": rb_eval,
+        "rl_equity": rl_eq,
+        "rl_returns": rl_ret,
+        "rl_cash": rl_cash,
+        "rl_yearly_df": yearly_df,
+        "rl_summary_df": summary_df,
+        "action_counts": action_counts,
+        "raw_action_counts": raw_action_counts,
+        "executed_action_counts": executed_action_counts,
+        "trade_log": trade_log,
+        "last_actions": last_actions,
+        "episodes_per_symbol": episodes_per_symbol,
+        "total_symbol_episodes": total_symbol_episodes,
+        "train_steps_per_episode": train_steps_per_episode,
+        "total_timesteps": total_timesteps,
+    }
 
 
 def run_sb3_workflow(

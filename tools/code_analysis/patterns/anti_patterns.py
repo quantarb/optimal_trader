@@ -17,7 +17,7 @@ from .shared import (
     expression_name,
     handler_swallows_exception,
     has_broad_exception_handler,
-    has_hidden_side_effect,
+    hidden_side_effect_reasons,
     is_expensive_call,
     is_test_module_name,
     iter_calls,
@@ -104,6 +104,12 @@ def anti_patterns_markdown(report: AntiPatternReport) -> str:
                 f"- `{finding['pattern']}` in `{finding['symbol']}` at `{finding['file']}:{finding['line_start']}` [{finding['severity']}]"
             )
             sections.append(f"  - evidence: {finding['evidence']}")
+            if finding.get("confidence") is not None:
+                sections.append(f"  - confidence: {float(finding['confidence']):.2f}")
+            trigger_details = dict(finding.get("trigger_details") or {})
+            if trigger_details:
+                detail_preview = ", ".join(f"{key}={value}" for key, value in list(trigger_details.items())[:4])
+                sections.append(f"  - triggers: {detail_preview}")
             sections.append(f"  - suggestion: {finding['suggestion']}")
     else:
         sections.append("- none")
@@ -159,6 +165,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` contains nested iteration and estimated complexity {complexity}.",
                 suggestion="Pre-index inner lookups or split the inner loop into a helper with clearer invariants.",
                 metric_value=complexity,
+                confidence=0.96,
+                trigger_details={"complexity": complexity, "contains_nested_loop": True},
             )
         )
 
@@ -174,6 +182,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` reaches nesting depth {nesting}.",
                 suggestion="Prefer guard clauses or helper extraction so each branch handles one decision level.",
                 metric_value=nesting,
+                confidence=0.98,
+                trigger_details={"nesting_depth": nesting},
             )
         )
 
@@ -189,6 +199,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` spans {function.loc} lines with estimated complexity {complexity}.",
                 suggestion="Split orchestration, transformation, and output concerns into smaller helpers.",
                 metric_value=function.loc,
+                confidence=0.97,
+                trigger_details={"loc": function.loc, "complexity": complexity},
             )
         )
 
@@ -204,6 +216,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence="A loop appends directly into a list without additional control flow.",
                 suggestion="A list comprehension or generator pipeline would express the transformation more compactly.",
                 metric_value=1,
+                confidence=0.87,
+                trigger_details={"simple_append_loop": True},
             )
         )
 
@@ -220,6 +234,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` uses an if/elif chain with {dispatch_chain_length} branches.",
                 suggestion="A registry or dispatch table would make this branch set easier to extend safely.",
                 metric_value=dispatch_chain_length,
+                confidence=0.93,
+                trigger_details={"branch_count": dispatch_chain_length},
             )
         )
 
@@ -237,6 +253,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` embeds {len(magic_literals)} numeric literals (sample: {preview}).",
                 suggestion="Replace ad hoc thresholds with named constants so future edits preserve intent.",
                 metric_value=len(magic_literals),
+                confidence=0.78,
+                trigger_details={"literal_count": len(magic_literals), "sample_values": [item["value"] for item in magic_literals[:4]]},
             )
         )
 
@@ -254,10 +272,13 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` catches `Exception`/bare exceptions and returns a default without re-raising.",
                 suggestion="Catch the narrowest expected exception and preserve failure details for callers.",
                 metric_value=len(broad_handlers),
+                confidence=0.95,
+                trigger_details={"broad_handler_count": len(broad_handlers)},
             )
         )
 
-    if has_hidden_side_effect(function):
+    side_effect_reasons = hidden_side_effect_reasons(function)
+    if side_effect_reasons:
         findings.append(
             _finding(
                 pattern="hidden side effects",
@@ -269,6 +290,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"`{function.name}` reads like a query/transform helper but mutates state or performs effectful I/O.",
                 suggestion="Rename the function to surface the effect, or split the pure computation from the side effect.",
                 metric_value=1,
+                confidence=0.72,
+                trigger_details={"reasons": side_effect_reasons},
             )
         )
 
@@ -286,6 +309,8 @@ def _function_findings(module_context, function) -> list[dict[str, Any]]:
                 evidence=f"Loop bodies call potentially expensive operations repeatedly (sample: {preview}).",
                 suggestion="Hoist lookups outside the loop, batch work, or cache per-iteration dependencies.",
                 metric_value=len(expensive_calls),
+                confidence=0.69,
+                trigger_details={"expensive_calls": expensive_calls},
             )
         )
     return findings
@@ -305,6 +330,8 @@ def _class_findings(class_context) -> list[dict[str, Any]]:
                 evidence=f"`{class_context.name}` spans {class_context.loc} lines across {len(class_context.methods)} methods.",
                 suggestion="Split orchestration, configuration, and behavior into smaller collaborators or boundary objects.",
                 metric_value=max(class_context.loc, len(class_context.methods)),
+                confidence=0.95,
+                trigger_details={"loc": class_context.loc, "method_count": len(class_context.methods)},
             )
         )
     return findings
@@ -330,6 +357,8 @@ def _duplicate_workflow_findings(context: RepositoryAstContext, duplicate_report
                 evidence=f"Duplicate-code analysis found {len(members)} structurally similar members across {module_count} modules.",
                 suggestion="Extract the common workflow into a shared helper, stage, or boundary abstraction.",
                 metric_value=len(members),
+                confidence=0.84,
+                trigger_details={"cluster_id": cluster.get("cluster_id"), "module_count": module_count},
             )
         )
     return findings
@@ -353,6 +382,12 @@ def _architecture_violation_findings(context: RepositoryAstContext, architecture
                 evidence=str(violation.get("message") or violation.get("reason") or "Forbidden dependency detected."),
                 suggestion="Move the dependency behind an interface or redirect the import through an allowed layer boundary.",
                 metric_value=1,
+                confidence=0.98,
+                trigger_details={
+                    "source_layer": violation.get("source_layer"),
+                    "target_layer": violation.get("target_layer"),
+                    "dependency": violation.get("target_module"),
+                },
             )
         )
     return findings
@@ -360,12 +395,14 @@ def _architecture_violation_findings(context: RepositoryAstContext, architecture
 
 def _mixed_concern_finding(module_context, row: dict[str, Any]) -> dict[str, Any] | None:
     concern_count = int(row.get("concern_count") or 0)
+    family_count = int(row.get("concern_family_count") or 0)
     mixing_score = float(row.get("mixing_score") or 0.0)
-    if concern_count < 3 or mixing_score < 35.0:
+    dominant_share = float(row.get("dominant_concern_share") or 0.0)
+    if concern_count < 3 or family_count < 2 or mixing_score < 35.0:
         return None
     concern_names = ", ".join(item["concern"] for item in list(row.get("concerns") or [])[:4]) or "multiple concerns"
     severity = "medium"
-    if concern_count >= 4 or mixing_score >= 30.0:
+    if family_count >= 3 or mixing_score >= 42.0 or dominant_share < 0.4:
         severity = "high"
     return _finding(
         pattern="mixed concerns modules",
@@ -374,9 +411,16 @@ def _mixed_concern_finding(module_context, row: dict[str, Any]) -> dict[str, Any
         line_start=1,
         line_end=module_context.line_count,
         severity=severity,
-        evidence=f"`{module_context.module}` spans {concern_count} concern categories ({concern_names}) with mixing score {mixing_score:.1f}.",
+        evidence=f"`{module_context.module}` spans {concern_count} concern categories across {family_count} concern families ({concern_names}) with mixing score {mixing_score:.1f}.",
         suggestion="Separate data access, orchestration, and reporting logic into narrower modules with one stable responsibility.",
         metric_value=round(mixing_score, 2),
+        confidence=0.66,
+        trigger_details={
+            "concern_count": concern_count,
+            "family_count": family_count,
+            "dominant_concern": row.get("dominant_concern"),
+            "dominant_concern_share": dominant_share,
+        },
     )
 
 
@@ -448,8 +492,10 @@ def _finding(
     evidence: str,
     suggestion: str,
     metric_value: int | float,
+    confidence: float | None = None,
+    trigger_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    row = {
         "pattern": pattern,
         "quality_signal": "bad",
         "file": file,
@@ -461,6 +507,11 @@ def _finding(
         "suggestion": suggestion,
         "metric_value": metric_value,
     }
+    if confidence is not None:
+        row["confidence"] = round(float(confidence), 2)
+    if trigger_details:
+        row["trigger_details"] = dict(trigger_details)
+    return row
 
 
 def _build_summary(findings: list[dict[str, Any]]) -> dict[str, Any]:

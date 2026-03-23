@@ -463,6 +463,7 @@ def select_symbols_with_metadata_filter(
         "tree_rules": rules,
         "selected_sector_counts": _value_counts_map(selected.get("sector", pd.Series(dtype=object))),
         "selected_industry_counts": _value_counts_map(selected.get("industry", pd.Series(dtype=object))),
+        "selected_country_counts": _value_counts_map(selected.get("country", pd.Series(dtype=object))),
         "selected_exchange_counts": _value_counts_map(selected.get("exchange", pd.Series(dtype=object))),
         "score_rows": [
             {
@@ -471,6 +472,7 @@ def select_symbols_with_metadata_filter(
                 "positive_probability": _round_float(_safe_float(row.get("positive_probability")), 6),
                 "sector": str(row.get("sector") or "Unknown"),
                 "industry": str(row.get("industry") or "Unknown"),
+                "country": str(row.get("country") or "Unknown"),
                 "exchange": str(row.get("exchange") or "Unknown"),
                 "avg_market_cap": _round_float(_safe_float(row.get("avg_market_cap"))),
             }

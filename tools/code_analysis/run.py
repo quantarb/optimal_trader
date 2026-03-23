@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -400,9 +401,19 @@ def generate_refactor_priority_report(
     *,
     output_dir: Path,
     blast_radius_payload: dict[str, Any],
+    code_health_payload: dict[str, Any] | None = None,
+    anti_pattern_payload: dict[str, Any] | None = None,
+    good_pattern_payload: dict[str, Any] | None = None,
+    responsibility_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir = ensure_output_dir(output_dir)
-    report = build_refactor_priority_report((blast_radius_payload or {}).get("report") or blast_radius_payload)
+    report = build_refactor_priority_report(
+        (blast_radius_payload or {}).get("report") or blast_radius_payload,
+        code_health_report=(code_health_payload or {}).get("report") or code_health_payload,
+        anti_pattern_report=(anti_pattern_payload or {}).get("report") or anti_pattern_payload,
+        good_pattern_report=(good_pattern_payload or {}).get("report") or good_pattern_payload,
+        responsibility_report=(responsibility_payload or {}).get("report") or responsibility_payload,
+    )
     json_path = output_dir / "refactor_priority_report.json"
     markdown_path = output_dir / "refactor_priority_report.md"
     write_json(json_path, report.to_dict())
@@ -497,6 +508,10 @@ def analyze_change_impact_bundle(
     refactor_priority_payload = generate_refactor_priority_report(
         output_dir=output_dir,
         blast_radius_payload=blast_radius_payload,
+        code_health_payload=quality_payload["code_health"],
+        anti_pattern_payload=quality_payload["anti_patterns"],
+        good_pattern_payload=quality_payload["good_patterns"],
+        responsibility_payload=responsibility_payload,
     )
     return {
         "blast_radius": blast_radius_payload,
@@ -728,13 +743,22 @@ def compare_quality_snapshots(
     output_dir: Path,
     baseline_label: str,
     current_label: str,
+    focus_paths: list[str] | None = None,
+    git_range: str = "",
 ) -> dict[str, Any]:
     output_dir = ensure_output_dir(output_dir)
     baseline = snapshot_from_payload(_load_snapshot(output_dir, baseline_label))
     current = snapshot_from_payload(_load_snapshot(output_dir, current_label))
     if baseline is None or current is None:
         raise FileNotFoundError("Both baseline and current quality snapshots must exist before comparison.")
-    comparison = build_quality_snapshot_comparison(baseline, current)
+    resolved_focus_paths = list(focus_paths or [])
+    if git_range:
+        resolved_focus_paths.extend(_git_changed_paths(Path(current.root or baseline.root or "."), git_range))
+    comparison = build_quality_snapshot_comparison(
+        baseline,
+        current,
+        focus_paths=resolved_focus_paths,
+    )
     json_path = output_dir / f"quality_comparison_{baseline_label}_vs_{current_label}.json"
     markdown_path = output_dir / f"quality_comparison_{baseline_label}_vs_{current_label}.md"
     write_json(json_path, comparison.to_dict())
@@ -758,6 +782,15 @@ def _load_snapshot(output_dir: Path, label: str) -> dict[str, Any]:
     if fallback.exists():
         return _load_json(fallback)
     return {}
+
+
+def _git_changed_paths(root: Path, git_range: str) -> list[str]:
+    command = ["git", "-C", str(root), "diff", "--name-only", git_range]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _discover_root_from_report(output_dir: Path, dependency_report: dict[str, Any], metrics_report: dict[str, Any]) -> Path:

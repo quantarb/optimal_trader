@@ -75,6 +75,7 @@ def build_model_training_spec(config: dict[str, Any]) -> ModelTrainingSpec:
         sample_weight_mode=str(config.get("sample_weight_mode") or "uniform").strip().lower() or "uniform",
         oracle_cluster_keys=tuple(oracle_cluster_keys),
         prediction_artifact_ids=tuple(prediction_artifact_ids),
+        missing_feature_policy=str(config.get("missing_feature_policy") or "any_coverage").strip().lower() or "any_coverage",
     )
 
 
@@ -132,6 +133,7 @@ def train_model_workflow(
         max_hold_days=spec.max_hold_days,
         sample_weight_mode=spec.sample_weight_mode,
         oracle_cluster_keys=spec.oracle_cluster_keys,
+        missing_feature_policy=spec.missing_feature_policy,
         progress_callback=progress_callback,
     )
 

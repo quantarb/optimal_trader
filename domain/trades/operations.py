@@ -62,7 +62,7 @@ def apply_trade_deduplication(
 
 
 def build_label_rows_from_completed_trades(completed_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert completed trade records into canonical label rows."""
+    """Convert completed trades into canonical event/action label rows."""
 
     label_rows: list[dict[str, Any]] = []
     for row in completed_trades:
@@ -79,24 +79,58 @@ def build_label_rows_from_completed_trades(completed_trades: list[dict[str, Any]
             hold_days = 0
         symbol = str(row.get("symbol") or "").strip().upper()
         entry_date = str(row.get("entry_date") or "")[:10]
+        exit_date = str(row.get("exit_date") or "")[:10]
         if not symbol or not entry_date:
             continue
+        if not exit_date:
+            continue
+        freq = str(row.get("freq") or "").strip()
+        try:
+            k = int(row.get("k") or 0)
+        except Exception:
+            k = 0
+        horizon = str(row.get("horizon") or "").strip() or (f"{freq}_k{k}" if freq and k > 0 else freq)
+        trade_id = str(row.get("trade_id") or "").strip() or (
+            f"T|{symbol}|E{entry_date.replace('-', '')}|X{exit_date.replace('-', '')}|S{side}|H{horizon or 'NA'}"
+        )
+        direction_label = 1 if side == "long" else 0
+        entry_action = "buy" if side == "long" else "short"
+        exit_action = "sell" if side == "long" else "cover"
+        common = {
+            "symbol": symbol,
+            "trade_id": trade_id,
+            "direction_label": direction_label,
+            "trade_return": round(ret, 8),
+            "hold_days": hold_days,
+            "trade_duration_days": hold_days,
+            "side": side,
+            "freq": freq,
+            "k": k,
+            "horizon": horizon,
+            "entry_date": entry_date,
+            "exit_date": exit_date,
+            "entry_px": row.get("entry_px") or "",
+            "exit_px": row.get("exit_px") or "",
+            "ret_pct": f"{ret * 100.0:.2f}%",
+        }
         label_rows.append(
             {
                 "date": entry_date,
-                "symbol": symbol,
-                "label": 1 if side == "long" else 0,
+                "event": "entry",
+                "label": entry_action,
+                "action_label": entry_action,
                 "market_position": 1 if side == "long" else -1,
-                "trade_return": round(ret, 8),
-                "hold_days": hold_days,
-                "side": side,
-                "freq": str(row.get("freq") or ""),
-                "k": int(row.get("k") or 0),
-                "entry_date": entry_date,
-                "exit_date": str(row.get("exit_date") or "")[:10],
-                "entry_px": row.get("entry_px") or "",
-                "exit_px": row.get("exit_px") or "",
-                "ret_pct": f"{ret * 100.0:.2f}%",
+                **common,
+            }
+        )
+        label_rows.append(
+            {
+                "date": exit_date,
+                "event": "exit",
+                "label": exit_action,
+                "action_label": exit_action,
+                "market_position": 0,
+                **common,
             }
         )
     return label_rows
@@ -112,6 +146,18 @@ def build_label_statistics(label_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "symbol_grouped_trade_stats": [],
         }
 
+    per_trade_rows: list[dict[str, Any]] = []
+    if any(str(row.get("trade_id") or "").strip() for row in label_rows):
+        seen_trade_ids: set[str] = set()
+        for row in label_rows:
+            trade_id = str(row.get("trade_id") or "").strip()
+            if not trade_id or trade_id in seen_trade_ids:
+                continue
+            seen_trade_ids.add(trade_id)
+            per_trade_rows.append(row)
+    else:
+        per_trade_rows = [row for row in label_rows if str(row.get("event") or "").strip().lower() != "exit"] or list(label_rows)
+
     returns: list[float] = []
     long_returns: list[float] = []
     short_returns: list[float] = []
@@ -119,15 +165,15 @@ def build_label_statistics(label_rows: list[dict[str, Any]]) -> dict[str, Any]:
     symbol_holds: dict[str, list[float]] = {}
     grouped_bucket: dict[tuple[str, str, int], list[float]] = {}
     grouped_holds: dict[tuple[str, str, int], list[float]] = {}
-    for row in label_rows:
+    for row in per_trade_rows:
         try:
             ret = float(row.get("trade_return") or 0.0)
         except Exception:
             ret = 0.0
         side = str(row.get("side") or "").strip().lower()
-        label = int(row.get("label") or 0)
         if side not in {"long", "short"}:
-            side = "long" if label == 1 else "short"
+            direction_label = int(row.get("direction_label") or 0)
+            side = "long" if direction_label == 1 else "short"
         freq = str(row.get("freq") or "D1").strip() or "D1"
         try:
             k = int(row.get("k") or 1)
@@ -247,4 +293,3 @@ def _median(values: list[float]) -> float | None:
     if count % 2 == 1:
         return float(sorted_values[mid])
     return float((sorted_values[mid - 1] + sorted_values[mid]) / 2.0)
-

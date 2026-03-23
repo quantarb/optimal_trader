@@ -10,7 +10,7 @@ from django.test import TestCase
 from domain.features.panel import representation_embedding_dataset_rows
 from domain.features.specs import FeatureBuildSpec
 from domain.labels.specs import LabelBuildSpec
-from domain.trades.operations import apply_trade_deduplication
+from domain.trades.operations import apply_trade_deduplication, build_label_rows_from_completed_trades, build_label_statistics
 from domain.trades.panel import labels_panel_to_trades_df
 from fmp.models import Symbol
 from pipeline.models import Artifact, PipelineRun
@@ -61,6 +61,49 @@ class DomainTradeTests(unittest.TestCase):
         )
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades.iloc[0]["symbol"], "AAPL")
+
+    def test_build_label_rows_from_completed_trades_emits_action_sequence(self):
+        rows = build_label_rows_from_completed_trades(
+            [
+                {
+                    "symbol": "AAPL",
+                    "side": "long",
+                    "freq": "W",
+                    "k": 1,
+                    "entry_date": "2024-01-01",
+                    "exit_date": "2024-01-05",
+                    "ret_dec": 0.12,
+                    "hold_days": 4,
+                }
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["event"], "entry")
+        self.assertEqual(rows[0]["label"], "buy")
+        self.assertEqual(rows[0]["market_position"], 1)
+        self.assertEqual(rows[1]["event"], "exit")
+        self.assertEqual(rows[1]["label"], "sell")
+        self.assertEqual(rows[1]["market_position"], 0)
+
+    def test_build_label_statistics_counts_unique_trades_not_events(self):
+        rows = build_label_rows_from_completed_trades(
+            [
+                {
+                    "symbol": "AAPL",
+                    "side": "long",
+                    "freq": "W",
+                    "k": 1,
+                    "entry_date": "2024-01-01",
+                    "exit_date": "2024-01-05",
+                    "ret_dec": 0.12,
+                    "hold_days": 4,
+                }
+            ]
+        )
+        stats = build_label_statistics(rows)
+        self.assertEqual(stats["trade_stats"]["total_trades"], 1)
+        self.assertEqual(stats["trade_stats"]["long_trades"], 1)
+        self.assertEqual(stats["trade_stats"]["short_trades"], 0)
 
 
 class ResearchWorkflowTests(TestCase):

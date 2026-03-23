@@ -44,6 +44,10 @@ class QualityComparison:
     regressed: list[dict[str, Any]]
     unchanged: list[dict[str, Any]]
     module_deltas: list[dict[str, Any]]
+    file_deltas: list[dict[str, Any]]
+    focus_paths: list[str] = field(default_factory=list)
+    focused_module_deltas: list[dict[str, Any]] = field(default_factory=list)
+    focused_file_deltas: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +58,10 @@ class QualityComparison:
             "regressed": list(self.regressed),
             "unchanged": list(self.unchanged),
             "module_deltas": list(self.module_deltas),
+            "file_deltas": list(self.file_deltas),
+            "focus_paths": list(self.focus_paths),
+            "focused_module_deltas": list(self.focused_module_deltas),
+            "focused_file_deltas": list(self.focused_file_deltas),
         }
 
 
@@ -147,7 +155,12 @@ def snapshot_from_payload(payload: dict[str, Any] | None) -> QualitySnapshot | N
     )
 
 
-def compare_quality_snapshots(baseline: QualitySnapshot, current: QualitySnapshot) -> QualityComparison:
+def compare_quality_snapshots(
+    baseline: QualitySnapshot,
+    current: QualitySnapshot,
+    *,
+    focus_paths: list[str] | None = None,
+) -> QualityComparison:
     metrics = _comparison_metrics(baseline, current)
     improved: list[dict[str, Any]] = []
     regressed: list[dict[str, Any]] = []
@@ -160,6 +173,10 @@ def compare_quality_snapshots(baseline: QualitySnapshot, current: QualitySnapsho
         else:
             unchanged.append(metric)
     module_deltas = _module_score_deltas(baseline.module_scores, current.module_scores)
+    file_deltas = _file_score_deltas(baseline.file_scores, current.file_scores)
+    normalized_focus_paths = _normalize_focus_paths(focus_paths or [])
+    focused_module_deltas = _focused_score_deltas(module_deltas, normalized_focus_paths, key="module")
+    focused_file_deltas = _focused_score_deltas(file_deltas, normalized_focus_paths, key="file")
     return QualityComparison(
         baseline_label=baseline.label,
         current_label=current.label,
@@ -168,6 +185,10 @@ def compare_quality_snapshots(baseline: QualitySnapshot, current: QualitySnapsho
         regressed=sorted(regressed, key=lambda row: (-abs(float(row["delta"])), row["metric"])),
         unchanged=sorted(unchanged, key=lambda row: row["metric"]),
         module_deltas=module_deltas,
+        file_deltas=file_deltas,
+        focus_paths=normalized_focus_paths,
+        focused_module_deltas=focused_module_deltas,
+        focused_file_deltas=focused_file_deltas,
     )
 
 
@@ -229,6 +250,33 @@ def quality_comparison_markdown(comparison: QualityComparison) -> str:
         )
     else:
         sections.append("- none")
+    sections.extend(["", "## File Score Deltas"])
+    if comparison.file_deltas:
+        sections.extend(
+            f"- `{row['file']}`: {row['before_score']:.2f} -> {row['after_score']:.2f} ({row['delta']:+.2f})"
+            for row in comparison.file_deltas[:20]
+        )
+    else:
+        sections.append("- none")
+    if comparison.focus_paths:
+        sections.extend(["", "## Focused Paths"])
+        sections.extend(f"- `{path}`" for path in comparison.focus_paths)
+        sections.extend(["", "## Focused Module Score Deltas"])
+        if comparison.focused_module_deltas:
+            sections.extend(
+                f"- `{row['module']}`: {row['before_score']:.2f} -> {row['after_score']:.2f} ({row['delta']:+.2f})"
+                for row in comparison.focused_module_deltas[:20]
+            )
+        else:
+            sections.append("- none")
+        sections.extend(["", "## Focused File Score Deltas"])
+        if comparison.focused_file_deltas:
+            sections.extend(
+                f"- `{row['file']}`: {row['before_score']:.2f} -> {row['after_score']:.2f} ({row['delta']:+.2f})"
+                for row in comparison.focused_file_deltas[:20]
+            )
+        else:
+            sections.append("- none")
     return "\n".join(sections)
 
 
@@ -290,6 +338,25 @@ def _module_score_deltas(before_rows: list[dict[str, Any]], after_rows: list[dic
     return rows
 
 
+def _file_score_deltas(before_rows: list[dict[str, Any]], after_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    before_map = {str(row.get("file") or ""): row for row in before_rows}
+    after_map = {str(row.get("file") or ""): row for row in after_rows}
+    rows: list[dict[str, Any]] = []
+    for file_path in sorted(set(before_map) & set(after_map)):
+        before_score = float(before_map.get(file_path, {}).get("score") or 0.0)
+        after_score = float(after_map.get(file_path, {}).get("score") or 0.0)
+        rows.append(
+            {
+                "file": file_path,
+                "before_score": before_score,
+                "after_score": after_score,
+                "delta": round(after_score - before_score, 2),
+            }
+        )
+    rows.sort(key=lambda row: (row["delta"], row["file"]))
+    return rows
+
+
 def _flatten_repo_metrics(repo_metrics: dict[str, Any]) -> dict[str, float]:
     rows: dict[str, float] = {}
     for key, value in repo_metrics.items():
@@ -300,3 +367,28 @@ def _flatten_repo_metrics(repo_metrics: dict[str, Any]) -> dict[str, float]:
                 if isinstance(child_value, (int, float)):
                     rows[f"{key}.{child_key}"] = float(child_value)
     return rows
+
+
+def _normalize_focus_paths(paths: list[str]) -> list[str]:
+    normalized = [str(path).strip().replace("\\", "/") for path in paths if str(path).strip()]
+    return sorted(dict.fromkeys(normalized))
+
+
+def _focused_score_deltas(rows: list[dict[str, Any]], focus_paths: list[str], *, key: str) -> list[dict[str, Any]]:
+    if not focus_paths:
+        return []
+    filtered = [row for row in rows if _matches_focus(str(row.get(key) or ""), focus_paths)]
+    sort_key = "module" if key == "module" else "file"
+    return sorted(filtered, key=lambda row: (row["delta"], row[sort_key]))
+
+
+def _matches_focus(value: str, focus_paths: list[str]) -> bool:
+    normalized_value = str(value or "").replace("\\", "/")
+    for focus in focus_paths:
+        normalized_focus = focus.replace("\\", "/")
+        focus_module = normalized_focus.removesuffix(".py").replace("/", ".")
+        if normalized_focus in normalized_value or normalized_value.endswith(normalized_focus):
+            return True
+        if normalized_value == focus_module or normalized_value.endswith(f".{focus_module}"):
+            return True
+    return False

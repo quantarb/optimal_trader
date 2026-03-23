@@ -47,6 +47,8 @@ Run from the repository root:
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label baseline --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis capture_quality_snapshot --label after --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis compare_quality_snapshots baseline after --output data/code_analysis
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis compare_quality_snapshots baseline after --output data/code_analysis --paths analysis/market_insight_schema.py,pipeline/artifact_backtest_support.py
+/Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis compare_quality_snapshots baseline after --output data/code_analysis --git-range HEAD~1..HEAD
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis build_semantic_index --root . --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis search_code "model training pipeline" --output data/code_analysis
 /Users/johnnylee/miniconda3/envs/optimal_trader/bin/python -m tools.code_analysis generate_repo_overview --output data/code_analysis
@@ -71,8 +73,9 @@ Use the reports together:
 
 - `anti_patterns.*` to find concrete structural problems
 - `blast_radius_report.*` to find risky central modules
-- `refactor_priority_report.*` to rank high-value, safer targets
+- `refactor_priority_report.*` to rank high-value, safer targets and recommend the best-fit pattern types for modules and major symbols
 - `quality_comparison_<baseline>_vs_<after>.*` to verify the refactor actually improved repo health
+- `compare_quality_snapshots --paths ...` or `--git-range ...` to inspect only the changed scope
 
 ## Outputs
 
@@ -125,13 +128,21 @@ Primary reports:
 
 ## Current Dogfood Snapshot
 
-The toolkit has been dogfooded against this repository, including repeated analyzer-driven refactor passes.
+The toolkit has been dogfooded against this repository, including repeated analyzer-driven refactor passes, a tooling-refinement pass based on live false positives, and a metrics-driven pattern-fit pass that guided another repo cleanup.
 
-- latest snapshot: `quality_snapshot_self_improve_loop10.*`
-- latest cumulative comparison: `quality_comparison_self_improve_loop5_vs_self_improve_loop10.*`
-- latest repo score: `72.59`
-- latest anti-pattern findings: `1083`
-- latest good-pattern findings: `1625`
+- latest repo snapshot: `quality_snapshot_pattern_fit_after.*`
+- latest repo score: `72.62`
+- latest anti-pattern findings: `1079`
+- latest good-pattern findings: `1632`
+- latest focused comparison example: `quality_comparison_pattern_fit_baseline_vs_pattern_fit_after.*`
+- latest focused refactor gain: `utils.workflow` moved `64.74 -> 77.52` after introducing an explicit artifact boundary record and narrowing exception handling
+
+Recent tooling refinements from dogfooding:
+
+- hidden-side-effect detection now avoids builder-style false positives like `TradeInput(...)`, `json.dumps(...)`, and local-only list mutation
+- mixed-concern analysis now reports concern families and dominant-concern share, not only a coarse score
+- snapshot comparison now supports focused views for changed files/modules via `--paths` and `--git-range`
+- refactor priority now includes metrics-driven pattern-fit recommendations with `metric_drivers`, `fit_score`, and safe-adoption ranking for both modules and major symbols
 
 ## Report Intent
 
@@ -162,6 +173,7 @@ The toolkit has been dogfooded against this repository, including repeated analy
 - `anti_patterns.*`
   - AST-based bad-pattern detection
   - duplicate-workflow and architecture-burden rollups
+  - includes `confidence` and `trigger_details` for heuristic findings
 - `good_patterns.*`
   - pure helper detection
   - typed/public contract strength
@@ -177,10 +189,12 @@ The toolkit has been dogfooded against this repository, including repeated analy
 - `refactor_priority_report.*`
   - ranked refactor opportunities by badness, centrality, blast radius, and leverage
   - safest high-value refactor targets
+  - metrics-driven pattern-fit recommendations for modules and major symbols, including the strongest driver metrics behind each suggestion
 - `quality_snapshot_<label>.*`
   - point-in-time health baselines
 - `quality_comparison_<baseline>_vs_<after>.*`
   - objective before/after deltas
+  - module/file deltas plus optional focused views for changed paths
 - `repo_overview.*`
   - top-level architectural summary
   - refactor targets

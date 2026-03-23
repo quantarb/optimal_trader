@@ -137,9 +137,14 @@ def analyze_blast_radius_command(
 def generate_refactor_priority_report_command(
     output: str = typer.Option(DEFAULT_OUTPUT_DIR, help="Directory containing generated analysis reports."),
 ) -> None:
+    output_dir = Path(output).resolve()
     report = generate_refactor_priority_report(
-        output_dir=Path(output).resolve(),
-        blast_radius_payload={"report": _load_report(Path(output).resolve() / "blast_radius_report.json")},
+        output_dir=output_dir,
+        blast_radius_payload={"report": _load_report(output_dir / "blast_radius_report.json")},
+        code_health_payload={"report": _load_optional_report(output_dir / "code_health_metrics.json")},
+        anti_pattern_payload={"report": _load_optional_report(output_dir / "anti_patterns.json")},
+        good_pattern_payload={"report": _load_optional_report(output_dir / "good_patterns.json")},
+        responsibility_payload={"report": _load_optional_report(output_dir / "module_responsibility_report.json")},
     )
     console.print(f"[green]Wrote refactor priority report[/green] to {report['markdown_path']}")
 
@@ -255,11 +260,15 @@ def compare_quality_snapshots_command(
     baseline_label: str = typer.Argument(..., help="Baseline snapshot label."),
     current_label: str = typer.Argument(..., help="Current snapshot label."),
     output: str = typer.Option(DEFAULT_OUTPUT_DIR, help="Directory containing quality snapshots."),
+    paths: str = typer.Option("", help="Comma-separated file or module paths to focus the comparison on."),
+    git_range: str = typer.Option("", help="Optional git diff range used to auto-focus changed paths."),
 ) -> None:
     payload = compare_quality_snapshots(
         output_dir=Path(output).resolve(),
         baseline_label=baseline_label,
         current_label=current_label,
+        focus_paths=[token.strip() for token in paths.split(",") if token.strip()],
+        git_range=git_range,
     )
     console.print(f"[green]Wrote quality comparison[/green] to {payload['markdown_path']}")
 
@@ -267,6 +276,14 @@ def compare_quality_snapshots_command(
 def _load_report(path: Path) -> dict:
     if not path.exists():
         raise typer.Exit(code=1)
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_optional_report(path: Path) -> dict:
+    if not path.exists():
+        return {}
     import json
 
     return json.loads(path.read_text(encoding="utf-8"))

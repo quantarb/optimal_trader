@@ -203,8 +203,12 @@ def build_training_frame_from_panel_artifacts(
     if joined.empty:
         raise ValueError("Selected feature and label artifacts have no overlapping (date, symbol) rows.")
     usable_feature_cols = [col for col in selected_feature_cols if col in joined.columns]
+    missing_feature_policy = spec.normalized_missing_feature_policy()
     if usable_feature_cols:
-        joined = joined[joined[usable_feature_cols].notna().any(axis=1)].copy()
+        if missing_feature_policy == "complete_case":
+            joined = joined.dropna(subset=usable_feature_cols).copy()
+        else:
+            joined = joined[joined[usable_feature_cols].notna().any(axis=1)].copy()
         if joined.empty:
             raise ValueError("Selected training window has no rows with usable feature-family coverage.")
     weight_mode = spec.normalized_sample_weight_mode()
@@ -237,6 +241,7 @@ def build_training_frame_from_panel_artifacts(
             "min_abs_trade_return": None if spec.min_abs_trade_return in (None, "") else float(spec.min_abs_trade_return),
             "max_hold_days": None if spec.max_hold_days in (None, "") else int(spec.max_hold_days),
             "sample_weight_mode": weight_mode,
+            "missing_feature_policy": missing_feature_policy,
             **label_meta,
         },
     )
