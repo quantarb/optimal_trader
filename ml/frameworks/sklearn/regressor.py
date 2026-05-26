@@ -73,6 +73,9 @@ class SklearnRFRegressor(Model):
             "n_train": len(x_tr),
             "n_test": len(x_va),
             "eval_mode": "holdout" if use_holdout else "in_sample",
+            "target_col": str(spec.target_col),
+            "model_tag": str(spec.model_tag or ""),
+            "signal": str(spec.signal or ""),
             "target_mean": y.mean(),
             "target_std": y.std(),
             "pred_mean": y_pred.mean(),
@@ -109,6 +112,11 @@ class SklearnRFRegressor(Model):
         metrics = self._metrics
 
         print(f"DATASET: {stats['n_obs']:,} obs | {len(self._used_features)} features")
+        print(f"  - Target:     {stats.get('target_col') or ''}")
+        if stats.get("model_tag"):
+            print(f"  - Model Role: {stats['model_tag']}")
+        if stats.get("signal"):
+            print(f"  - Signal:     {stats['signal']}")
         if stats.get("eval_mode") == "in_sample":
             print("  - Split Mode: In-sample eval (no internal holdout split).")
         print(f"  - Dropped {stats['dropped_count']} non-numeric features.")

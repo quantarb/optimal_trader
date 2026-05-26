@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -314,14 +313,14 @@ def build_technical_dataframe(
     verbose_data: bool = True,
     compact_feature_names: bool = False,
 ) -> Tuple[pd.DataFrame, list[str]]:
-    data_dir = os.path.dirname(ctx.store.db_path) or "."
+    data_dir = str(getattr(ctx, "data_dir", ".") or ".")
 
     panel, feature_cols, skipped = build_technical_panel(
         universe=list(symbols),
         api_key=ctx.api_key,
         data_dir=data_dir,
         execution_params=dict(execution_params) if execution_params else None,
-        db_name=os.path.basename(ctx.store.db_path),
+        db_name=str(getattr(ctx, "db_name", "quant.db") or "quant.db"),
         sleep_s=ctx.sleep_s,
         skip_on_error=skip_on_error,
         verbose_data=verbose_data,

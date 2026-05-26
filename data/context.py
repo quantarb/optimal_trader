@@ -1,13 +1,11 @@
 # ============================================================
 # data/context.py
-# Shared context for data access (API + SQLite + runtime knobs)
+# Shared context for data access (API + runtime knobs)
 # ============================================================
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
-
-from data.storage import SQLiteStore
 
 
 @dataclass(frozen=True)
@@ -15,21 +13,19 @@ class DataContext:
     """
     Central object you pass around instead of:
       - api_key
-      - db_path / store
+      - data_dir / db_name metadata
       - sleep_s
       - verbose flags
-      - data_dir
 
     history_years:
-      - If set (e.g., 30), the prices loader can backfill older history
-        when your DB only contains a shorter window (e.g., 5y).
-      - Leave None to disable earliest-history backfill.
+      - Retained for compatibility with older callers.
     """
     api_key: str
-    store: SQLiteStore
+    data_dir: str = "."
+    db_name: str = "quant.db"
     sleep_s: float = 0.0
     verbose: bool = True
-    history_years: Optional[int] = None  # ✅ NEW
+    history_years: Optional[int] = None
 
     @staticmethod
     def from_data_dir(
@@ -39,14 +35,13 @@ class DataContext:
         db_name: str = "quant.db",
         sleep_s: float = 0.0,
         verbose: bool = True,
-        history_years: Optional[int] = None,  # ✅ NEW
+        history_years: Optional[int] = None,
     ) -> "DataContext":
-        store = SQLiteStore(db_path=f"{data_dir.rstrip('/')}/{db_name}")
-        store.init_schema()
         return DataContext(
             api_key=api_key,
-            store=store,
+            data_dir=data_dir,
+            db_name=db_name,
             sleep_s=sleep_s,
             verbose=verbose,
-            history_years=history_years,  # ✅ NEW
+            history_years=history_years,
         )

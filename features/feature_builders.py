@@ -19,7 +19,7 @@ from features.insider_trading_features import build_insider_trading_features
 from features.key_metrics_features import build_key_metrics_features
 from features.ratios_features import build_ratios_features
 from features.ratings_historical_features import build_ratings_historical_features
-from features.section_utils import BuiltFeatureSet
+from features.section_utils import BuiltFeatureSet, daily_price_series, first_existing
 
 
 def build_price_technical_features(symbol: str, df_prices: pd.DataFrame) -> BuiltFeatureSet:
@@ -42,24 +42,40 @@ def build_fundamental_change_features(
 def build_statement_quality_features(
     symbol_obj: Symbol,
     target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame | None = None,
     filing_lag_days: int = 45,
 ) -> BuiltFeatureSet:
+    income_statement = build_income_statement_features(symbol_obj, target_index, df_prices=df_prices, filing_lag_days=filing_lag_days)
+    market_cap = None
+    close = daily_price_series(df_prices, target_index)
+    shares = first_existing(income_statement.df, ("is__weightedaverageshsoutdil", "is__weightedaverageshsout"))
+    if close is not None and shares is not None:
+        market_cap = shares.reindex(target_index) * close.reindex(target_index)
+    cash_flow = build_cash_flow_features(symbol_obj, target_index, df_prices=df_prices, market_cap=market_cap, filing_lag_days=filing_lag_days)
+    balance_sheet = build_balance_sheet_features(symbol_obj, target_index, df_prices=df_prices, market_cap=market_cap, filing_lag_days=filing_lag_days)
+    valuation_frame = pd.concat([income_statement.df, cash_flow.df, balance_sheet.df], axis=1)
+    if valuation_frame.columns.has_duplicates:
+        valuation_frame = valuation_frame.loc[:, ~valuation_frame.columns.duplicated(keep="last")]
     parts = [
-        build_income_statement_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_income_statement_growth_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_cash_flow_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_cash_flow_growth_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_balance_sheet_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_balance_sheet_growth_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
-        build_financial_growth_features(symbol_obj, target_index, filing_lag_days=filing_lag_days),
+        income_statement,
+        build_income_statement_growth_features(symbol_obj, target_index, valuation_frame=valuation_frame, filing_lag_days=filing_lag_days),
+        cash_flow,
+        build_cash_flow_growth_features(symbol_obj, target_index, valuation_frame=valuation_frame, filing_lag_days=filing_lag_days),
+        balance_sheet,
+        build_balance_sheet_growth_features(symbol_obj, target_index, valuation_frame=valuation_frame, filing_lag_days=filing_lag_days),
+        build_financial_growth_features(symbol_obj, target_index, valuation_frame=valuation_frame, filing_lag_days=filing_lag_days),
     ]
     return merge_feature_sets(parts, target_index)
 
 
-def build_event_features(symbol_obj: Symbol, target_index: pd.MultiIndex) -> BuiltFeatureSet:
+def build_event_features(
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame | None = None,
+) -> BuiltFeatureSet:
     parts = [
         build_earnings_features(symbol_obj, target_index),
-        build_analyst_estimates_features(symbol_obj, target_index),
+        build_analyst_estimates_features(symbol_obj, target_index, df_prices=df_prices),
         build_ratings_historical_features(symbol_obj, target_index),
         build_grades_historical_features(symbol_obj, target_index),
     ]

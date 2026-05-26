@@ -10,4 +10,5 @@ urlpatterns = [
     path("labels/", include("labels.urls")),
     path("ml/", include("ml.urls")),
     path("pipeline/", include("pipeline.urls")),
+    path("trading/", include("trading.urls")),
 ]

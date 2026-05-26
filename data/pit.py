@@ -91,7 +91,7 @@ def broadcast_asof_to_target_index(
         return pd.DataFrame(index=target_index)
 
     if isinstance(sparse_df.index, pd.MultiIndex):
-        sparse = sparse_df.reset_index()
+        sparse = sparse_df.copy().reset_index()
     else:
         sparse = sparse_df.copy()
         if on not in sparse.columns and isinstance(sparse.index, pd.DatetimeIndex):

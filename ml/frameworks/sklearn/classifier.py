@@ -87,6 +87,9 @@ class SklearnRFClassifier(Model):
             "n_test": len(x_va),
             "split_ratio": split_ratio,
             "eval_mode": "holdout" if use_holdout else "in_sample",
+            "target_col": str(spec.target_col),
+            "model_tag": str(spec.model_tag or ""),
+            "signal": str(spec.signal or ""),
             "n_features_numeric": len(self._used_features),
             "dropped_count": len(non_numeric),
             "classes": unique_classes.tolist(),
@@ -135,11 +138,20 @@ class SklearnRFClassifier(Model):
 
         print("DATASET & SPLIT:")
         print(f"  - Total Observations: {stats['n_obs']:,}")
+        print(f"  - Target:             {stats.get('target_col') or ''}")
+        if stats.get("model_tag"):
+            print(f"  - Model Role:         {stats['model_tag']}")
+        if stats.get("signal"):
+            print(f"  - Signal:             {stats['signal']}")
         if stats.get("eval_mode") == "holdout":
             print(f"  - Random Split:       {stats['split_ratio']:.1%} Train / {1 - stats['split_ratio']:.1%} Test")
         else:
             print("  - Split Mode:         In-sample eval (no internal holdout split)")
         print(f"  - Features:           {stats['n_features_numeric']} numeric (filtered {stats['dropped_count']} strings)")
+        if stats["is_binary"]:
+            positive_class = stats["classes"][-1]
+            positive_name = self._class_mapping.get(positive_class, str(positive_class))
+            print(f"  - Positive Class:     {positive_class} => {positive_name}")
 
         print(f"\nCLASS DISTRIBUTION (Mapping: {self._class_mapping}):")
         print("               Train Set              Test Set")

@@ -272,6 +272,100 @@ def first_existing(df: pd.DataFrame, candidates: Sequence[str]) -> pd.Series | N
     return None
 
 
+def daily_price_series(
+    df_prices: pd.DataFrame | None,
+    target_index: pd.MultiIndex,
+    *,
+    price_col: str = "close",
+) -> pd.Series | None:
+    if df_prices is None or df_prices.empty or price_col not in df_prices.columns:
+        return None
+    close = pd.to_numeric(df_prices[price_col], errors="coerce").sort_index()
+    if isinstance(close.index, pd.MultiIndex):
+        return close.reindex(target_index)
+    target_date_index = target_dates(target_index)
+    aligned = close.reindex(target_date_index, method="ffill")
+    return pd.Series(aligned.to_numpy(), index=target_index, dtype="float64")
+
+
+def add_daily_price_linked_features(
+    daily: pd.DataFrame,
+    target_index: pd.MultiIndex,
+    *,
+    df_prices: pd.DataFrame | None = None,
+    market_cap: pd.Series | None = None,
+    share_count_candidates: Sequence[str] = (),
+    price_denominated: Sequence[tuple[Sequence[str], str]] = (),
+    market_cap_denominated: Sequence[tuple[Sequence[str], str]] = (),
+    negate_market_cap_sources: Sequence[str] = (),
+) -> tuple[pd.DataFrame, list[str]]:
+    if daily.empty:
+        return daily, []
+    out = daily.copy()
+    close = daily_price_series(df_prices, target_index)
+    if market_cap is None and close is not None and share_count_candidates:
+        shares = first_existing(out, share_count_candidates)
+        if shares is not None:
+            market_cap = shares.reindex(out.index) * close.reindex(out.index)
+    elif market_cap is not None:
+        market_cap = pd.to_numeric(market_cap, errors="coerce").reindex(out.index)
+
+    added: list[str] = []
+
+    def _add(candidates: Sequence[str], output_col: str, denominator: pd.Series | None, *, negate: bool = False) -> None:
+        if denominator is None:
+            return
+        source = first_existing(out, candidates)
+        if source is None:
+            return
+        values = -source if negate else source
+        linked = safe_ratio(values.reindex(out.index), denominator.reindex(out.index)).replace([np.inf, -np.inf], np.nan)
+        if linked.notna().any():
+            out[output_col] = linked
+            added.append(output_col)
+
+    for candidates, output_col in price_denominated:
+        _add(candidates, output_col, close)
+
+    negate_set = {str(value).strip() for value in negate_market_cap_sources}
+    for candidates, output_col in market_cap_denominated:
+        _add(candidates, output_col, market_cap, negate=str(output_col) in negate_set)
+
+    return out, added
+
+
+def _growth_as_percent(series: pd.Series) -> pd.Series:
+    growth = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    valid = growth.dropna().abs()
+    if not valid.empty and float(valid.median()) <= 2.0:
+        growth = growth * 100.0
+    return growth
+
+
+def add_growth_adjusted_valuation_features(
+    daily: pd.DataFrame,
+    *,
+    valuation_frame: pd.DataFrame | None = None,
+    specs: Sequence[tuple[Sequence[str], Sequence[str], str]] = (),
+) -> tuple[pd.DataFrame, list[str]]:
+    if daily.empty or valuation_frame is None or valuation_frame.empty:
+        return daily, []
+    out = daily.copy()
+    valuation = valuation_frame.reindex(out.index)
+    added: list[str] = []
+    for growth_candidates, valuation_candidates, output_col in specs:
+        growth = first_existing(out, growth_candidates)
+        valuation_series = first_existing(valuation, valuation_candidates)
+        if growth is None or valuation_series is None:
+            continue
+        growth_pct = _growth_as_percent(growth).where(lambda s: s > 0.0)
+        values = safe_ratio(valuation_series.reindex(out.index), growth_pct.reindex(out.index)).replace([np.inf, -np.inf], np.nan)
+        if values.notna().any():
+            out[output_col] = values
+            added.append(output_col)
+    return out, added
+
+
 def target_dates(target_index: pd.MultiIndex) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(pd.to_datetime(target_index.get_level_values("date"))).normalize()
 
@@ -306,6 +400,9 @@ __all__ = [
     "broadcast_sparse",
     "build_passthrough_section_features",
     "clear_section_record_cache",
+    "add_daily_price_linked_features",
+    "add_growth_adjusted_valuation_features",
+    "daily_price_series",
     "days_since_for_target",
     "days_since_last_event",
     "first_existing",

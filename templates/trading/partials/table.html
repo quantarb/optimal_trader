@@ -1,0 +1,32 @@
+{% if table.rows %}
+  <div class="data-table-shell">
+    <div class="table-wrap">
+      <table class="app-table">
+        <thead>
+          <tr>
+            {% for column in table.columns %}
+              <th>{{ column }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in table.rows %}
+            <tr class="{% if row.is_eligible %}trading-row-eligible{% endif %}">
+              {% for cell in row.cells %}
+                <td>
+                  {% if cell.href %}
+                    <a class="link" href="{{ cell.href }}">{{ cell.value }}</a>
+                  {% else %}
+                    {{ cell.value }}
+                  {% endif %}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% else %}
+  <div class="empty-state">No rows available.</div>
+{% endif %}

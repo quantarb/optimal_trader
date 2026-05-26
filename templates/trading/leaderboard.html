@@ -1,0 +1,293 @@
+{% extends "pipeline/base_app.html" %}
+
+{% block title %}Trading Leaderboard{% endblock %}
+
+{% block topbar_links %}
+  <a class="topbar-link" href="{% url 'trading-leaderboard' %}">Leaderboard</a>
+  <a class="topbar-link" href="{% url 'trading-similar-trades' %}">Similar Trades</a>
+  <a class="topbar-link" href="{% url 'pipeline-stock-intelligence' %}">Stock Analysis</a>
+{% endblock %}
+
+{% block page_body %}
+  <div class="page-header">
+    <div class="eyebrow">Trading</div>
+    <h1 class="page-header-title">Ranked Trade Setups</h1>
+    <p class="page-subtitle">A Django-native control surface for the latest raw-stack leaderboard, backed by the same Django FMP history and model artifacts as the rest of the app.</p>
+    <div class="metric-grid">
+      <div class="metric-tile"><span class="metric-label">Rows</span><div class="metric-value">{{ leaderboard_summary.rows|default:"0" }}</div></div>
+      <div class="metric-tile"><span class="metric-label">Eligible</span><div class="metric-value">{{ leaderboard_summary.eligible|default:"0" }}</div></div>
+      <div class="metric-tile"><span class="metric-label">Ineligible</span><div class="metric-value">{{ leaderboard_summary.ineligible|default:"0" }}</div></div>
+      <div class="metric-tile"><span class="metric-label">Latest Date</span><div class="metric-value">{{ leaderboard_summary.latest_date|default:"-" }}</div></div>
+    </div>
+  </div>
+
+  {% if messages %}
+    <div class="section-card">
+      {% for message in messages %}
+        <div class="status-badge {% if message.tags == 'error' %}bad{% else %}good{% endif %}">{{ message }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if stale_reason %}
+    <div class="section-card">
+      <div class="status-badge warn">Stale Scores</div>
+      <p class="body-text">{{ stale_reason }}</p>
+    </div>
+  {% endif %}
+
+  <div class="page-grid page-grid-sidebar">
+    <div class="section-card">
+      <div class="eyebrow">Build</div>
+      <h2 class="section-title">Train And Score</h2>
+      <form method="post" class="stacked-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="build_leaderboard">
+        <div class="field-group">
+          <label for="data_start">Data Start</label>
+          <input id="data_start" type="date" name="data_start" value="{{ build_form.data_start }}">
+        </div>
+        <div class="field-group">
+          <label for="data_end">Data End</label>
+          <input id="data_end" type="date" name="data_end" value="{{ build_form.data_end }}">
+        </div>
+        <div class="field-group">
+          <label for="min_market_cap_b">Min Market Cap ($B)</label>
+          <input id="min_market_cap_b" type="number" name="min_market_cap_b" min="0" step="1" value="{{ build_form.min_market_cap_b }}">
+        </div>
+        <label class="check-row"><input type="checkbox" name="refresh_fmp" value="1" {% if build_form.refresh_fmp %}checked{% endif %}> Refresh FMP data first</label>
+        <button class="action-button" type="submit">Build Leaderboard</button>
+      </form>
+      <p class="caption" style="margin-top:12px;">Artifact directory: <span class="mono">{{ artifact_dir }}</span></p>
+    </div>
+
+    <div class="section-card">
+      <div class="eyebrow">Portfolio Sheet</div>
+      <h2 class="section-title">Target Orders</h2>
+      <form method="post" class="stacked-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="build_trade_sheet">
+        <div class="field-group">
+          <label for="top_k">Top K</label>
+          <input id="top_k" type="number" name="top_k" min="1" step="1" value="{{ trade_sheet_form.top_k }}">
+        </div>
+        <div class="field-group">
+          <label for="account_size">Account Size</label>
+          <input id="account_size" type="number" name="account_size" min="0" step="100" value="{{ trade_sheet_form.account_size }}">
+        </div>
+        <div class="field-group">
+          <label for="threshold">Eligibility Threshold</label>
+          <input id="threshold" type="number" name="threshold" min="0" step="0.01" value="{{ trade_sheet_form.threshold }}">
+        </div>
+        <label class="check-row"><input type="checkbox" name="eligible_only" value="1" {% if trade_sheet_form.eligible_only %}checked{% endif %}> Eligible only</label>
+        <label class="check-row"><input type="checkbox" name="include_shorts" value="1" {% if trade_sheet_form.include_shorts %}checked{% endif %}> Include shorts</label>
+        <button class="action-button secondary" type="submit" {% if not has_leaderboard %}disabled{% endif %}>Generate Sheet</button>
+      </form>
+    </div>
+
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Options</div>
+      <h2 class="section-title">Plan And Submit</h2>
+      <form method="post" class="stacked-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="robinhood_build_option_plan">
+        <div class="field-group">
+          <label for="rh_top_k">Top K</label>
+          <input id="rh_top_k" type="number" name="rh_top_k" min="1" step="1" value="{{ robinhood_form.top_k }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_account_equity">Account Equity</label>
+          <input id="rh_account_equity" type="number" name="rh_account_equity" min="0" step="100" value="{{ robinhood_form.account_equity }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_strategy_allocation">Strategy Allocation</label>
+          <input id="rh_strategy_allocation" type="number" name="rh_strategy_allocation" min="0" step="100" value="{{ robinhood_form.strategy_allocation }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_component_threshold">Component Threshold</label>
+          <input id="rh_component_threshold" type="number" name="rh_component_threshold" min="0" step="0.01" value="{{ robinhood_form.component_threshold }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_score_col">Score Column</label>
+          <input id="rh_score_col" type="text" name="rh_score_col" value="{{ robinhood_form.score_col }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_option_bucket">Option Bucket</label>
+          <select id="rh_option_bucket" name="rh_option_bucket">
+            <option value="otm_option" {% if robinhood_form.option_bucket == "otm_option" %}selected{% endif %}>OTM</option>
+            <option value="atm_option" {% if robinhood_form.option_bucket == "atm_option" %}selected{% endif %}>ATM</option>
+            <option value="ditm_option" {% if robinhood_form.option_bucket == "ditm_option" %}selected{% endif %}>DITM</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label for="rh_tenor_days">Tenor Days</label>
+          <input id="rh_tenor_days" type="number" name="rh_tenor_days" min="1" step="1" value="{{ robinhood_form.tenor_days }}">
+        </div>
+        <div class="field-group">
+          <label for="rh_account_number">Account Number</label>
+          <input id="rh_account_number" type="text" name="rh_account_number" value="{{ robinhood_form.account_number }}" autocomplete="off">
+        </div>
+        <div class="field-group">
+          <label for="rh_mfa_code">MFA Code</label>
+          <input id="rh_mfa_code" type="text" name="rh_mfa_code" value="" autocomplete="one-time-code">
+        </div>
+        <label class="check-row"><input type="checkbox" name="rh_login_first" value="1" {% if robinhood_form.login_first %}checked{% endif %}> Login before plan</label>
+        <label class="check-row"><input type="checkbox" name="rh_store_session" value="1" {% if robinhood_form.store_session %}checked{% endif %}> Store Robinhood session</label>
+        <button class="action-button secondary" type="submit" {% if not has_leaderboard %}disabled{% endif %}>Generate Robinhood Plan</button>
+      </form>
+
+      <div class="order-actions">
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="robinhood_preview_option_orders">
+          <button class="action-button secondary" type="submit" {% if not robinhood_has_saved_orders %}disabled{% endif %}>Preview Submit Orders</button>
+        </form>
+        <form method="post" class="stacked-form">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="robinhood_submit_option_orders">
+          <input type="hidden" name="rh_account_number" value="{{ robinhood_form.account_number }}">
+          <div class="field-group">
+            <label for="rh_time_in_force">Time In Force</label>
+            <select id="rh_time_in_force" name="rh_time_in_force">
+              <option value="gtc" {% if robinhood_form.time_in_force == "gtc" %}selected{% endif %}>GTC</option>
+              <option value="gfd" {% if robinhood_form.time_in_force == "gfd" %}selected{% endif %}>GFD</option>
+            </select>
+          </div>
+          <label class="check-row dangerous"><input type="checkbox" name="confirm_submit" value="1"> I reviewed the preview and want to submit live Robinhood orders</label>
+          <button class="action-button" type="submit" {% if not robinhood_has_saved_orders %}disabled{% endif %}>Submit Live Orders</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  {% if build_log_lines %}
+    <div class="section-card">
+      <div class="eyebrow">Build Log</div>
+      <div class="summary-list">
+        {% for line in build_log_lines %}
+          <div class="summary-item"><span>{{ line }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if trade_sheet_table %}
+    <div class="section-card">
+      <div class="eyebrow">Target Portfolio</div>
+      <h2 class="section-title">{{ trade_sheet_summary.selected_count }} target positions</h2>
+      {% include "trading/partials/table.html" with table=trade_sheet_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_preview_table %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Preview</div>
+      <h2 class="section-title">Saved Orders Ready For Submission</h2>
+      {% include "trading/partials/table.html" with table=robinhood_preview_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_order_results_table %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Results</div>
+      <h2 class="section-title">Submission Responses</h2>
+      {% include "trading/partials/table.html" with table=robinhood_order_results_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.summary_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Plan</div>
+      <h2 class="section-title">Summary</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.summary_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.log_lines %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Plan Log</div>
+      <div class="summary-list">
+        {% for line in robinhood_plan.log_lines %}
+          <div class="summary-item"><span>{{ line }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.actionable_orders_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Actions</div>
+      <h2 class="section-title">Actionable Orders</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.actionable_orders_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.actions_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Actions</div>
+      <h2 class="section-title">Full Action Plan</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.actions_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.target_portfolio_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Target</div>
+      <h2 class="section-title">Target Option Portfolio</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.target_portfolio_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.desired_contracts_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Contracts</div>
+      <h2 class="section-title">Desired Contracts</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.desired_contracts_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.pending_orders_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Pending</div>
+      <h2 class="section-title">Open Option Orders</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.pending_orders_table %}
+    </div>
+  {% endif %}
+
+  {% if robinhood_plan.skipped_symbols_table.rows %}
+    <div class="section-card">
+      <div class="eyebrow">Robinhood Skips</div>
+      <h2 class="section-title">Skipped Candidates</h2>
+      {% include "trading/partials/table.html" with table=robinhood_plan.skipped_symbols_table %}
+    </div>
+  {% endif %}
+
+  <div class="section-card">
+    <div class="page-toolbar">
+      <div>
+        <div class="eyebrow">Leaderboard</div>
+        <h2 class="section-title">Latest Scores</h2>
+      </div>
+      <div class="caption">Page {{ page_meta.page }} of {{ page_meta.total_pages }} | {{ page_meta.total_rows }} rows</div>
+    </div>
+    {% if leaderboard_table.rows %}
+      {% include "trading/partials/table.html" with table=leaderboard_table %}
+      <div class="action-row" style="margin-top:14px;">
+        <a class="action-button secondary" href="?page={{ page_meta.prev_page }}">Previous</a>
+        <a class="action-button secondary" href="?page={{ page_meta.next_page }}">Next</a>
+      </div>
+    {% else %}
+      {% include "pipeline/components/_empty_state.html" with eyebrow="No Leaderboard" title="No saved leaderboard found" body="Run the build once to train the models, save artifacts, and generate the latest leaderboard." %}
+    {% endif %}
+  </div>
+{% endblock %}
+
+{% block extra_head %}
+  <style>
+    .stacked-form { display:grid; gap:12px; }
+    .check-row { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:0.92rem; }
+    .check-row.dangerous { color:#9f1239; align-items:flex-start; }
+    .order-actions { display:grid; gap:14px; margin-top:18px; padding-top:16px; border-top:1px solid var(--border); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+{% endblock %}

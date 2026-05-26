@@ -20,6 +20,21 @@ from ml.metrics import (
     build_flair_regression_result,
     build_regression_task_report_df,
 )
+from ml.rl.oracle_imitation import (
+    build_expert_position_panel,
+    build_transition_sample_weights,
+    build_transition_training_mask,
+    build_long_only_expert_action_panel,
+    build_long_only_expert_position_panel,
+    rollout_position_policy,
+    rollout_long_only_position_policy,
+    rollout_position_aware_long_only_policy,
+    train_position_cloning_rf,
+    train_position_cloning_hgb,
+    train_long_only_behavior_cloning_rf,
+    train_long_only_position_cloning_rf,
+    train_position_aware_long_only_behavior_cloning_rf,
+)
 
 
 class ResearchCoreUnitTests(unittest.TestCase):
@@ -241,3 +256,557 @@ class ResearchCoreUnitTests(unittest.TestCase):
         )
         self.assertEqual(spec.id_to_entry_action[0], "buy")
         self.assertEqual(spec.id_to_exit_action[1], "cover")
+
+    def test_build_long_only_expert_action_panel_marks_buy_sell_and_positions(self):
+        daily_state_df = pd.DataFrame(
+            [
+                {"symbol": "AAPL", "date_text": "2024-01-01", "feature_a": 0.0},
+                {"symbol": "AAPL", "date_text": "2024-01-02", "feature_a": 1.0},
+                {"symbol": "AAPL", "date_text": "2024-01-03", "feature_a": 2.0},
+                {"symbol": "AAPL", "date_text": "2024-01-04", "feature_a": 3.0},
+                {"symbol": "AAPL", "date_text": "2024-01-05", "feature_a": 4.0},
+            ]
+        )
+        trade_pair_df = pd.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "symbol": "AAPL",
+                    "side": "long",
+                    "entry_date_text": "2024-01-02",
+                    "exit_date_text": "2024-01-04",
+                }
+            ]
+        )
+
+        panel_df = build_long_only_expert_action_panel(daily_state_df, trade_pair_df)
+
+        self.assertEqual(panel_df["expert_action"].tolist(), ["hold", "buy", "hold", "sell", "hold"])
+        self.assertEqual(panel_df["expert_position_before"].tolist(), [0, 0, 1, 1, 0])
+        self.assertEqual(panel_df["expert_position_after"].tolist(), [0, 1, 1, 0, 0])
+
+    def test_build_long_only_expert_position_panel_labels_holding_window_long(self):
+        daily_state_df = pd.DataFrame(
+            [
+                {"symbol": "AAPL", "date_text": "2024-01-01", "feature_a": 0.0},
+                {"symbol": "AAPL", "date_text": "2024-01-02", "feature_a": 1.0},
+                {"symbol": "AAPL", "date_text": "2024-01-03", "feature_a": 2.0},
+                {"symbol": "AAPL", "date_text": "2024-01-04", "feature_a": 3.0},
+                {"symbol": "AAPL", "date_text": "2024-01-05", "feature_a": 4.0},
+            ]
+        )
+        trade_pair_df = pd.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "symbol": "AAPL",
+                    "side": "long",
+                    "entry_date_text": "2024-01-02",
+                    "exit_date_text": "2024-01-04",
+                }
+            ]
+        )
+
+        panel_df = build_long_only_expert_position_panel(daily_state_df, trade_pair_df)
+
+        self.assertEqual(panel_df["expert_position_label"].tolist(), ["flat", "long", "long", "flat", "flat"])
+        self.assertEqual(panel_df["entry_signal"].tolist(), [0, 1, 0, 0, 0])
+        self.assertEqual(panel_df["exit_signal"].tolist(), [0, 0, 0, 1, 0])
+
+    def test_build_expert_position_panel_labels_long_flat_short_sequence(self):
+        daily_state_df = pd.DataFrame(
+            [
+                {"symbol": "AAPL", "date_text": "2024-01-01", "feature_a": 0.0},
+                {"symbol": "AAPL", "date_text": "2024-01-02", "feature_a": 1.0},
+                {"symbol": "AAPL", "date_text": "2024-01-03", "feature_a": 2.0},
+                {"symbol": "AAPL", "date_text": "2024-01-04", "feature_a": 3.0},
+                {"symbol": "AAPL", "date_text": "2024-01-05", "feature_a": 4.0},
+                {"symbol": "AAPL", "date_text": "2024-01-06", "feature_a": 5.0},
+                {"symbol": "AAPL", "date_text": "2024-01-07", "feature_a": 6.0},
+            ]
+        )
+        trade_pair_df = pd.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "symbol": "AAPL",
+                    "side": "long",
+                    "entry_date_text": "2024-01-02",
+                    "exit_date_text": "2024-01-04",
+                },
+                {
+                    "trade_id": "t2",
+                    "symbol": "AAPL",
+                    "side": "short",
+                    "entry_date_text": "2024-01-06",
+                    "exit_date_text": "2024-01-08",
+                },
+            ]
+        )
+
+        panel_df = build_expert_position_panel(daily_state_df, trade_pair_df)
+
+        self.assertEqual(
+            panel_df["expert_position_label"].tolist(),
+            ["flat", "long", "long", "flat", "flat", "short", "short"],
+        )
+        self.assertEqual(panel_df["expert_action"].tolist(), ["hold", "buy", "hold", "sell", "hold", "short", "hold"])
+
+    def test_build_transition_sample_weights_prioritizes_transitions_and_nearby_rows(self):
+        panel_df = pd.DataFrame(
+            [
+                {"symbol": "AAPL", "date_text": "2024-01-01", "expert_action": "hold"},
+                {"symbol": "AAPL", "date_text": "2024-01-02", "expert_action": "buy"},
+                {"symbol": "AAPL", "date_text": "2024-01-03", "expert_action": "hold"},
+                {"symbol": "AAPL", "date_text": "2024-01-04", "expert_action": "hold"},
+                {"symbol": "AAPL", "date_text": "2024-01-05", "expert_action": "sell"},
+                {"symbol": "AAPL", "date_text": "2024-01-06", "expert_action": "hold"},
+            ]
+        )
+
+        weighted_df = build_transition_sample_weights(
+            panel_df,
+            near_window=1,
+            transition_weight=1.0,
+            near_weight=0.5,
+            interior_weight=0.1,
+        )
+
+        self.assertEqual(weighted_df["transition_distance_steps"].tolist(), [1, 0, 1, 1, 0, 1])
+        self.assertEqual(weighted_df["sample_weight"].tolist(), [0.5, 1.0, 0.5, 0.5, 1.0, 0.5])
+
+    def test_build_transition_training_mask_keeps_all_transitions(self):
+        panel_df = pd.DataFrame(
+            [
+                {"symbol": "AAPL", "date_text": "2024-01-01", "expert_action": "hold"},
+                {"symbol": "AAPL", "date_text": "2024-01-02", "expert_action": "buy"},
+                {"symbol": "AAPL", "date_text": "2024-01-03", "expert_action": "hold"},
+                {"symbol": "AAPL", "date_text": "2024-01-04", "expert_action": "sell"},
+                {"symbol": "AAPL", "date_text": "2024-01-05", "expert_action": "hold"},
+            ]
+        )
+
+        masked_df = build_transition_training_mask(
+            panel_df,
+            near_window=1,
+            transition_keep_prob=1.0,
+            near_keep_prob=0.0,
+            interior_keep_prob=0.0,
+            random_state=7,
+        )
+
+        self.assertEqual(masked_df["keep_for_training"].tolist(), [False, True, False, True, False])
+
+    def test_train_long_only_behavior_cloning_rf_returns_oos_reports(self):
+        panel_rows = []
+        for idx in range(6):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2019-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2019-01-0{idx + 1}"),
+                    "feature_signal": 0.0 if idx < 2 else (1.0 if idx < 4 else 2.0),
+                    "expert_action": ["hold", "hold", "buy", "buy", "sell", "sell"][idx],
+                    "expert_action_id": [0, 0, 1, 1, 2, 2][idx],
+                }
+            )
+        for idx in range(6):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2020-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2020-01-0{idx + 1}"),
+                    "feature_signal": 0.0 if idx < 2 else (1.0 if idx < 4 else 2.0),
+                    "expert_action": ["hold", "hold", "buy", "buy", "sell", "sell"][idx],
+                    "expert_action_id": [0, 0, 1, 1, 2, 2][idx],
+                }
+            )
+
+        result = train_long_only_behavior_cloning_rf(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+
+        self.assertEqual(set(result.summary_df["split"].tolist()), {"train", "out_of_sample"})
+        self.assertIn("prob_buy", result.scored_oos_df.columns)
+        self.assertIn("prob_sell", result.scored_oos_df.columns)
+        self.assertIn("macro avg", set(result.report_df["label"].tolist()))
+
+    def test_train_long_only_position_cloning_rf_returns_position_reports(self):
+        panel_rows = []
+        for idx in range(6):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2019-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2019-01-0{idx + 1}"),
+                    "feature_signal": 0.0 if idx < 2 else (1.0 if idx < 4 else 2.0),
+                    "expert_position_label": ["flat", "flat", "long", "long", "flat", "flat"][idx],
+                    "expert_position_id": [0, 0, 1, 1, 0, 0][idx],
+                }
+            )
+        for idx in range(6):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2020-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2020-01-0{idx + 1}"),
+                    "feature_signal": 0.0 if idx < 2 else (1.0 if idx < 4 else 2.0),
+                    "expert_position_label": ["flat", "flat", "long", "long", "flat", "flat"][idx],
+                    "expert_position_id": [0, 0, 1, 1, 0, 0][idx],
+                }
+            )
+
+        result = train_long_only_position_cloning_rf(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+
+        self.assertEqual(set(result.summary_df["split"].tolist()), {"train", "out_of_sample"})
+        self.assertIn("prob_long", result.scored_oos_df.columns)
+        self.assertIn("macro avg", set(result.report_df["label"].tolist()))
+
+    def test_train_position_cloning_rf_returns_three_state_reports(self):
+        panel_rows = []
+        labels = ["flat", "long", "long", "flat", "short", "short", "flat"]
+        ids = [0, 1, 1, 0, 2, 2, 0]
+        for idx in range(len(labels)):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2019-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2019-01-0{idx + 1}"),
+                    "feature_signal": float(idx),
+                    "expert_position_label": labels[idx],
+                    "expert_position_id": ids[idx],
+                }
+            )
+        for idx in range(len(labels)):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": f"2020-01-0{idx + 1}",
+                    "date": pd.Timestamp(f"2020-01-0{idx + 1}"),
+                    "feature_signal": float(idx),
+                    "expert_position_label": labels[idx],
+                    "expert_position_id": ids[idx],
+                }
+            )
+
+        result = train_position_cloning_rf(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+
+        self.assertEqual(set(result.summary_df["split"].tolist()), {"train", "out_of_sample"})
+        self.assertIn("prob_short", result.scored_oos_df.columns)
+        self.assertIn("short", set(result.report_df["label"].tolist()))
+
+    def test_train_position_cloning_hgb_returns_three_state_reports(self):
+        panel_rows = []
+        labels = ["flat", "long", "long", "flat", "short", "short", "flat"] * 3
+        ids = [0, 1, 1, 0, 2, 2, 0] * 3
+        train_dates = pd.date_range("2019-01-01", periods=len(labels), freq="D")
+        oos_dates = pd.date_range("2020-01-01", periods=len(labels), freq="D")
+        for dt, label, label_id, feature_signal in zip(train_dates, labels, ids, range(len(labels))):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "date": pd.Timestamp(dt),
+                    "feature_signal": float(feature_signal % 7),
+                    "expert_position_label": label,
+                    "expert_position_id": label_id,
+                }
+            )
+        for dt, label, label_id, feature_signal in zip(oos_dates, labels, ids, range(len(labels))):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "date": pd.Timestamp(dt),
+                    "feature_signal": float(feature_signal % 7),
+                    "expert_position_label": label,
+                    "expert_position_id": label_id,
+                }
+            )
+
+        result = train_position_cloning_hgb(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            hgb_kwargs={"max_iter": 40, "max_depth": 3, "min_samples_leaf": 1, "random_state": 7, "early_stopping": False},
+        )
+
+        self.assertEqual(set(result.summary_df["split"].tolist()), {"train", "out_of_sample"})
+        self.assertIn("prob_short", result.scored_oos_df.columns)
+        self.assertIn("short", set(result.report_df["label"].tolist()))
+
+    def test_train_position_aware_long_only_behavior_cloning_rf_returns_policy_state_metrics(self):
+        panel_rows = []
+        train_dates = pd.date_range("2019-01-01", periods=8, freq="D")
+        oos_dates = pd.date_range("2020-01-01", periods=8, freq="D")
+        train_specs = [
+            (train_dates[0], 0.0, "hold", 0),
+            (train_dates[1], 1.0, "buy", 0),
+            (train_dates[2], 2.0, "hold", 1),
+            (train_dates[3], 3.0, "sell", 1),
+            (train_dates[4], 0.0, "hold", 0),
+            (train_dates[5], 1.0, "buy", 0),
+            (train_dates[6], 2.0, "hold", 1),
+            (train_dates[7], 3.0, "sell", 1),
+        ]
+        oos_specs = [
+            (oos_dates[0], 0.0, "hold", 0),
+            (oos_dates[1], 1.0, "buy", 0),
+            (oos_dates[2], 2.0, "hold", 1),
+            (oos_dates[3], 3.0, "sell", 1),
+            (oos_dates[4], 0.0, "hold", 0),
+            (oos_dates[5], 1.0, "buy", 0),
+            (oos_dates[6], 2.0, "hold", 1),
+            (oos_dates[7], 3.0, "sell", 1),
+        ]
+        for dt, feature_signal, action, position_before in train_specs + oos_specs:
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_action": action,
+                    "expert_action_id": {"hold": 0, "buy": 1, "sell": 2}[action],
+                    "expert_position_before": position_before,
+                }
+            )
+
+        result = train_position_aware_long_only_behavior_cloning_rf(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+
+        self.assertEqual(set(result.summary_df["policy_state"].tolist()), {"flat", "long"})
+        self.assertIn("prob_buy", result.scored_oos_df.columns)
+        self.assertIn("prob_sell", result.scored_oos_df.columns)
+        self.assertEqual(set(result.report_df["policy_state"].tolist()), {"flat", "long"})
+
+    def test_rollout_position_aware_long_only_policy_uses_simulated_position(self):
+        train_rows = []
+        oos_rows = []
+        train_dates = pd.date_range("2019-01-01", periods=4, freq="D")
+        oos_dates = pd.date_range("2020-01-01", periods=4, freq="D")
+        specs = [
+            (0.0, "hold", 0),
+            (1.0, "buy", 0),
+            (2.0, "hold", 1),
+            (3.0, "sell", 1),
+        ]
+        for dt, (feature_signal, action, position_before) in zip(train_dates, specs):
+            train_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_action": action,
+                    "expert_action_id": {"hold": 0, "buy": 1, "sell": 2}[action],
+                    "expert_position_before": position_before,
+                }
+            )
+        for dt, (feature_signal, action, position_before) in zip(oos_dates, specs):
+            oos_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_action": action,
+                    "expert_action_id": {"hold": 0, "buy": 1, "sell": 2}[action],
+                    "expert_position_before": position_before,
+                }
+            )
+
+        result = train_position_aware_long_only_behavior_cloning_rf(
+            pd.DataFrame(train_rows + oos_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+        rollout_df = rollout_position_aware_long_only_policy(
+            pd.DataFrame(oos_rows),
+            ["feature_signal"],
+            flat_model=result.flat_model,
+            long_model=result.long_model,
+        )
+
+        self.assertEqual(rollout_df["sim_position_before"].tolist(), [0, 0, 1, 1])
+        self.assertEqual(rollout_df["pred_action"].tolist(), ["hold", "buy", "hold", "sell"])
+
+    def test_rollout_long_only_position_policy_turns_position_changes_into_actions(self):
+        panel_rows = []
+        dates = pd.date_range("2020-01-01", periods=4, freq="D")
+        specs = [
+            (0.0, "flat", 0),
+            (1.0, "long", 1),
+            (2.0, "long", 1),
+            (3.0, "flat", 0),
+        ]
+        for dt, (feature_signal, position_label, position_id) in zip(dates, specs):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "adj_close": 100.0 + feature_signal,
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        train_rows = []
+        for dt, (feature_signal, position_label, position_id) in zip(pd.date_range("2019-01-01", periods=4, freq="D"), specs):
+            train_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        result = train_long_only_position_cloning_rf(
+            pd.DataFrame(train_rows + panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+        rollout_df = rollout_long_only_position_policy(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            model=result.model,
+        )
+
+        self.assertEqual(rollout_df["pred_position_label"].tolist(), ["flat", "long", "long", "flat"])
+        self.assertEqual(rollout_df["pred_action"].tolist(), ["hold", "buy", "hold", "sell"])
+
+    def test_rollout_position_policy_turns_three_state_changes_into_actions(self):
+        panel_rows = []
+        dates = pd.date_range("2020-01-01", periods=7, freq="D")
+        specs = [
+            (0.0, "flat", 0),
+            (1.0, "long", 1),
+            (2.0, "long", 1),
+            (3.0, "flat", 0),
+            (4.0, "short", 2),
+            (5.0, "short", 2),
+            (6.0, "flat", 0),
+        ]
+        for dt, (feature_signal, position_label, position_id) in zip(dates, specs):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        train_rows = []
+        for dt, (feature_signal, position_label, position_id) in zip(pd.date_range("2019-01-01", periods=7, freq="D"), specs):
+            train_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        result = train_position_cloning_rf(
+            pd.DataFrame(train_rows + panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+        rollout_df = rollout_position_policy(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            model=result.model,
+        )
+
+        self.assertEqual(
+            rollout_df["pred_position_label"].tolist(),
+            ["flat", "long", "long", "flat", "short", "short", "flat"],
+        )
+        self.assertEqual(
+            rollout_df["pred_action"].tolist(),
+            ["hold", "buy", "hold", "sell", "short", "hold", "cover"],
+        )
+
+    def test_rollout_position_policy_flips_directly_between_long_and_short(self):
+        panel_rows = []
+        dates = pd.date_range("2020-01-01", periods=5, freq="D")
+        specs = [
+            (0.0, "flat", 0),
+            (1.0, "long", 1),
+            (2.0, "short", 2),
+            (3.0, "long", 1),
+            (4.0, "flat", 0),
+        ]
+        for dt, (feature_signal, position_label, position_id) in zip(dates, specs):
+            panel_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        train_rows = []
+        for dt, (feature_signal, position_label, position_id) in zip(pd.date_range("2019-01-01", periods=5, freq="D"), specs):
+            train_rows.append(
+                {
+                    "symbol": "AAPL",
+                    "date": pd.Timestamp(dt),
+                    "date_text": pd.Timestamp(dt).strftime("%Y-%m-%d"),
+                    "feature_signal": feature_signal,
+                    "expert_position_label": position_label,
+                    "expert_position_id": position_id,
+                }
+            )
+        result = train_position_cloning_rf(
+            pd.DataFrame(train_rows + panel_rows),
+            ["feature_signal"],
+            train_cutoff="2020-01-01",
+            rf_kwargs={"n_estimators": 20, "max_depth": 4, "min_samples_leaf": 1, "random_state": 7, "n_jobs": 1},
+        )
+        rollout_df = rollout_position_policy(
+            pd.DataFrame(panel_rows),
+            ["feature_signal"],
+            model=result.model,
+        )
+
+        self.assertEqual(
+            rollout_df["pred_position_label"].tolist(),
+            ["flat", "long", "short", "long", "flat"],
+        )
+        self.assertEqual(
+            rollout_df["pred_action"].tolist(),
+            ["hold", "buy", "short", "buy", "sell"],
+        )
+        self.assertEqual(
+            rollout_df["sim_position_label_after"].tolist(),
+            ["flat", "long", "short", "long", "flat"],
+        )

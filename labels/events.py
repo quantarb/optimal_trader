@@ -109,6 +109,8 @@ def generate_optimal_events(
                         side=side,
                         horizon=f"{freq}_k{k}",
                         trade_id=trade_id,
+                        entry_date=entry_dt,
+                        exit_date=exit_dt,
                         entry_px=float(entry_px),
                         exit_px=float(exit_px),
                         trade_duration_days=int((exit_dt - entry_dt).days),
@@ -140,6 +142,8 @@ def generate_optimal_events(
                         side=side,
                         horizon=f"{freq}_k{k}",
                         trade_id=trade_id,
+                        entry_date=entry_dt,
+                        exit_date=exit_dt,
                         entry_px=float(entry_px),
                         exit_px=float(exit_px),
                         trade_duration_days=int((exit_dt - entry_dt).days),
@@ -202,9 +206,21 @@ def build_label_panel(
         labels['market_position'] = actions['market_position']
         labels['symbol'] = symbol
 
-        # Preserve duration for statistical reporting
-        if 'trade_duration_days' in events.columns:
-            labels['trade_duration_days'] = events['trade_duration_days']
+        passthrough_columns = [
+            "event",
+            "trade_id",
+            "entry_date",
+            "exit_date",
+            "entry_px",
+            "exit_px",
+            "trade_duration_days",
+        ]
+        for column in passthrough_columns:
+            if column in events.columns:
+                labels[column] = events[column]
+
+        if "trade_duration_days" in labels.columns and "hold_days" not in labels.columns:
+            labels["hold_days"] = labels["trade_duration_days"]
 
         all_label_frames.append(labels.reset_index())
 

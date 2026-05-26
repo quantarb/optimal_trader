@@ -53,6 +53,7 @@
             <a class="sidebar-link {% if route == 'pipeline-opportunities' or route == 'pipeline-top-opportunities' %}is-active{% endif %}" href="{% url 'pipeline-opportunities' %}">Opportunities</a>
             <a class="sidebar-link {% if route == 'pipeline-stock-intelligence' or route == 'pipeline-stock-intelligence-symbol' or route == 'pipeline-symbol-research' %}is-active{% endif %}" href="{% url 'pipeline-stock-intelligence' %}">Stock Analysis</a>
             <a class="sidebar-link {% if route == 'pipeline-portfolio-analysis' %}is-active{% endif %}" href="{% url 'pipeline-portfolio-analysis' %}">Portfolio Analysis</a>
+            <a class="sidebar-link {% if route == 'trading-leaderboard' or route == 'trading-similar-trades' %}is-active{% endif %}" href="{% url 'trading-leaderboard' %}">Trading</a>
           </div>
         </div>
       </aside>
@@ -63,7 +64,6 @@
             {% block topbar_links %}
               <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
               <a class="topbar-link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
-              <a class="topbar-link" href="{% url 'pipeline-market-state-api' %}?symbol=AAPL">API</a>
             {% endblock %}
           </div>
           <div class="caption">{% block topbar_meta %}{% endblock %}</div>

@@ -56,6 +56,7 @@ def train_rf_models(
         target_col=classifier_target_col,
         weight_col="sample_weight",
         split_ratio=float(split_ratio),
+        model_tag="classifier: predicts buy/positive class from the label target",
     )
     clf = SklearnRFClassifier(
         random_state=1337,
@@ -73,6 +74,7 @@ def train_rf_models(
         target_col=ranking_target_col,
         weight_col="sample_weight",
         split_ratio=float(split_ratio),
+        model_tag="ranking regressor: predicts cross-sectional rank target",
     )
     reg = SklearnRFRegressor(
         test_size=max(0.0, 1.0 - float(split_ratio)),
@@ -95,6 +97,7 @@ def train_rf_models(
                 target_col=trade_return_target_col,
                 weight_col="sample_weight",
                 split_ratio=float(split_ratio),
+                model_tag="trade return regressor: predicts realized trade return target",
             )
             trade_return_reg = SklearnRFRegressor(
                 test_size=max(0.0, 1.0 - float(split_ratio)),
@@ -117,6 +120,7 @@ def train_rf_models(
                 target_col=duration_target_col,
                 weight_col="sample_weight",
                 split_ratio=float(split_ratio),
+                model_tag="duration regressor: predicts trade duration target",
             )
             duration_reg = SklearnRFRegressor(
                 test_size=max(0.0, 1.0 - float(split_ratio)),

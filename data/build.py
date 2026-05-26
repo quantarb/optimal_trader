@@ -3,7 +3,7 @@
 # Data build layer extracted from modules/pipeline.py
 #
 # Responsibility:
-#   - prices (SQLite-first) via DataContext.store + FMP fetch
+#   - prices from the FMP Django history table
 #   - features (computed on-the-fly)
 #   - events + labels per symbol
 #   - training_df (concatenated across symbols)
@@ -32,7 +32,6 @@ from data.schema import (
 )
 
 from data.context import DataContext
-from data.prices_sqlite import load_or_fetch_prices_daily, load_or_fetch_prices_daily_fast
 from data.quality import DataQualityConfig, assess_and_clean_prices_daily
 from features.technical import load_or_compute_features_daily
 from data.dataset_rows import build_event_training_dataset
@@ -120,6 +119,15 @@ def _summarize_skips(skipped: List[SkipRecord], universe: List[str]) -> None:
         print(f" - {r.symbol} | stage={r.stage} | {r.error_type}: {r.message}")
 
 
+def _load_prices_daily_from_fmp_history(symbol: str) -> pd.DataFrame:
+    from data.historical_prices import load_adjusted_price_frames
+
+    frame = load_adjusted_price_frames([str(symbol).strip().upper()]).get(str(symbol).strip().upper())
+    if frame is None or frame.empty:
+        raise RuntimeError("no FMP adjusted price history found")
+    return frame
+
+
 # --------------------------
 # REFACTOR: Shared Helper for Prices + Features
 # --------------------------
@@ -142,11 +150,10 @@ def _process_symbol_features(
     ep = execution_params or {}
     price_col = str(ep.get("price_col", "close"))
 
-    # 1) Prices (SQLite-first)
-    if use_fast_prices:
-        df_prices = load_or_fetch_prices_daily_fast(symbol, ctx=ctx, last_dt_hint=last_dt_hint)
-    else:
-        df_prices = load_or_fetch_prices_daily(symbol, ctx=ctx)
+    del ctx, last_dt_hint, use_fast_prices
+
+    # 1) Prices
+    df_prices = _load_prices_daily_from_fmp_history(symbol)
 
     df_prices = normalize_cols(df_prices)
 
@@ -327,21 +334,10 @@ def build_training_and_daily(
         history_years=history_years,
     )
 
-    # Bulk query last_dt per symbol (for incremental price fetches)
-    ctx.store.init_schema()
-    last_df = ctx.store.get_last_price_dates_from_prices_for_symbols(universe)
-
     last_dt_map: Dict[str, Optional[pd.Timestamp]] = {s: None for s in universe}
-    if last_df is not None and not last_df.empty:
-        last_df = last_df.dropna(subset=["last_price_date"]).copy()
-        for _, row in last_df.iterrows():
-            sym = str(row["symbol"])
-            dt = pd.to_datetime(row["last_price_date"], errors="coerce")
-            if pd.notna(dt):
-                last_dt_map[sym] = pd.Timestamp(dt).normalize()
 
-    # If we want earliest-history backfill, force canonical loader for this run
-    use_fast_prices = False if history_years else True
+    # Kept for compatibility with older call paths; price loading now uses FMP history.
+    use_fast_prices = True
 
     daily_by_symbol: Dict[str, pd.DataFrame] = {}
     training_rows: List[pd.DataFrame] = []
@@ -470,14 +466,7 @@ def build_technical_panel(
         verbose=verbose_data
     )
 
-    # Pre-fetch last dates for incremental speed
-    ctx.store.init_schema()
-    last_df = ctx.store.get_last_price_dates_from_prices_for_symbols(universe)
     last_dt_map = {s: None for s in universe}
-    if last_df is not None and not last_df.empty:
-        last_df = last_df.dropna(subset=["last_price_date"])
-        for _, row in last_df.iterrows():
-            last_dt_map[str(row["symbol"])] = pd.to_datetime(row["last_price_date"]).normalize()
 
     frames = []
     feature_cols_set = set()
@@ -556,8 +545,7 @@ def build_dataset(
       - skipped: per-symbol skips
       - meta: build metadata (windows, symbols)
     """
-    # Derive data_dir from the sqlite db_path.
-    data_dir = os.path.dirname(ctx.store.db_path) or "."
+    data_dir = str(getattr(ctx, "data_dir", ".") or ".")
     api_key = ctx.api_key
 
     out = build_training_and_daily(
@@ -567,7 +555,7 @@ def build_dataset(
         k_params=k_params,
         execution_params=execution_params,
         weighting=weighting,
-        db_name=os.path.basename(ctx.store.db_path),
+        db_name=str(getattr(ctx, "db_name", "quant.db") or "quant.db"),
         sleep_s=ctx.sleep_s,
         debug_first_symbol=False,
         skip_on_error=skip_on_error,

@@ -350,10 +350,14 @@ def _store_series_dataframe(
             )
             values_by_date.append(obs_date)
         if values_by_date:
+            existing_bounds = observation_model.objects.filter(series=series_obj).aggregate(
+                min_date=Min("observation_date"),
+                max_date=Max("observation_date"),
+            )
             series_obj.display_name = _prettify_header(str(col))
             series_obj.last_fetched_at = fetched_at
-            series_obj.min_date = min(values_by_date)
-            series_obj.max_date = max(values_by_date)
+            series_obj.min_date = existing_bounds.get("min_date") or min(values_by_date)
+            series_obj.max_date = existing_bounds.get("max_date") or max(values_by_date)
             series_obj.save(
                 update_fields=[
                     "display_name",
@@ -1049,6 +1053,25 @@ _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD = 0.75
 _UNIVERSE_DOWNLOAD_TARGET_YEARS = 20
 _UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS = 3
 _UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S = 1.5
+_FUNDAMENTAL_STATEMENT_ANCHOR_SECTION_KEYS = (
+    "income_statement",
+    "balance_sheet",
+    "cash_flow",
+)
+_FUNDAMENTAL_FALLBACK_ANCHOR_SECTION_KEYS = (
+    "earnings",
+)
+_FUNDAMENTAL_DEPENDENT_SECTION_KEYS = {
+    "key_metrics",
+    "ratios",
+    "income_statement",
+    "income_statement_growth",
+    "cash_flow",
+    "cash_flow_growth",
+    "balance_sheet",
+    "balance_sheet_growth",
+    "financial_growth",
+}
 
 
 def _dedupe_choice_tuples(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -1247,16 +1270,227 @@ def _section_coverage_ratio(symbol_obj: Symbol, section_key: str, target_start, 
     return max(0.0, min(1.0, ratio))
 
 
-def _refresh_all_symbol_sections(symbol_obj: Symbol, client: FMPClient) -> tuple[dict[str, str], dict[str, Any]]:
+def _existing_historical_section_keys(symbol_obj: Symbol) -> set[str]:
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    out: set[str] = set()
+    if not isinstance(ranges, dict):
+        return out
+    for key, payload in ranges.items():
+        if not isinstance(payload, dict):
+            continue
+        if int(payload.get("count") or 0) > 0:
+            out.add(str(key))
+    return out
+
+
+def _normalize_section_key_set(section_keys: Any) -> set[str]:
+    out: set[str] = set()
+    for raw in list(section_keys or []):
+        key = str(raw).strip()
+        if key:
+            out.add(key)
+    return out
+
+
+def _latest_historical_section_date(symbol_obj: Symbol, section_key: str):
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    payload = ranges.get(section_key) if isinstance(ranges, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return _parse_iso_date(payload.get("max_date"))
+
+
+def _latest_company_fundamental_anchor_date(symbol_obj: Symbol):
+    statement_dates = [
+        _latest_historical_section_date(symbol_obj, section_key)
+        for section_key in _FUNDAMENTAL_STATEMENT_ANCHOR_SECTION_KEYS
+    ]
+    statement_dates = [value for value in statement_dates if value is not None]
+    if statement_dates:
+        return max(statement_dates)
+
+    fallback_dates = [
+        _latest_historical_section_date(symbol_obj, section_key)
+        for section_key in _FUNDAMENTAL_FALLBACK_ANCHOR_SECTION_KEYS
+    ]
+    fallback_dates = [value for value in fallback_dates if value is not None]
+    if fallback_dates:
+        return max(fallback_dates)
+    return None
+
+
+def _historical_section_fetched_recently(
+    symbol_obj: Symbol,
+    section_key: str,
+    *,
+    target_end,
+    threshold_days: int,
+    state: SymbolSectionState | None = None,
+) -> bool:
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    section_range = ranges.get(section_key) if isinstance(ranges, dict) else None
+    max_date = _parse_iso_date((section_range or {}).get("max_date")) if isinstance(section_range, dict) else None
+    if max_date is None or max_date < target_end:
+        return False
+    if state is None:
+        state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+    if state is None or state.last_fetched_at is None:
+        return False
+    return state.last_fetched_at >= (timezone.now() - timedelta(days=threshold_days))
+
+
+def _historical_section_fetch_mode(
+    symbol_obj: Symbol,
+    section,
+    *,
+    target_end,
+    target_start,
+) -> tuple[str, list[tuple[Any, Any]]]:
+    section_key = str(section.key)
+    candidates = list(section.candidates or [])
+    threshold_days = int(section.threshold_days)
+    coverage_ratio = _section_coverage_ratio(symbol_obj, section_key, target_start, target_end)
+    has_date_window = _candidate_supports_date_window(candidates)
+    section_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
+    max_date = _parse_iso_date(section_range.get("max_date"))
+    min_date = _parse_iso_date(section_range.get("min_date"))
+    is_recent_enough = bool(max_date and max_date >= (target_end - timedelta(days=threshold_days)))
+    state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
+    fundamental_anchor_date = _latest_company_fundamental_anchor_date(symbol_obj)
+
+    if (
+        section_key in _FUNDAMENTAL_DEPENDENT_SECTION_KEYS
+        and fundamental_anchor_date is not None
+        and max_date is not None
+        and max_date >= fundamental_anchor_date
+    ):
+        return "skip", []
+
+    if _historical_section_fetched_recently(
+        symbol_obj,
+        section_key,
+        target_end=target_end,
+        threshold_days=threshold_days,
+        state=state,
+    ):
+        return "skip", []
+
+    fetch_mode = "full"
+    fetch_ranges: list[tuple[Any, Any]] = []
+
+    if coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and has_date_window:
+        if max_date is not None and max_date < target_end:
+            fetch_mode = "tail"
+            fetch_ranges = [(max_date + timedelta(days=1), target_end)]
+        elif not is_recent_enough:
+            fetch_mode = "tail"
+            fetch_ranges = [(max(target_end - timedelta(days=threshold_days), target_start), target_end)]
+        else:
+            fetch_mode = "skip"
+    elif coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and is_recent_enough:
+        # Endpoints without date-window params can be skipped when sufficiently covered and fresh.
+        fetch_mode = "skip"
+    elif has_date_window and min_date is not None and min_date > target_start:
+        # Backfill only the missing head window when partial history exists.
+        fetch_mode = "head"
+        fetch_ranges = [(target_start, min_date - timedelta(days=1))]
+
+    return fetch_mode, fetch_ranges
+
+
+def historical_symbol_refresh_needed(
+    symbol_obj: Symbol,
+    *,
+    target_start_date=None,
+    target_end_date=None,
+    existing_historical_sections_only: bool = False,
+    required_historical_sections: Any = None,
+    allowed_historical_sections: Any = None,
+) -> tuple[bool, str]:
+    section_defs = [section for section in get_symbol_endpoint_definitions(symbol_obj) if str(section.kind) == "historical"]
+    allowed_keys = _normalize_section_key_set(allowed_historical_sections)
+    if allowed_keys:
+        section_defs = [section for section in section_defs if str(section.key) in allowed_keys]
+    if not section_defs:
+        return False, "no_historical_sections"
+
+    default_target_end = timezone.now().date()
+    parsed_target_end = _parse_iso_date(target_end_date)
+    target_end = parsed_target_end or default_target_end
+    default_target_start = target_end - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
+    parsed_target_start = _parse_iso_date(target_start_date)
+    target_start = parsed_target_start or default_target_start
+
+    historical_section_keys = [str(section.key) for section in section_defs]
+    _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
+    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
+
+    if existing_historical_sections_only:
+        existing_keys = _existing_historical_section_keys(symbol_obj)
+        required_keys = _normalize_section_key_set(required_historical_sections)
+        allowed_keys = existing_keys | required_keys
+        if not allowed_keys:
+            return False, "no_existing_historical_sections"
+        section_defs = [section for section in section_defs if str(section.key) in allowed_keys]
+        if not section_defs:
+            return False, "no_existing_historical_sections"
+
+    for section in section_defs:
+        fetch_mode, _fetch_ranges = _historical_section_fetch_mode(
+            symbol_obj,
+            section,
+            target_end=target_end,
+            target_start=target_start,
+        )
+        if fetch_mode != "skip":
+            return True, f"{section.key}:{fetch_mode}"
+
+    return False, "fresh_all_historical_sections"
+
+
+def _refresh_all_symbol_sections(
+    symbol_obj: Symbol,
+    client: FMPClient,
+    *,
+    include_snapshot_sections: bool = True,
+    target_start_date=None,
+    target_end_date=None,
+    existing_historical_sections_only: bool = False,
+    required_historical_sections: Any = None,
+    allowed_historical_sections: Any = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
     section_errors: dict[str, str] = {}
-    section_defs = get_symbol_endpoint_definitions(symbol_obj)
+    section_defs = list(get_symbol_endpoint_definitions(symbol_obj))
+    if not include_snapshot_sections:
+        section_defs = [section for section in section_defs if str(section.kind) != "snapshot"]
+    allowed_keys = _normalize_section_key_set(allowed_historical_sections)
+    if allowed_keys:
+        section_defs = [
+            section
+            for section in section_defs
+            if str(section.kind) != "historical" or str(section.key) in allowed_keys
+        ]
     refreshed_historical = False
     historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
-    now_date = timezone.now().date()
-    target_start = now_date - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
+    default_target_end = timezone.now().date()
+    parsed_target_end = _parse_iso_date(target_end_date)
+    target_end = parsed_target_end or default_target_end
+    default_target_start = target_end - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
+    parsed_target_start = _parse_iso_date(target_start_date)
+    target_start = parsed_target_start or default_target_start
 
     _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
     symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
+    if existing_historical_sections_only:
+        existing_historical_keys = _existing_historical_section_keys(symbol_obj)
+        required_historical_keys = _normalize_section_key_set(required_historical_sections)
+        allowed_historical_keys = existing_historical_keys | required_historical_keys
+        section_defs = [
+            section
+            for section in section_defs
+            if str(section.kind) != "historical" or str(section.key) in allowed_historical_keys
+        ]
+        historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
 
     stats = {
         "sections_total": len(section_defs),
@@ -1278,32 +1512,12 @@ def _refresh_all_symbol_sections(symbol_obj: Symbol, client: FMPClient) -> tuple
 
         try:
             if kind == "historical":
-                coverage_ratio = _section_coverage_ratio(symbol_obj, section_key, target_start, now_date)
-                has_date_window = _candidate_supports_date_window(candidates)
-                section_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
-                max_date = _parse_iso_date(section_range.get("max_date"))
-                min_date = _parse_iso_date(section_range.get("min_date"))
-                is_recent_enough = bool(max_date and max_date >= (now_date - timedelta(days=threshold_days)))
-
-                fetch_mode = "full"
-                fetch_ranges: list[tuple[Any, Any]] = []
-
-                if coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and has_date_window:
-                    if max_date is not None and max_date < now_date:
-                        fetch_mode = "tail"
-                        fetch_ranges = [(max_date + timedelta(days=1), now_date)]
-                    elif not is_recent_enough:
-                        fetch_mode = "tail"
-                        fetch_ranges = [(max(now_date - timedelta(days=threshold_days), target_start), now_date)]
-                    else:
-                        fetch_mode = "skip"
-                elif coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and is_recent_enough:
-                    # Endpoints without date-window params can be skipped when sufficiently covered and fresh.
-                    fetch_mode = "skip"
-                elif has_date_window and min_date is not None and min_date > target_start:
-                    # Backfill only the missing head window when partial history exists.
-                    fetch_mode = "head"
-                    fetch_ranges = [(target_start, min_date - timedelta(days=1))]
+                fetch_mode, fetch_ranges = _historical_section_fetch_mode(
+                    symbol_obj,
+                    section,
+                    target_end=target_end,
+                    target_start=target_start,
+                )
 
                 if fetch_mode == "skip":
                     stats["sections_skipped"] += 1
