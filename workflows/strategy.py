@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from domain.backtests import StrategyBacktestSpec, StrategyDatasetSpec
@@ -315,7 +316,64 @@ def _build_backtest_matrices(strategy_df: pd.DataFrame) -> BacktestMatrices:
     )
 
 
-def _compute_backtest(matrices: BacktestMatrices, *, spec: StrategyBacktestSpec, performance_tracer=None) -> BacktestComputation:
+def prepare_backtest_position_state(positions: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    positions = positions.astype(float).copy()
+    gross_weight_basis = positions.abs().sum(axis=1).replace(0.0, np.nan)
+    weights = positions.div(gross_weight_basis, axis=0).fillna(0.0)
+    lagged_weights = weights.shift(1).fillna(0.0)
+    long_weights = lagged_weights.clip(lower=0.0)
+    short_weights = (-lagged_weights.clip(upper=0.0))
+    turnover = 0.5 * weights.diff().abs().sum(axis=1).fillna(weights.abs().sum(axis=1))
+    return {
+        "positions": positions,
+        "weights": weights,
+        "lagged_weights": lagged_weights,
+        "long_weights": long_weights,
+        "short_weights": short_weights,
+        "turnover": turnover,
+    }
+
+
+def backtest_positions_with_directional_asset_returns(
+    positions,
+    long_asset_returns,
+    *,
+    short_asset_returns=None,
+    initial_balance=100000.0,
+    fee_bps=5.0,
+    slippage_bps=5.0,
+    position_state: dict[str, pd.DataFrame] | None = None,
+):
+    if position_state is None:
+        position_state = prepare_backtest_position_state(positions)
+    aligned_index = position_state["weights"].index
+    aligned_columns = position_state["weights"].columns
+    long_asset_returns = long_asset_returns.reindex(index=aligned_index, columns=aligned_columns).fillna(0.0)
+    if short_asset_returns is None:
+        short_asset_returns = -long_asset_returns
+    short_asset_returns = short_asset_returns.reindex(index=aligned_index, columns=aligned_columns).fillna(0.0)
+    long_weights = position_state["long_weights"]
+    short_weights = position_state["short_weights"]
+    gross_returns = (long_weights * long_asset_returns + short_weights * short_asset_returns).sum(axis=1)
+    turnover = position_state["turnover"]
+    cost_rate = (float(fee_bps) + float(slippage_bps)) / 10000.0
+    net_returns = gross_returns - turnover * cost_rate
+    equity = (1.0 + net_returns).cumprod() * float(initial_balance)
+    return {
+        "weights": position_state["weights"],
+        "turnover": turnover,
+        "returns": net_returns,
+        "equity": equity,
+    }
+
+
+def _compute_backtest(
+    matrices: BacktestMatrices,
+    *,
+    spec: StrategyBacktestSpec,
+    performance_tracer=None,
+    position_state: dict[str, pd.DataFrame] | None = None,
+) -> BacktestComputation:
     with _stage(
         performance_tracer,
         "backtest.compute",
@@ -323,12 +381,15 @@ def _compute_backtest(matrices: BacktestMatrices, *, spec: StrategyBacktestSpec,
         workload_type="vectorized",
         metadata={"dates": len(matrices.date_index), "symbols": len(matrices.symbol_order)},
     ):
-        effective_weights = matrices.weights.copy()
+        if position_state is None:
+            position_state = prepare_backtest_position_state(matrices.weights)
+        effective_weights = position_state["weights"].copy()
+        turnover = position_state["turnover"].copy()
         if spec.use_lagged_weights:
             effective_weights = effective_weights.shift(spec.execution_delay_days).fillna(0.0)
+            turnover = effective_weights.diff().abs().fillna(effective_weights.abs()).sum(axis=1)
         if (effective_weights.abs().sum(axis=1) <= 0).all():
             raise PipelineExecutionError("Strategy dataset produced no active portfolio rows.")
-        turnover = effective_weights.diff().abs().fillna(effective_weights.abs()).sum(axis=1)
         if spec.turnover_half_l1:
             turnover = turnover * 0.5
         turnover_cost = turnover * ((float(spec.fee_bps) + float(spec.effective_slippage_bps())) / BPS_TO_DECIMAL)
@@ -422,7 +483,13 @@ def run_strategy_backtest(
     )
     strategy_df = _apply_backtest_filters(strategy_df, spec=spec, has_liquidity_data=has_liquidity_data)
     matrices = _build_backtest_matrices(strategy_df)
-    computation = _compute_backtest(matrices, spec=spec, performance_tracer=performance_tracer)
+    position_state = prepare_backtest_position_state(matrices.weights)
+    computation = _compute_backtest(
+        matrices,
+        spec=spec,
+        performance_tracer=performance_tracer,
+        position_state=position_state,
+    )
     trade_frame = _build_trade_frame(matrices, computation)
     daily_rows = _build_daily_rows(matrices, computation)
     trades, wins, losses, avg_return, cumulative_return, final_equity, max_drawdown = _summarize_backtest(
