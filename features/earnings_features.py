@@ -15,10 +15,37 @@ def build_earnings_features(symbol_obj: Symbol, target_index: pd.MultiIndex) -> 
     work = sparse.reset_index().sort_values(["symbol", "date"])
 
     # --- Derived features ---
-    eps_actual = pd.to_numeric(work.get("earn__epsactual"), errors="coerce")
-    eps_estimated = pd.to_numeric(work.get("earn__epsestimated"), errors="coerce")
-    rev_actual = pd.to_numeric(work.get("earn__revenueactual"), errors="coerce")
-    rev_estimated = pd.to_numeric(work.get("earn__revenueestimated"), errors="coerce")
+    # FMP field names vary: eps/epsActual, epsEstimated/epsE, revenue/revenueActual, revenueEstimated/revenueE
+    # Find the right columns by pattern matching
+    earn_cols = {str(c).lower(): c for c in work.columns if str(c).startswith("earn__")}
+
+    def _find_col(*patterns: str):
+        """Find first column whose lowercased name matches any pattern."""
+        for p in patterns:
+            for key, col in earn_cols.items():
+                if p in key:
+                    return pd.to_numeric(work[col], errors="coerce")
+        return pd.Series(np.nan, index=work.index, dtype=float)
+
+    eps_actual = _find_col("epsactual", "eps__actual", "eps_actual", "eps ")
+    if eps_actual.isna().all():
+        # FMP returns just 'eps' for actual — find earn__eps but NOT earn__epsestimated/earn__epssurprise/etc
+        for key, col in earn_cols.items():
+            key_stripped = key.replace("earn__", "")
+            if key_stripped == "eps" or key_stripped in ("epsactual",):
+                eps_actual = pd.to_numeric(work[col], errors="coerce")
+                break
+
+    eps_estimated = _find_col("epsestimated", "eps_estimated", "epse")
+    rev_actual = _find_col("revenueactual", "revenue_actual")
+    if rev_actual.isna().all():
+        for key, col in earn_cols.items():
+            key_stripped = key.replace("earn__", "")
+            if key_stripped in ("revenue", "revenueactual"):
+                rev_actual = pd.to_numeric(work[col], errors="coerce")
+                break
+
+    rev_estimated = _find_col("revenueestimated", "revenue_estimated", "revenuee")
 
     out = work[["date", "symbol"]].copy()
     out["evt__earn_eps_surprise"] = safe_ratio(eps_actual - eps_estimated, eps_estimated.abs())
