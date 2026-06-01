@@ -131,6 +131,11 @@ def _train_moe_classifier(
     # Remove empty families
     families = {name: cols for name, cols in families.items() if cols}
 
+    # Drop excluded families (analyst estimates, insider trading, ratings, etc.)
+    exclude = {str(e).strip().lower() for e in model_params.get("exclude_families", [])}
+    if exclude:
+        families = {name: cols for name, cols in families.items() if name.lower() not in exclude}
+
     # Merge economic_indicators + treasury_rates into a single "macro" family
     macro_cols: list[str] = []
     for key in ("economic_indicators", "treasury_rates"):
@@ -156,6 +161,7 @@ def _train_moe_classifier(
     model_params_clean = dict(model_params)
     model_params_clean.pop("feature_families", None)
     model_params_clean.pop("family_weights", None)
+    model_params_clean.pop("exclude_families", None)
 
     family_weights_raw = dict(model_params).get("family_weights")
     family_weights: dict[str, float] | None = None
