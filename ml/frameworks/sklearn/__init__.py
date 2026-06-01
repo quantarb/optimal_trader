@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from importlib import import_module
 
-__all__ = ["SklearnMoERFClassifier", "SklearnRFClassifier", "SklearnRFRegressor"]
+__all__ = ["CumlRFClassifier", "SklearnMoERFClassifier", "SklearnRFClassifier", "SklearnRFRegressor"]
 
 
 _LAZY_EXPORTS = {
+    "CumlRFClassifier": ("ml.frameworks.sklearn.cuml_classifier", "CumlRFClassifier"),
     "SklearnMoERFClassifier": ("ml.frameworks.sklearn.moe_classifier", "SklearnMoERFClassifier"),
     "SklearnRFClassifier": ("ml.frameworks.sklearn.classifier", "SklearnRFClassifier"),
     "SklearnRFRegressor": ("ml.frameworks.sklearn.regressor", "SklearnRFRegressor"),
