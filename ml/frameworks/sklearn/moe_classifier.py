@@ -301,6 +301,10 @@ class SklearnMoERFClassifier(Model):
             out[f"{family}__prob_buy"] = pd.Series(family_proba[:, positive_idx], index=df.index).where(available, np.nan)
         return out
 
+    def predict_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Canonical prediction interface used by score_artifact_rows."""
+        return self.predict_moe_frame(df)
+
     def predict_moe_frame(self, df: pd.DataFrame) -> pd.DataFrame:
         out = self.predict_family_proba_frame(df)
         weighted_sum = pd.Series(0.0, index=out.index, dtype=float)
@@ -316,6 +320,8 @@ class SklearnMoERFClassifier(Model):
             expert_count.loc[valid] += 1
         out["clf__prob_1"] = (weighted_sum / weight_sum.replace(0.0, np.nan)).clip(0.0, 1.0)
         out["clf"] = out["clf__prob_1"]
+        out["prob_buy"] = out["clf__prob_1"]
+        out["prediction_score"] = out["clf__prob_1"]
         out["ranking"] = out["clf__prob_1"]
         out["combined_score"] = out["clf__prob_1"]
         out["ae_familiarity"] = 1.0

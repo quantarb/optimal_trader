@@ -4,14 +4,14 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 import uuid
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
 from domain.models.datasets import dedupe_label_frame
+from domain.models.feature_families import infer_feature_family_columns
 from ml.base import FitSpec
-from ml.frameworks.sklearn import SklearnRFClassifier, SklearnRFRegressor
-from ml.raw_stack import train_ae
+from ml.frameworks.sklearn import SklearnMoERFClassifier, SklearnRFClassifier, SklearnRFRegressor
 from pipeline.contracts import normalize_prediction_output_frame
 from settings import BASE_DIR
 
@@ -82,7 +82,8 @@ def _train_regressor(
 
 
 def _train_autoencoder(train_df: pd.DataFrame, feature_cols: Sequence[str]) -> Any:
-    ae_model, _numeric_cols = train_ae(train_df, feature_cols, verbose=False)
+    from ml.raw_stack import train_ae as _train_ae
+    ae_model, _numeric_cols = _train_ae(train_df, feature_cols, verbose=False)
     setattr(ae_model, "_used_features", list(feature_cols))
     return ae_model
 
@@ -103,6 +104,71 @@ def _train_multi_task_bundle(
     )
     setattr(bundle, "_used_features", list(feature_cols))
     return bundle
+
+
+def _train_moe_classifier(
+    *,
+    train_df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    model_params: dict[str, Any],
+    target_col: str,
+    split_ratio: float,
+    feature_families: Mapping[str, Sequence[str]] | None = None,
+) -> Any:
+    """Train a Mixture-of-Experts classifier with per-family expert forests."""
+    df = _attach_target(train_df, target_col=target_col, task_type="classification")
+
+    # Build feature family mapping: prefer explicit, fall back to prefix inference
+    if feature_families:
+        families: dict[str, list[str]] = {
+            str(name): [str(c) for c in cols if str(c) in df.columns]
+            for name, cols in dict(feature_families).items()
+            if str(name).strip() and cols
+        }
+    else:
+        families = infer_feature_family_columns(list(feature_cols))
+
+    # Remove empty families
+    families = {name: cols for name, cols in families.items() if cols}
+
+    # Merge economic_indicators + treasury_rates into a single "macro" family
+    macro_cols: list[str] = []
+    for key in ("economic_indicators", "treasury_rates"):
+        if key in families:
+            macro_cols.extend(families.pop(key))
+    if macro_cols:
+        families["macro"] = sorted(set(macro_cols))
+
+    # Drop families with fewer than 2 features (can't train a useful tree)
+    families = {name: cols for name, cols in families.items() if len(cols) >= 2}
+
+    if not families:
+        raise ValueError("MoE classifier requires at least one family with ≥2 features.")
+
+    spec = FitSpec(
+        feature_cols=list(feature_cols),
+        target_col=target_col,
+        weight_col="sample_weight",
+        split_ratio=float(split_ratio),
+        model_tag="moe-family-forest",
+    )
+
+    model_params_clean = dict(model_params)
+    model_params_clean.pop("feature_families", None)
+    model_params_clean.pop("family_weights", None)
+
+    family_weights_raw = dict(model_params).get("family_weights")
+    family_weights: dict[str, float] | None = None
+    if isinstance(family_weights_raw, dict):
+        family_weights = {str(k): float(v) for k, v in family_weights_raw.items()}
+
+    model = SklearnMoERFClassifier(
+        feature_families=families,
+        family_weights=family_weights,
+        **model_params_clean,
+    )
+    model.fit(df, spec, verbose=False)
+    return model
 
 
 def fit_model_for_algorithm(
@@ -141,6 +207,15 @@ def fit_model_for_algorithm(
             feature_cols=feature_cols,
             model_params=model_params,
             split_ratio=float(split_ratio),
+        )
+    if algorithm_value == "moe_random_forest_classifier":
+        return _train_moe_classifier(
+            train_df=train_df,
+            feature_cols=feature_cols,
+            model_params=model_params,
+            target_col=target_col,
+            split_ratio=float(split_ratio),
+            feature_families=model_params.get("feature_families"),
         )
     raise ValueError(f"Unsupported pipeline training algorithm: {algorithm!r}")
 
