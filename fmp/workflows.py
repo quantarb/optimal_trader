@@ -7,7 +7,6 @@ import pandas as pd
 from features.macro import MacroFeatureConfig
 from trading.live_trade import (
     REQUIRED_SCORING_HISTORICAL_SECTIONS,
-    plan_symbol_fundamental_refresh_from_fmp,
     plan_symbol_price_refresh_from_fmp,
     plan_symbol_section_refresh_from_fmp,
     refresh_macro_series_from_fmp,
@@ -27,6 +26,7 @@ def run_scoring_data_refresh_from_fmp(
     refresh_macro_before_build: bool = False,
     max_symbols=None,
     existing_historical_sections_only: bool = True,
+    required_historical_sections: Sequence[str] | None = None,
     macro_config: MacroFeatureConfig | None = None,
     verbose: bool = False,
     progress_logger=None,
@@ -47,6 +47,14 @@ def run_scoring_data_refresh_from_fmp(
         return results
 
     _ = resolve_fmp_api_key(required=True)
+    scoring_historical_sections = tuple(
+        str(section).strip()
+        for section in (required_historical_sections or REQUIRED_SCORING_HISTORICAL_SECTIONS)
+        if str(section).strip()
+    )
+    scoring_fundamental_sections = tuple(
+        section for section in scoring_historical_sections if section != "prices_div_adj"
+    )
 
     if refresh_symbol_sections_before_build:
         if refresh_mode == "prices_only":
@@ -66,7 +74,9 @@ def run_scoring_data_refresh_from_fmp(
             if log is not None:
                 log(
                     "Refreshing missing latest price history from FMP before feature build"
+                    f" | total symbols {len(price_plan):,}"
                     f" | targeted symbols {len(price_symbols):,}"
+                    f" | needs refresh {len(price_symbols):,}"
                     f" | already fresh {int(len(price_plan) - len(price_symbols)):,}"
                 )
                 if not price_plan.empty and len(price_symbols):
@@ -109,7 +119,9 @@ def run_scoring_data_refresh_from_fmp(
             if log is not None:
                 log(
                     "Refreshing latest price data from FMP before feature build"
+                    f" | total symbols {len(price_plan):,}"
                     f" | targeted symbols {len(price_symbols):,}"
+                    f" | needs refresh {len(price_symbols):,}"
                     f" | already fresh {int(len(price_plan) - len(price_symbols)):,}"
                 )
                 if not price_plan.empty and len(price_symbols):
@@ -136,53 +148,90 @@ def run_scoring_data_refresh_from_fmp(
                 price_error_count = int((price_refresh_results.get("status") == "error").sum()) if not price_refresh_results.empty and "status" in price_refresh_results.columns else 0
                 log(f"FMP price refresh complete | refreshed {price_refreshed_count:,} | errors {price_error_count:,}")
 
-            fundamental_plan = plan_symbol_fundamental_refresh_from_fmp(
-                symbols=symbols,
-                target_end_date=target_end_date,
-                max_symbols=max_symbols,
-                required_section_keys=REQUIRED_SCORING_HISTORICAL_SECTIONS[1:],
-            )
-            results["fundamental_plan"] = fundamental_plan
-            fundamental_symbols = tuple(
-                fundamental_plan.loc[fundamental_plan["needs_refresh"].fillna(False), "symbol"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .tolist()
-            )
-            if log is not None:
-                log(
-                    "Refreshing fundamental data from FMP before feature build"
-                    f" | targeted symbols {len(fundamental_symbols):,}"
-                    f" | already fresh {int(len(fundamental_plan) - len(fundamental_symbols)):,}"
+            fundamental_plan_frames = []
+            fundamental_refresh_frames = []
+            for section_key in scoring_fundamental_sections:
+                section_plan = plan_symbol_section_refresh_from_fmp(
+                    symbols=symbols,
+                    target_start_date=target_start_date,
+                    target_end_date=target_end_date,
+                    max_symbols=max_symbols,
+                    include_snapshot_sections=False,
+                    existing_historical_sections_only=False,
+                    required_historical_sections=(section_key,),
+                    allowed_historical_sections=(section_key,),
                 )
-                if not fundamental_plan.empty and len(fundamental_symbols):
-                    top_reasons = (
-                        fundamental_plan.loc[fundamental_plan["needs_refresh"].fillna(False), "refresh_reason"]
-                        .astype(str)
-                        .value_counts()
-                        .head(5)
+                if not section_plan.empty:
+                    section_plan = section_plan.copy()
+                    section_plan.insert(0, "section_key", section_key)
+                fundamental_plan_frames.append(section_plan)
+
+                section_symbols = tuple(
+                    section_plan.loc[section_plan["needs_refresh"].fillna(False), "symbol"]
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .tolist()
+                ) if not section_plan.empty else ()
+                if log is not None:
+                    log(
+                        f"Refreshing FMP section {section_key} before feature build"
+                        f" | total symbols {len(section_plan):,}"
+                        f" | targeted symbols {len(section_symbols):,}"
+                        f" | needs refresh {len(section_symbols):,}"
+                        f" | already fresh {int(len(section_plan) - len(section_symbols)) if not section_plan.empty else 0:,}"
                     )
-                    if len(top_reasons):
-                        reason_text = " | ".join(f"{reason}={count:,}" for reason, count in top_reasons.items())
-                        log(f"Top fundamental refresh reasons | {reason_text}")
-            fundamental_refresh_results = refresh_universe_symbol_sections_from_fmp(
-                symbols=fundamental_symbols,
-                target_start_date=target_start_date,
-                target_end_date=target_end_date,
-                max_symbols=max_symbols,
-                include_snapshot_sections=False,
-                existing_historical_sections_only=False,
-                required_historical_sections=REQUIRED_SCORING_HISTORICAL_SECTIONS[1:],
-                allowed_historical_sections=REQUIRED_SCORING_HISTORICAL_SECTIONS[1:],
-                verbose=bool(verbose),
-                progress_logger=progress_logger,
+                    if not section_plan.empty and len(section_symbols):
+                        top_reasons = (
+                            section_plan.loc[section_plan["needs_refresh"].fillna(False), "refresh_reason"]
+                            .astype(str)
+                            .value_counts()
+                            .head(5)
+                        )
+                        if len(top_reasons):
+                            reason_text = " | ".join(f"{reason}={count:,}" for reason, count in top_reasons.items())
+                            log(f"Top {section_key} refresh reasons | {reason_text}")
+
+                section_progress_logger = (
+                    (lambda message, section_key=section_key: progress_logger(f"FMP section {section_key} | {message}"))
+                    if callable(progress_logger)
+                    else None
+                )
+                section_refresh_results = (
+                    refresh_universe_symbol_sections_from_fmp(
+                        symbols=section_symbols,
+                        target_start_date=target_start_date,
+                        target_end_date=target_end_date,
+                        max_symbols=max_symbols,
+                        include_snapshot_sections=False,
+                        existing_historical_sections_only=False,
+                        required_historical_sections=(section_key,),
+                        allowed_historical_sections=(section_key,),
+                        verbose=bool(verbose),
+                        progress_logger=section_progress_logger,
+                    )
+                    if section_symbols
+                    else pd.DataFrame()
+                )
+                if not section_refresh_results.empty:
+                    section_refresh_results = section_refresh_results.copy()
+                    section_refresh_results.insert(0, "section_key", section_key)
+                fundamental_refresh_frames.append(section_refresh_results)
+                if log is not None:
+                    refreshed_count = int((section_refresh_results.get("status") != "skipped_fresh").sum()) if not section_refresh_results.empty and "status" in section_refresh_results.columns else 0
+                    error_count = int((section_refresh_results.get("status") == "error").sum()) if not section_refresh_results.empty and "status" in section_refresh_results.columns else 0
+                    log(f"FMP section {section_key} refresh complete | refreshed {refreshed_count:,} | errors {error_count:,}")
+
+            results["fundamental_plan"] = (
+                pd.concat([frame for frame in fundamental_plan_frames if frame is not None and not frame.empty], ignore_index=True)
+                if any(frame is not None and not frame.empty for frame in fundamental_plan_frames)
+                else pd.DataFrame()
             )
-            results["fundamental_refresh_results"] = fundamental_refresh_results
-            if log is not None:
-                refreshed_count = int((fundamental_refresh_results.get("status") != "skipped_fresh").sum()) if not fundamental_refresh_results.empty and "status" in fundamental_refresh_results.columns else 0
-                error_count = int((fundamental_refresh_results.get("status") == "error").sum()) if not fundamental_refresh_results.empty and "status" in fundamental_refresh_results.columns else 0
-                log(f"FMP fundamental refresh complete | refreshed {refreshed_count:,} | errors {error_count:,}")
+            results["fundamental_refresh_results"] = (
+                pd.concat([frame for frame in fundamental_refresh_frames if frame is not None and not frame.empty], ignore_index=True)
+                if any(frame is not None and not frame.empty for frame in fundamental_refresh_frames)
+                else pd.DataFrame()
+            )
         elif refresh_mode == "historical_only":
             refresh_plan = plan_symbol_section_refresh_from_fmp(
                 symbols=symbols,
@@ -191,7 +240,7 @@ def run_scoring_data_refresh_from_fmp(
                 max_symbols=max_symbols,
                 include_snapshot_sections=False,
                 existing_historical_sections_only=bool(existing_historical_sections_only),
-                required_historical_sections=REQUIRED_SCORING_HISTORICAL_SECTIONS,
+                required_historical_sections=scoring_historical_sections,
             )
             refresh_symbols = tuple(
                 refresh_plan.loc[refresh_plan["needs_refresh"].fillna(False), "symbol"]
@@ -204,7 +253,9 @@ def run_scoring_data_refresh_from_fmp(
             if log is not None:
                 log(
                     "Refreshing historical-only symbol data from FMP before feature build"
+                    f" | total symbols {len(refresh_plan):,}"
                     f" | targeted symbols {len(refresh_symbols):,}"
+                    f" | needs refresh {len(refresh_symbols):,}"
                     f" | already fresh {int(len(refresh_plan) - len(refresh_symbols)):,}"
                 )
                 if not refresh_plan.empty and len(refresh_symbols):
@@ -224,7 +275,7 @@ def run_scoring_data_refresh_from_fmp(
                 max_symbols=max_symbols,
                 include_snapshot_sections=False,
                 existing_historical_sections_only=bool(existing_historical_sections_only),
-                required_historical_sections=REQUIRED_SCORING_HISTORICAL_SECTIONS,
+                required_historical_sections=scoring_historical_sections,
                 verbose=bool(verbose),
                 progress_logger=progress_logger,
             )
