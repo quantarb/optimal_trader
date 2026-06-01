@@ -85,8 +85,12 @@ def build_label_dataframe(
     add_rank_labels: bool = True,
     deduplicate: bool = True,
     verbose: bool = True,
+    max_workers: int = 1,
 ) -> pd.DataFrame:
-    """Standard API entry point with deduplication tracking."""
+    """Standard API entry point with deduplication tracking.
+
+    Set max_workers > 1 to process symbols in parallel via ProcessPoolExecutor.
+    """
 
     df_raw = build_label_panel(
         daily_by_symbol=daily_by_symbol,
@@ -98,6 +102,7 @@ def build_label_dataframe(
         weighting=weighting,
         add_rank_labels=False,
         deduplicate=False,
+        max_workers=max_workers,
     )
 
     raw_count = len(df_raw)

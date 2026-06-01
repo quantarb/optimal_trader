@@ -20,7 +20,6 @@ def add_rank_regression_labels(training_df: pd.DataFrame) -> pd.DataFrame:
 
     ret = pd.to_numeric(df["trade_return"], errors="coerce")
 
-    df["rank_y"] = np.nan
     # Keep side_profit for compatibility with existing notebooks/reports.
     if "target" in df.columns:
         tgt = pd.to_numeric(df["target"], errors="coerce")
@@ -28,21 +27,6 @@ def add_rank_regression_labels(training_df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["side_profit"] = ret.astype(float)
 
-    valid = ret.notna()
-    if not bool(valid.any()):
-        return df
-
-    work = pd.DataFrame(
-        {
-            "__ret": ret.astype(float),
-            "__valid": valid.astype(bool),
-        },
-        index=df.index,
-    )
-    work_valid = work.loc[work["__valid"]]
-    ranked = work_valid["__ret"].rank(method="average", pct=True).astype(float)
-    rank_y = np.full(len(df), np.nan, dtype=float)
-    valid_pos = np.flatnonzero(valid.to_numpy())
-    rank_y[valid_pos] = ranked.to_numpy(dtype=float)
-    df["rank_y"] = rank_y
+    # Direct pandas rank — handles NaN naturally (they stay NaN in the output)
+    df["rank_y"] = ret.rank(method="average", pct=True)
     return df

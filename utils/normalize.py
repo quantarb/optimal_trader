@@ -16,6 +16,21 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or len(df) == 0:
         return df.copy()
 
+    # --- Fast path: already a clean DatetimeIndex, no copy needed ---
+    if isinstance(df.index, pd.DatetimeIndex):
+        if df.index.is_monotonic_increasing and df.index.tz is None:
+            return df
+
+    # --- Fast path: clean MultiIndex with a proper DatetimeIndex date level ---
+    if isinstance(df.index, pd.MultiIndex):
+        names = list(df.index.names)
+        if "date" in names:
+            date_vals = df.index.get_level_values("date")
+            if isinstance(date_vals, pd.DatetimeIndex) and date_vals.tz is None:
+                # Already clean — check if sorted
+                if df.index.is_monotonic_increasing:
+                    return df
+
     out = df.copy()
 
     # ------------------------------------------------------------

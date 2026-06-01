@@ -1,12 +1,13 @@
 # modules/labels/events.py
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Callable, Dict, Optional, List, Any, Union
 import pandas as pd
 import numpy as np
 
 from utils.normalize import normalize_cols
-from labels.directional import add_binary_classification_labels, add_action_labels
+from domain.labels.directional import add_binary_classification_labels, add_action_labels
 from labels.ranking import add_rank_regression_labels
 
 
@@ -40,20 +41,18 @@ def deduplicate_labels(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Store original index names to restore later
     idx_names = list(df.index.names)
     tmp = df.reset_index()
 
-    # Sort by return descending to prioritize the most profitable trades
-    if 'trade_return' in tmp.columns:
-        tmp = tmp.sort_values(['date', 'symbol', 'trade_return'], ascending=[True, True, False])
+    subset = ["date", "symbol", "side"]
+    if "label" in tmp.columns:
+        subset.append("label")
 
-    # Deduplicate based on identity and action (buy/sell/short/cover)
-    subset = ['date', 'symbol', 'side']
-    if 'label' in tmp.columns:
-        subset.append('label')
+    if "trade_return" in tmp.columns:
+        # Sort by return descending so drop_duplicates keeps the highest-return row
+        tmp = tmp.sort_values("trade_return", ascending=False)
 
-    unique = tmp.drop_duplicates(subset=subset, keep='first')
+    unique = tmp.drop_duplicates(subset=subset, keep="first")
     return unique.set_index(idx_names).sort_index()
 
 
@@ -162,6 +161,55 @@ def generate_optimal_events(
     return pd.DataFrame(rows).set_index("date").sort_index()
 
 
+def _build_one_symbol_labels(args: tuple) -> tuple:
+    """Process a single symbol: events → actions → labels. Top-level for picklability."""
+    (symbol, df_daily, k_params, execution_params, weighting,
+     price_col, fee_bps, slippage_bps) = args
+
+    from labels.strategy_solver import (
+        solve_joint_trades_by_frequency,
+        solve_longs_by_frequency,
+        solve_shorts_by_frequency,
+    )
+
+    try:
+        events = generate_optimal_events(
+            df_daily=df_daily,
+            solve_longs_by_frequency_fn=solve_longs_by_frequency,
+            solve_shorts_by_frequency_fn=solve_shorts_by_frequency,
+            solve_joint_by_frequency_fn=solve_joint_trades_by_frequency,
+            k_params=k_params,
+            price_col=price_col,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+        )
+
+        if events.empty:
+            return (symbol, None, "no events produced")
+
+        actions = add_action_labels(events)
+        labels = add_binary_classification_labels(events, **weighting)
+
+        labels["label"] = actions["label"]
+        labels["market_position"] = actions["market_position"]
+        labels["symbol"] = symbol
+
+        passthrough_columns = [
+            "event", "trade_id", "entry_date", "exit_date",
+            "entry_px", "exit_px", "trade_duration_days",
+        ]
+        for column in passthrough_columns:
+            if column in events.columns:
+                labels[column] = events[column]
+
+        if "trade_duration_days" in labels.columns and "hold_days" not in labels.columns:
+            labels["hold_days"] = labels["trade_duration_days"]
+
+        return (symbol, labels.reset_index(), None)
+    except Exception as e:
+        return (symbol, None, f"{type(e).__name__}: {e}")
+
+
 def build_label_panel(
         daily_by_symbol: Dict[str, pd.DataFrame],
         solve_longs_by_frequency_fn: Callable,
@@ -172,57 +220,50 @@ def build_label_panel(
         solve_joint_by_frequency_fn: Optional[Callable] = None,
         add_rank_labels: bool = True,
         deduplicate: bool = True,
+        max_workers: int = 1,
 ) -> pd.DataFrame:
     """
     Builds a single label dataframe.
     If deduplicate is True, it keeps only one signal per date/symbol/side/action.
+    Set max_workers > 1 to process symbols in parallel via ProcessPoolExecutor.
     """
+    price_col = execution_params.get("price_col", "close")
+    fee_bps = execution_params.get("fee_bps", 0.0)
+    slippage_bps = execution_params.get("slippage_bps", 0.0)
+
     all_label_frames = []
 
-    for symbol, df_daily in daily_by_symbol.items():
-        if df_daily is None or df_daily.empty:
-            continue
-
-        events = generate_optimal_events(
-            df_daily=df_daily,
-            solve_longs_by_frequency_fn=solve_longs_by_frequency_fn,
-            solve_shorts_by_frequency_fn=solve_shorts_by_frequency_fn,
-            solve_joint_by_frequency_fn=solve_joint_by_frequency_fn,
-            k_params=k_params,
-            price_col=execution_params.get("price_col", "close"),
-            fee_bps=execution_params.get("fee_bps", 0.0),
-            slippage_bps=execution_params.get("slippage_bps", 0.0),
-        )
-
-        if events.empty:
-            continue
-
-        # Convert to action strings (buy/sell/short/cover)
-        actions = add_action_labels(events)
-        # Convert to binary targets (0/1)
-        labels = add_binary_classification_labels(events, **weighting)
-
-        labels['label'] = actions['label']
-        labels['market_position'] = actions['market_position']
-        labels['symbol'] = symbol
-
-        passthrough_columns = [
-            "event",
-            "trade_id",
-            "entry_date",
-            "exit_date",
-            "entry_px",
-            "exit_px",
-            "trade_duration_days",
+    if max_workers > 1:
+        # --- Parallel path ---
+        tasks = [
+            (symbol, df_daily, k_params, execution_params, weighting,
+             price_col, fee_bps, slippage_bps)
+            for symbol, df_daily in daily_by_symbol.items()
+            if df_daily is not None and not df_daily.empty
         ]
-        for column in passthrough_columns:
-            if column in events.columns:
-                labels[column] = events[column]
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_build_one_symbol_labels, t): t[0] for t in tasks}
+            for future in as_completed(futures):
+                symbol, result, error = future.result()
+                if error:
+                    if error != "no events produced":
+                        print(f"[build_label_panel] {symbol}: {error}")
+                else:
+                    all_label_frames.append(result)
+    else:
+        # --- Sequential path (original) ---
+        for symbol, df_daily in daily_by_symbol.items():
+            if df_daily is None or df_daily.empty:
+                continue
 
-        if "trade_duration_days" in labels.columns and "hold_days" not in labels.columns:
-            labels["hold_days"] = labels["trade_duration_days"]
-
-        all_label_frames.append(labels.reset_index())
+            _, result, error = _build_one_symbol_labels(
+                (symbol, df_daily, k_params, execution_params, weighting,
+                 price_col, fee_bps, slippage_bps))
+            if error:
+                if error != "no events produced":
+                    print(f"[build_label_panel] {symbol}: {error}")
+                continue
+            all_label_frames.append(result)
 
     if not all_label_frames:
         return pd.DataFrame()

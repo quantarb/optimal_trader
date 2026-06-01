@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,10 +38,35 @@ from features.technical import load_or_compute_features_daily
 from data.dataset_rows import build_event_training_dataset
 
 from labels.strategy_solver import solve_joint_trades_by_frequency, solve_longs_by_frequency, solve_shorts_by_frequency
-from labels.events import generate_optimal_events
 
-from labels.directional import add_binary_classification_labels
-from labels.ranking import add_rank_regression_labels
+# Lazy imports to break circular dependency: data.build → labels.* → domain.labels.* → data.schema → data.build
+_generate_optimal_events = None
+_add_binary_classification_labels = None
+_add_rank_regression_labels = None
+
+
+def _get_generate_optimal_events():
+    global _generate_optimal_events
+    if _generate_optimal_events is None:
+        from labels.events import generate_optimal_events as _fn
+        _generate_optimal_events = _fn
+    return _generate_optimal_events
+
+
+def _get_add_binary_classification_labels():
+    global _add_binary_classification_labels
+    if _add_binary_classification_labels is None:
+        from labels.directional import add_binary_classification_labels as _fn
+        _add_binary_classification_labels = _fn
+    return _add_binary_classification_labels
+
+
+def _get_add_rank_regression_labels():
+    global _add_rank_regression_labels
+    if _add_rank_regression_labels is None:
+        from labels.ranking import add_rank_regression_labels as _fn
+        _add_rank_regression_labels = _fn
+    return _add_rank_regression_labels
 
 
 # --------------------------
@@ -234,7 +260,7 @@ def process_symbol(
 
         # 3) Events
         stage = "events"
-        events = generate_optimal_events(
+        events = _get_generate_optimal_events()(
             df_daily=df_daily,
             solve_longs_by_frequency_fn=solve_longs_by_frequency,
             solve_shorts_by_frequency_fn=solve_shorts_by_frequency,
@@ -250,7 +276,7 @@ def process_symbol(
 
         # 4) Labels (directional + sample_weight)
         stage = "labels"
-        labels = add_binary_classification_labels(events, **weighting)
+        labels = _get_add_binary_classification_labels()(events, **weighting)
         if labels is None or labels.empty:
             raise RuntimeError("no labels produced")
 
@@ -315,6 +341,7 @@ def build_training_and_daily(
         data_quality_overrides: Optional[Dict[str, Any]] = None,
         add_rank_labels: bool = True,
         add_rank_tasks_to_mtl: bool = True,
+        max_workers: int = 1,
 ) -> BuildResult:
     """
     Returns:
@@ -322,6 +349,9 @@ def build_training_and_daily(
       - training_df: global event-based training dataframe (optionally expanded to MTL tasks)
       - feature_cols: global feature columns
       - skipped: per-symbol skip records
+
+    Set max_workers > 1 to process symbols in parallel via ThreadPoolExecutor
+    (threads used because workers access Django ORM for price loading).
     """
     os.makedirs(data_dir, exist_ok=True)
 
@@ -346,31 +376,60 @@ def build_training_and_daily(
 
     printed_debug = False
 
-    for symbol in universe:
-        r = process_symbol(
-            symbol,
-            ctx=ctx,
-            last_dt_hint=last_dt_map.get(symbol),
-            k_params=k_params,
-            execution_params=execution_params,
-            weighting=weighting,
-            debug_data_quality=debug_data_quality,
-            data_quality_overrides=data_quality_overrides,
-            skip_on_error=skip_on_error,
-            debug_weights=(debug_first_symbol and not printed_debug),
-            use_fast_prices=use_fast_prices,
-        )
+    if max_workers > 1:
+        # --- Parallel path ---
+        def _process_one(sym: str) -> SymbolResult:
+            return process_symbol(
+                sym,
+                ctx=ctx,
+                last_dt_hint=last_dt_map.get(sym),
+                k_params=k_params,
+                execution_params=execution_params,
+                weighting=weighting,
+                debug_data_quality=debug_data_quality,
+                data_quality_overrides=data_quality_overrides,
+                skip_on_error=skip_on_error,
+                debug_weights=False,
+                use_fast_prices=use_fast_prices,
+            )
 
-        if r.skipped is not None:
-            skipped.append(r.skipped)
-            continue
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_process_one, sym): sym for sym in universe}
+            for future in as_completed(futures):
+                r = future.result()
+                if r.skipped is not None:
+                    skipped.append(r.skipped)
+                    continue
+                daily_by_symbol[r.symbol] = r.daily_df  # type: ignore[assignment]
+                training_rows.append(r.training_df)  # type: ignore[arg-type]
+                feature_cols_set.update(r.feature_cols)
+    else:
+        # --- Sequential path (original) ---
+        for symbol in universe:
+            r = process_symbol(
+                symbol,
+                ctx=ctx,
+                last_dt_hint=last_dt_map.get(symbol),
+                k_params=k_params,
+                execution_params=execution_params,
+                weighting=weighting,
+                debug_data_quality=debug_data_quality,
+                data_quality_overrides=data_quality_overrides,
+                skip_on_error=skip_on_error,
+                debug_weights=(debug_first_symbol and not printed_debug),
+                use_fast_prices=use_fast_prices,
+            )
 
-        if debug_first_symbol and not printed_debug:
-            printed_debug = True
+            if r.skipped is not None:
+                skipped.append(r.skipped)
+                continue
 
-        daily_by_symbol[symbol] = r.daily_df  # type: ignore[assignment]
-        training_rows.append(r.training_df)  # type: ignore[arg-type]
-        feature_cols_set.update(r.feature_cols)
+            if debug_first_symbol and not printed_debug:
+                printed_debug = True
+
+            daily_by_symbol[symbol] = r.daily_df  # type: ignore[assignment]
+            training_rows.append(r.training_df)  # type: ignore[arg-type]
+            feature_cols_set.update(r.feature_cols)
 
     if not training_rows:
         _summarize_skips(skipped, universe)
@@ -394,7 +453,7 @@ def build_training_and_daily(
     # (B) Add global rank regression label
     # --------------------------------------------------------
     if add_rank_labels:
-        training_df = add_rank_regression_labels(training_df)
+        training_df = _get_add_rank_regression_labels()(training_df)
         training_df = normalize_cols(training_df)
 
     # --------------------------------------------------------
@@ -452,10 +511,13 @@ def build_technical_panel(
         data_quality_overrides: Optional[Dict[str, Any]] = None,
         # Execution params removed from required args
         execution_params: Optional[Dict[str, Any]] = None,
+        max_workers: int = 1,
 ) -> Tuple[pd.DataFrame, List[str], List[SkipRecord]]:
     """
     Builds a MultiIndex DataFrame (date, symbol) containing ONLY prices and technical features.
     No labels, no events, no targets.
+
+    Set max_workers > 1 to process symbols in parallel via ThreadPoolExecutor.
     """
     os.makedirs(data_dir, exist_ok=True)
     ctx = DataContext.from_data_dir(
@@ -472,24 +534,49 @@ def build_technical_panel(
     feature_cols_set = set()
     skipped = []
 
-    for symbol in universe:
-        try:
-            df, fcols, _ = _process_symbol_features(
-                symbol=symbol,
+    if max_workers > 1:
+        def _features_one(sym: str):
+            return _process_symbol_features(
+                symbol=sym,
                 ctx=ctx,
-                last_dt_hint=last_dt_map.get(symbol),
+                last_dt_hint=last_dt_map.get(sym),
                 debug_data_quality=debug_data_quality,
                 data_quality_overrides=data_quality_overrides,
                 use_fast_prices=True,
-                execution_params=execution_params,  # Pass it if present, otherwise None
+                execution_params=execution_params,
             )
-            frames.append(df)
-            feature_cols_set.update(fcols)
 
-        except Exception as e:
-            if not skip_on_error:
-                raise
-            skipped.append(SkipRecord(symbol, "features_only", type(e).__name__, str(e)[:200]))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_features_one, sym): sym for sym in universe}
+            for future in as_completed(futures):
+                sym = futures[future]
+                try:
+                    df, fcols, _ = future.result()
+                    frames.append(df)
+                    feature_cols_set.update(fcols)
+                except Exception as e:
+                    if not skip_on_error:
+                        raise
+                    skipped.append(SkipRecord(sym, "features_only", type(e).__name__, str(e)[:200]))
+    else:
+        for symbol in universe:
+            try:
+                df, fcols, _ = _process_symbol_features(
+                    symbol=symbol,
+                    ctx=ctx,
+                    last_dt_hint=last_dt_map.get(symbol),
+                    debug_data_quality=debug_data_quality,
+                    data_quality_overrides=data_quality_overrides,
+                    use_fast_prices=True,
+                    execution_params=execution_params,
+                )
+                frames.append(df)
+                feature_cols_set.update(fcols)
+
+            except Exception as e:
+                if not skip_on_error:
+                    raise
+                skipped.append(SkipRecord(symbol, "features_only", type(e).__name__, str(e)[:200]))
 
     if not frames:
         return pd.DataFrame(), [], skipped
@@ -532,6 +619,7 @@ def build_dataset(
         data_quality_overrides: Optional[Dict[str, Any]] = None,
         skip_on_error: bool = True,
         verbose_data: bool = True,
+        max_workers: int = 1,
 ) -> Dict[str, Any]:
     """Build dataset artifacts with explicit temporal boundaries.
 
@@ -565,6 +653,7 @@ def build_dataset(
         data_quality_overrides=data_quality_overrides,
         add_rank_labels=add_rank_labels,
         add_rank_tasks_to_mtl=add_rank_tasks_to_mtl,
+        max_workers=max_workers,
     )
 
     train_start_ts = pd.Timestamp(train_start)

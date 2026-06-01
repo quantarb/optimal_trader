@@ -31,16 +31,9 @@ def add_binary_classification_labels(
     extra_cols = ["trade_return"] if "trade_return" in ev.columns else []
     out = ev[base_cols + extra_cols].copy()
 
-    def _to_target(row) -> int:
-        side = row["side"]
-        event = row["event"]
-        if side == "long":
-            return 1 if event == "entry" else 0
-        if side == "short":
-            return 0 if event == "entry" else 1
-        raise ValueError(f"Unexpected side={side!r} event={event!r}")
-
-    out["target"] = out.apply(_to_target, axis=1)
+    is_long_entry = (out["side"] == "long") & (out["event"] == "entry")
+    is_short_exit = (out["side"] == "short") & (out["event"] == "exit")
+    out["target"] = (is_long_entry | is_short_exit).astype(int)
     if use_sample_weight and "trade_return" in out.columns:
         returns = pd.to_numeric(out["trade_return"], errors="coerce").fillna(0.0).to_numpy()
         clipped = np.clip(returns, 0.0, float(r_clip))
@@ -52,19 +45,21 @@ def add_binary_classification_labels(
         if horizon_balance:
             if horizon_balance_mode not in {"mass", "count"}:
                 raise ValueError("horizon_balance_mode must be 'mass' or 'count'")
-            entry_df = out.loc[is_entry].copy()
-            if not entry_df.empty:
-                if horizon_balance_mode == "count":
-                    denom_series = entry_df.groupby(["side", "horizon"]).size().astype(float)
-                else:
-                    denom_series = entry_df.groupby(["side", "horizon"])["sample_weight"].sum().astype(float)
-                inv = 1.0 / denom_series
-                inv = inv / inv.mean()
-                inv = inv.clip(lower=1.0)
-                if horizon_factor_cap is not None:
-                    inv = inv.clip(upper=float(horizon_factor_cap))
-                factors = entry_df.set_index(["side", "horizon"]).index.map(inv).astype(float)
-                out.loc[is_entry, "sample_weight"] *= factors.to_numpy()
+            if horizon_balance_mode == "count":
+                denom_series = out.loc[is_entry].groupby(["side", "horizon"]).size().astype(float)
+            else:
+                denom_series = out.loc[is_entry].groupby(["side", "horizon"])["sample_weight"].sum().astype(float)
+            inv = 1.0 / denom_series
+            inv = inv / inv.mean()
+            inv = inv.clip(lower=1.0)
+            if horizon_factor_cap is not None:
+                inv = inv.clip(upper=float(horizon_factor_cap))
+            entry_keys = pd.MultiIndex.from_arrays(
+                [out.loc[is_entry, "side"], out.loc[is_entry, "horizon"]],
+                names=["side", "horizon"],
+            )
+            factors = entry_keys.map(inv).to_numpy(dtype=float)
+            out.loc[is_entry, "sample_weight"] *= factors
 
     out = out.sort_index()
     keep = ["target", "side", "horizon"]
@@ -87,23 +82,16 @@ def add_action_labels(events: pd.DataFrame) -> pd.DataFrame:
     extra_cols = ["trade_return"] if "trade_return" in ev.columns else []
     out = ev[base_cols + extra_cols].copy()
 
-    def _to_label(row) -> str:
-        side = row["side"]
-        event = row["event"]
-        if side == "long":
-            if event == "entry":
-                return "buy"
-            if event == "exit":
-                return "sell"
-        if side == "short":
-            if event == "entry":
-                return "short"
-            if event == "exit":
-                return "cover"
-        raise ValueError(f"Unexpected side={side!r} event={event!r}")
+    conditions = [
+        (out["side"] == "long") & (out["event"] == "entry"),
+        (out["side"] == "long") & (out["event"] == "exit"),
+        (out["side"] == "short") & (out["event"] == "entry"),
+        (out["side"] == "short") & (out["event"] == "exit"),
+    ]
+    choices = ["buy", "sell", "short", "cover"]
+    out["label"] = np.select(conditions, choices, default="unknown")
 
     label_to_position = {"buy": 0, "short": 0, "sell": 1, "cover": -1}
-    out["label"] = out.apply(_to_label, axis=1)
     out["market_position"] = out["label"].map(label_to_position).astype(int)
     out = out.sort_index()
     keep = ["label", "market_position", "side", "horizon"]
