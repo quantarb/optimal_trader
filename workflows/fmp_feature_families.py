@@ -19,6 +19,7 @@ from features.income_statement_growth_features import build_income_statement_gro
 from features.key_metrics_features import build_key_metrics_features
 from features.ratios_features import build_ratios_features
 from features.section_utils import clear_section_record_cache, prime_section_record_cache
+from features.time_features import build_time_calendar_features
 from django.db import close_old_connections
 
 
@@ -69,6 +70,7 @@ def _fmp_endpoint_builders(filing_lag_days: int) -> dict[str, Any]:
         "cash_flow_growth": lambda symbol_obj, idx, px, market_cap, valuation_context: build_cash_flow_growth_features(symbol_obj, idx, valuation_frame=valuation_context, filing_lag_days=filing_lag_days),
         "financial_growth": lambda symbol_obj, idx, px, market_cap, valuation_context: build_financial_growth_features(symbol_obj, idx, valuation_frame=valuation_context, filing_lag_days=filing_lag_days),
         "earnings": lambda symbol_obj, idx, px, market_cap, valuation_context: build_earnings_features(symbol_obj, idx),
+        "time_calendar": lambda symbol_obj, idx, px, market_cap, valuation_context: build_time_calendar_features(symbol_obj, idx),
     }
 
 
@@ -149,7 +151,10 @@ def build_fmp_endpoint_feature_families(
             )
 
     try:
-        prime_section_record_cache(list(symbol_objs.values()), list(endpoint_builders.keys()))
+        prime_section_record_cache(
+            list(symbol_objs.values()),
+            [key for key in endpoint_builders.keys() if key != "time_calendar"] + ["dividends", "splits"],
+        )
         if callable(progress_logger):
             progress_logger(f"FMP feature build start | symbols={total:,} | workers={workers:,} | families={len(endpoint_builders):,}")
         if workers == 1:

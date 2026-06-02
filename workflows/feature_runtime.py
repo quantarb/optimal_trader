@@ -22,6 +22,7 @@ from features.feature_builders import (
     build_ownership_features,
     build_price_technical_features,
     build_statement_quality_features,
+    build_time_calendar_feature_family,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.section_utils import clear_section_record_cache, prime_section_record_cache
@@ -110,7 +111,7 @@ def _load_symbol_map(normalized_symbols: tuple[str, ...], performance_tracer) ->
     ):
         return {
             str(symbol.symbol).strip().upper(): symbol
-            for symbol in Symbol.objects.filter(symbol__in=normalized_symbols).only("id", "symbol")
+            for symbol in Symbol.objects.filter(symbol__in=normalized_symbols).only("id", "symbol", "payload")
         }
 
 
@@ -293,6 +294,23 @@ def _add_price_features(
     return merged
 
 
+def _add_time_calendar_features(
+    *,
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    merged: pd.DataFrame,
+    feature_columns: list[str],
+    grouped_feature_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    built = build_time_calendar_feature_family(symbol_obj, target_index)
+    if built.df.empty:
+        return merged
+    merged = merged.join(built.df[built.feature_cols], how="left")
+    feature_columns.extend(built.feature_cols)
+    grouped_feature_columns["time_calendar"] = [col for col in built.feature_cols if col.startswith("time__")]
+    return merged
+
+
 def _add_fundamental_change_features(
     *,
     symbol_obj: Symbol,
@@ -440,6 +458,14 @@ def build_symbol_feature_result(
         merged = _add_price_features(
             symbol=symbol,
             df_prices=df_prices,
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_time_calendar_features:
+        merged = _add_time_calendar_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
             merged=merged,
             feature_columns=feature_columns,
             grouped_feature_columns=grouped_feature_columns,

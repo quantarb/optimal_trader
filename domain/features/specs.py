@@ -19,6 +19,7 @@ class FeatureToggleSpec:
     """Feature-family toggles for a research panel build."""
 
     include_price_technicals: bool = True
+    include_time_calendar_features: bool = True
     include_fundamental_change: bool = True
     include_statement_quality: bool = True
     include_event_features: bool = True
@@ -33,6 +34,10 @@ class FeatureToggleSpec:
         defaults = cls()
         return cls(
             include_price_technicals=_as_bool(raw.get("include_price_technicals"), defaults.include_price_technicals),
+            include_time_calendar_features=_as_bool(
+                raw.get("include_time_calendar_features"),
+                defaults.include_time_calendar_features,
+            ),
             include_fundamental_change=_as_bool(raw.get("include_fundamental_change"), defaults.include_fundamental_change),
             include_statement_quality=_as_bool(raw.get("include_statement_quality"), defaults.include_statement_quality),
             include_event_features=_as_bool(raw.get("include_event_features"), defaults.include_event_features),
@@ -48,6 +53,7 @@ class FeatureToggleSpec:
     def to_dict(self) -> dict[str, bool]:
         return {
             "include_price_technicals": bool(self.include_price_technicals),
+            "include_time_calendar_features": bool(self.include_time_calendar_features),
             "include_fundamental_change": bool(self.include_fundamental_change),
             "include_statement_quality": bool(self.include_statement_quality),
             "include_event_features": bool(self.include_event_features),
@@ -151,4 +157,3 @@ def _as_bool(value: Any, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     return bool(default)
-

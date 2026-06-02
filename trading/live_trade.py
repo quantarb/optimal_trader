@@ -44,6 +44,8 @@ REQUIRED_FUNDAMENTAL_SECTION_KEYS = (
     "balance_sheet_growth",
     "financial_growth",
     "earnings",
+    "dividends",
+    "splits",
 )
 REQUIRED_SCORING_HISTORICAL_SECTIONS = (
     "prices_div_adj",

@@ -1,5 +1,6 @@
 FEATURE_FAMILY_DEFINITIONS = (
     ("prices_div_adj", "Prices Div Adj", 73),
+    ("time_calendar", "Time Calendar", 27),
     ("key_metrics", "Key Metrics", 42),
     ("ratios", "Ratios", 59),
     ("income_statement", "Income Statement", 31),

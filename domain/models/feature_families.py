@@ -25,6 +25,8 @@ EVENT_PREFIXES = {
     "grades_historical": ("evt__grade_",),
 }
 
+TIME_CALENDAR_PREFIXES = ("time__",)
+
 TECHNICAL_PREFIXES = (
     "sma_",
     "ema_",
@@ -48,6 +50,7 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
 
     grouped: dict[str, list[str]] = {
         "prices_div_adj": [],
+        "time_calendar": [],
         "key_metrics": [],
         "ratios": [],
         "income_statement": [],
@@ -77,6 +80,9 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         if name in PRICE_FAMILY_COLUMNS or name.startswith(TECHNICAL_PREFIXES):
             grouped["prices_div_adj"].append(name)
             assigned = True
+        if name.startswith(TIME_CALENDAR_PREFIXES):
+            grouped["time_calendar"].append(name)
+            assigned = True
         for family, prefixes in FUNDAMENTAL_PREFIXES.items():
             if name.startswith(prefixes):
                 grouped[family].append(name)
@@ -101,4 +107,3 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         if not assigned and "__" not in name:
             grouped["prices_div_adj"].append(name)
     return {key: list(dict.fromkeys(values)) for key, values in grouped.items() if values}
-

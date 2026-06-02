@@ -20,6 +20,7 @@ from features.key_metrics_features import build_key_metrics_features
 from features.ratios_features import build_ratios_features
 from features.ratings_historical_features import build_ratings_historical_features
 from features.section_utils import BuiltFeatureSet, daily_price_series, first_existing
+from features.time_features import build_time_calendar_features
 
 
 def build_price_technical_features(symbol: str, df_prices: pd.DataFrame) -> BuiltFeatureSet:
@@ -87,3 +88,7 @@ def build_ownership_features(symbol_obj: Symbol, target_index: pd.MultiIndex) ->
         build_insider_trading_features(symbol_obj, target_index),
     ]
     return merge_feature_sets(parts, target_index)
+
+
+def build_time_calendar_feature_family(symbol_obj: Symbol, target_index: pd.MultiIndex) -> BuiltFeatureSet:
+    return build_time_calendar_features(symbol_obj, target_index)

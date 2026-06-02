@@ -10,6 +10,7 @@ from domain.features.specs import FeatureBuildSpec, FeatureToggleSpec, Represent
 
 SECTION_ORDER = [
     "prices_div_adj",
+    "time_calendar",
     "key_metrics",
     "ratios",
     "income_statement",
@@ -31,6 +32,7 @@ SECTION_ORDER = [
 
 SECTION_LABELS = {
     "prices_div_adj": "Prices Div Adj",
+    "time_calendar": "Time Calendar",
     "key_metrics": "Key Metrics",
     "ratios": "Ratios",
     "income_statement": "Income Statement",
@@ -53,6 +55,7 @@ SECTION_LABELS = {
 REPRESENTATION_EMBEDDING_MODEL_VERSION = "semantic_grouped_v2"
 REPRESENTATION_EMBEDDING_FAMILY_GROUPS: dict[str, tuple[str, ...]] = {
     "price_technical": ("prices_div_adj",),
+    "time_calendar": ("time_calendar",),
     "valuation_quality": ("key_metrics", "ratios"),
     "income_statement": ("income_statement", "income_statement_growth"),
     "cash_flow": ("cash_flow", "cash_flow_growth"),
@@ -97,6 +100,8 @@ def needed_sparse_sections(feature_flags: FeatureToggleSpec | dict[str, Any]) ->
     sections: list[str] = []
     if toggles.include_fundamental_change:
         sections.extend(["key_metrics", "ratios"])
+    if getattr(toggles, "include_time_calendar_features", False):
+        sections.extend(["earnings", "dividends", "splits"])
     if toggles.include_statement_quality:
         sections.extend(
             [
@@ -285,4 +290,3 @@ def _resolve_representation_embedding_backend(config: RepresentationEmbeddingSpe
         device=config.device,
     )
     return build_dataset_embeddings, encoder
-

@@ -17,6 +17,7 @@ DEFAULT_DECIMALS = 2
 FAMILY_DISPLAY_NAMES = {
     **FEATURE_FAMILY_LABELS,
     "prices_div_adj": "Price / Technical",
+    "time_calendar": "Time / Calendar",
     "model_signals": "Model Signals",
     "novelty": "Novelty",
     "other": "Other",
@@ -137,7 +138,7 @@ def _infer_format(name: str, family: str) -> tuple[str, int]:
     lowered = str(name).lower()
     if lowered.endswith(("_flag", "_bool")) or "selected_" in lowered or lowered.startswith("is_"):
         return "boolean", 0
-    if any(token in lowered for token in ("days_since", "hold_days", "cluster_code")) or lowered in {"k"}:
+    if any(token in lowered for token in ("days_since", "days_until", "days_after", "hold_days", "cluster_code")) or lowered in {"k"}:
         return "integer", 0
     if any(token in lowered for token in ("return", "ret_", "growth", "margin", "revision", "surprise", "yield", "ratio_", "bb_pos", "dist_", "gap", "change", "vol_", "pct")):
         return "percent", 2
