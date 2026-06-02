@@ -3,7 +3,11 @@
 from workflows.features import build_feature_panel_for_symbols, build_feature_panel_frame_for_symbols
 from workflows.fmp_feature_families import build_fmp_endpoint_feature_families
 from workflows.labels import OracleLabelWorkflowResult, build_oracle_labels, build_trade_results
-from workflows.options_pricing import build_constant_maturity_call_price_panel, build_constant_maturity_put_price_panel
+from workflows.options_pricing import (
+    build_constant_maturity_call_price_panel,
+    build_constant_maturity_put_price_panel,
+    build_realized_vol_panel,
+)
 from workflows.modeling import (
     build_model_scoring_spec,
     build_model_training_spec,
@@ -24,6 +28,7 @@ __all__ = [
     "build_fmp_endpoint_feature_families",
     "build_constant_maturity_call_price_panel",
     "build_constant_maturity_put_price_panel",
+    "build_realized_vol_panel",
     "build_model_scoring_spec",
     "build_model_training_spec",
     "build_oracle_labels",

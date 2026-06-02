@@ -33,6 +33,19 @@ def cuda_available() -> bool:
 CUDA_AVAILABLE = cuda_available()
 
 
+def build_realized_vol_panel(close_df, *, window=21, vol_floor=0.15, vol_cap=0.80, annualization=252.0):
+    close = close_df.astype(float)
+    window = max(int(window), 1)
+    min_periods = 2 if window > 1 else 1
+    log_returns = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
+    realized_vol = log_returns.rolling(window=window, min_periods=min_periods).std() * math.sqrt(float(annualization))
+    if vol_floor is not None:
+        realized_vol = realized_vol.clip(lower=float(vol_floor)).fillna(float(vol_floor))
+    if vol_cap is not None:
+        realized_vol = realized_vol.clip(upper=float(vol_cap))
+    return realized_vol
+
+
 def _norm_cdf_cpu(x):
     x_arr = np.asarray(x, dtype=float)
     if _scipy_ndtr is not None:
