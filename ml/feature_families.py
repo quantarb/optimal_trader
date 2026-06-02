@@ -1,5 +1,11 @@
 FEATURE_FAMILY_DEFINITIONS = (
     ("prices_div_adj", "Prices Div Adj", 73),
+    ("technical_candles", "Technical Candles", 12),
+    ("technical_cycles", "Technical Cycles", 8),
+    ("technical_math", "Technical Math", 8),
+    ("technical_momentum", "Technical Momentum", 20),
+    ("technical_overlap", "Technical Overlap", 22),
+    ("technical_performance", "Technical Performance", 9),
     ("time_calendar", "Time Calendar", 27),
     ("key_metrics", "Key Metrics", 42),
     ("ratios", "Ratios", 59),

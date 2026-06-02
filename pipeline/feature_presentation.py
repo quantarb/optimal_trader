@@ -17,6 +17,12 @@ DEFAULT_DECIMALS = 2
 FAMILY_DISPLAY_NAMES = {
     **FEATURE_FAMILY_LABELS,
     "prices_div_adj": "Price / Technical",
+    "technical_candles": "Technical Candles",
+    "technical_cycles": "Technical Cycles",
+    "technical_math": "Technical Math",
+    "technical_momentum": "Technical Momentum",
+    "technical_overlap": "Technical Overlap",
+    "technical_performance": "Technical Performance",
     "time_calendar": "Time / Calendar",
     "model_signals": "Model Signals",
     "novelty": "Novelty",
@@ -174,6 +180,12 @@ def _heuristic_display_name(name: str) -> str:
     core = lowered
     for prefix in (
         "px__",
+        "ta_candle__",
+        "ta_cycle__",
+        "ta_math__",
+        "ta_momentum__",
+        "ta_overlap__",
+        "ta_performance__",
         "is__",
         "isg__",
         "cf__",

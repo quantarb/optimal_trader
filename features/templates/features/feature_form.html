@@ -131,6 +131,12 @@
               </div>
               <div class="chips">
                 <div class="chip">Prices Div Adj: {{ summary.source_counts.prices_div_adj }}</div>
+                <div class="chip">Technical Candles: {{ summary.source_counts.technical_candles }}</div>
+                <div class="chip">Technical Cycles: {{ summary.source_counts.technical_cycles }}</div>
+                <div class="chip">Technical Math: {{ summary.source_counts.technical_math }}</div>
+                <div class="chip">Technical Momentum: {{ summary.source_counts.technical_momentum }}</div>
+                <div class="chip">Technical Overlap: {{ summary.source_counts.technical_overlap }}</div>
+                <div class="chip">Technical Performance: {{ summary.source_counts.technical_performance }}</div>
                 <div class="chip">Key Metrics: {{ summary.source_counts.key_metrics }}</div>
                 <div class="chip">Ratios: {{ summary.source_counts.ratios }}</div>
                 <div class="chip">Income Statement: {{ summary.source_counts.income_statement }}</div>
@@ -335,6 +341,7 @@
         if (universeArtifactId) params.set("universe_artifact_id", String(universeArtifactId));
         [
           "include_price_technicals",
+          "include_ta_classic_technicals",
           "include_fundamental_change",
           "include_statement_quality",
           "include_event_features",

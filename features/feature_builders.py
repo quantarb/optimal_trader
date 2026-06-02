@@ -4,6 +4,7 @@ import pandas as pd
 
 from fmp.models import Symbol
 from domain.features.composition import merge_feature_sets
+from domain.features.ta_classic_technical import build_price_ta_classic_feature_families
 from domain.features.technical import build_price_technical_features as build_price_technical_feature_family
 from features.analyst_estimates_features import build_analyst_estimates_features
 from features.balance_sheet_features import build_balance_sheet_features
@@ -25,6 +26,10 @@ from features.time_features import build_time_calendar_features
 
 def build_price_technical_features(symbol: str, df_prices: pd.DataFrame) -> BuiltFeatureSet:
     return build_price_technical_feature_family(symbol, df_prices)
+
+
+def build_ta_classic_technical_features(symbol: str, df_prices: pd.DataFrame) -> dict[str, BuiltFeatureSet]:
+    return build_price_ta_classic_feature_families(symbol, df_prices)
 
 
 def build_fundamental_change_features(

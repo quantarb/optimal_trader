@@ -10,6 +10,12 @@ from domain.features.specs import FeatureBuildSpec, FeatureToggleSpec, Represent
 
 SECTION_ORDER = [
     "prices_div_adj",
+    "technical_candles",
+    "technical_cycles",
+    "technical_math",
+    "technical_momentum",
+    "technical_overlap",
+    "technical_performance",
     "time_calendar",
     "key_metrics",
     "ratios",
@@ -32,6 +38,12 @@ SECTION_ORDER = [
 
 SECTION_LABELS = {
     "prices_div_adj": "Prices Div Adj",
+    "technical_candles": "Technical Candles",
+    "technical_cycles": "Technical Cycles",
+    "technical_math": "Technical Math",
+    "technical_momentum": "Technical Momentum",
+    "technical_overlap": "Technical Overlap",
+    "technical_performance": "Technical Performance",
     "time_calendar": "Time Calendar",
     "key_metrics": "Key Metrics",
     "ratios": "Ratios",
@@ -54,7 +66,15 @@ SECTION_LABELS = {
 
 REPRESENTATION_EMBEDDING_MODEL_VERSION = "semantic_grouped_v2"
 REPRESENTATION_EMBEDDING_FAMILY_GROUPS: dict[str, tuple[str, ...]] = {
-    "price_technical": ("prices_div_adj",),
+    "price_technical": (
+        "prices_div_adj",
+        "technical_candles",
+        "technical_cycles",
+        "technical_math",
+        "technical_momentum",
+        "technical_overlap",
+        "technical_performance",
+    ),
     "time_calendar": ("time_calendar",),
     "valuation_quality": ("key_metrics", "ratios"),
     "income_statement": ("income_statement", "income_statement_growth"),

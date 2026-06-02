@@ -22,6 +22,7 @@ from features.feature_builders import (
     build_ownership_features,
     build_price_technical_features,
     build_statement_quality_features,
+    build_ta_classic_technical_features,
     build_time_calendar_feature_family,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
@@ -294,6 +295,31 @@ def _add_price_features(
     return merged
 
 
+def _add_ta_classic_technical_features(
+    *,
+    symbol: str,
+    df_prices: pd.DataFrame,
+    merged: pd.DataFrame,
+    feature_columns: list[str],
+    grouped_feature_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    built_by_family = build_ta_classic_technical_features(symbol, df_prices)
+    for family_name, built in built_by_family.items():
+        if built.df.empty:
+            continue
+        active_cols = [
+            col
+            for col in built.feature_cols
+            if col in built.df.columns and pd.api.types.is_numeric_dtype(built.df[col])
+        ]
+        if not active_cols:
+            continue
+        merged = merged.join(built.df[active_cols], how="left")
+        feature_columns.extend(active_cols)
+        grouped_feature_columns[family_name] = list(active_cols)
+    return merged
+
+
 def _add_time_calendar_features(
     *,
     symbol_obj: Symbol,
@@ -456,6 +482,14 @@ def build_symbol_feature_result(
 
     if build_spec.toggles.include_price_technicals:
         merged = _add_price_features(
+            symbol=symbol,
+            df_prices=df_prices,
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_ta_classic_technicals:
+        merged = _add_ta_classic_technical_features(
             symbol=symbol,
             df_prices=df_prices,
             merged=merged,

@@ -18,6 +18,7 @@ class FeaturePreviewForm(forms.Form):
         help_text="Optional. Used when saving a feature engineering job.",
     )
     include_price_technicals = forms.BooleanField(required=False, initial=True)
+    include_ta_classic_technicals = forms.BooleanField(required=False, initial=False)
     include_fundamental_change = forms.BooleanField(required=False, initial=True)
     include_statement_quality = forms.BooleanField(required=False, initial=True)
     include_event_features = forms.BooleanField(required=False, initial=True)

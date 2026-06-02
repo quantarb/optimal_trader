@@ -27,6 +27,15 @@ EVENT_PREFIXES = {
 
 TIME_CALENDAR_PREFIXES = ("time__",)
 
+TA_CLASSIC_PREFIXES = {
+    "technical_candles": ("ta_candle__",),
+    "technical_cycles": ("ta_cycle__",),
+    "technical_math": ("ta_math__",),
+    "technical_momentum": ("ta_momentum__",),
+    "technical_overlap": ("ta_overlap__",),
+    "technical_performance": ("ta_performance__",),
+}
+
 TECHNICAL_PREFIXES = (
     "sma_",
     "ema_",
@@ -50,6 +59,12 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
 
     grouped: dict[str, list[str]] = {
         "prices_div_adj": [],
+        "technical_candles": [],
+        "technical_cycles": [],
+        "technical_math": [],
+        "technical_momentum": [],
+        "technical_overlap": [],
+        "technical_performance": [],
         "time_calendar": [],
         "key_metrics": [],
         "ratios": [],
@@ -80,6 +95,10 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         if name in PRICE_FAMILY_COLUMNS or name.startswith(TECHNICAL_PREFIXES):
             grouped["prices_div_adj"].append(name)
             assigned = True
+        for family, prefixes in TA_CLASSIC_PREFIXES.items():
+            if name.startswith(prefixes):
+                grouped[family].append(name)
+                assigned = True
         if name.startswith(TIME_CALENDAR_PREFIXES):
             grouped["time_calendar"].append(name)
             assigned = True

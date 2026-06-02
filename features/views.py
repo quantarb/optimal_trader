@@ -19,6 +19,7 @@ from features.feature_builders import (
     build_ownership_features,
     build_price_technical_features,
     build_statement_quality_features,
+    build_ta_classic_technical_features,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.naming import feature_display_name
@@ -82,6 +83,7 @@ def _default_feature_preview_data(symbol: str) -> dict[str, Any]:
     return {
         "symbol": str(symbol).strip().upper(),
         "include_price_technicals": True,
+        "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
         "include_event_features": True,
@@ -96,6 +98,7 @@ def _default_feature_form_data() -> dict[str, Any]:
     return {
         "job_name": "",
         "include_price_technicals": True,
+        "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
         "include_event_features": True,
@@ -122,6 +125,10 @@ def _feature_form_toggle_data(source: dict[str, Any] | None = None) -> dict[str,
     defaults = _default_feature_form_data()
     return {
         "include_price_technicals": _as_bool(raw.get("include_price_technicals"), bool(defaults["include_price_technicals"])),
+        "include_ta_classic_technicals": _as_bool(
+            raw.get("include_ta_classic_technicals"),
+            bool(defaults["include_ta_classic_technicals"]),
+        ),
         "include_fundamental_change": _as_bool(raw.get("include_fundamental_change"), bool(defaults["include_fundamental_change"])),
         "include_statement_quality": _as_bool(raw.get("include_statement_quality"), bool(defaults["include_statement_quality"])),
         "include_event_features": _as_bool(raw.get("include_event_features"), bool(defaults["include_event_features"])),
@@ -148,6 +155,12 @@ def _empty_feature_preview_result(section_order: list[str]) -> dict[str, Any]:
 def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
     section_order = [
         "prices_div_adj",
+        "technical_candles",
+        "technical_cycles",
+        "technical_math",
+        "technical_momentum",
+        "technical_overlap",
+        "technical_performance",
         "key_metrics",
         "ratios",
         "income_statement",
@@ -167,6 +180,12 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
     ]
     section_labels = {
         "prices_div_adj": "Prices Div Adj",
+        "technical_candles": "Technical Candles",
+        "technical_cycles": "Technical Cycles",
+        "technical_math": "Technical Math",
+        "technical_momentum": "Technical Momentum",
+        "technical_overlap": "Technical Overlap",
+        "technical_performance": "Technical Performance",
         "key_metrics": "Key Metrics",
         "ratios": "Ratios",
         "income_statement": "Income Statement",
@@ -224,6 +243,12 @@ def _build_symbol_table_rows(
 def _section_toggle_name(section_key: str) -> str:
     mapping = {
         "prices_div_adj": "include_price_technicals",
+        "technical_candles": "include_ta_classic_technicals",
+        "technical_cycles": "include_ta_classic_technicals",
+        "technical_math": "include_ta_classic_technicals",
+        "technical_momentum": "include_ta_classic_technicals",
+        "technical_overlap": "include_ta_classic_technicals",
+        "technical_performance": "include_ta_classic_technicals",
         "key_metrics": "include_fundamental_change",
         "ratios": "include_fundamental_change",
         "income_statement": "include_statement_quality",
@@ -425,6 +450,20 @@ def _build_feature_preview_result(
                 feature_columns.extend(built.feature_cols)
                 grouped_feature_columns["prices_div_adj"] = list(built.feature_cols)
                 source_counts["prices_div_adj"] = len(built.feature_cols)
+
+        if data.get("include_ta_classic_technicals"):
+            built_by_family = build_ta_classic_technical_features(symbol, df_prices)
+            for family_name, built in built_by_family.items():
+                selected_sections.add(family_name)
+                if built.df.empty:
+                    continue
+                active_cols = [c for c in built.feature_cols if c in built.df.columns]
+                if not active_cols:
+                    continue
+                merged = merged.join(built.df[active_cols], how="left")
+                feature_columns.extend(active_cols)
+                grouped_feature_columns[family_name] = list(active_cols)
+                source_counts[family_name] = len(active_cols)
 
         if data.get("include_fundamental_change"):
             selected_sections.update({"key_metrics", "ratios"})
