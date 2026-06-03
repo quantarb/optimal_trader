@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import json
 from datetime import date
 import html
 import os
@@ -145,6 +147,90 @@ def _render_leaderboard_html_table(frame: pd.DataFrame) -> str:
         <tbody>
           {''.join(row_html_parts)}
         </tbody>
+      </table>
+    </div>
+    """
+
+
+def _format_display_object(value: object, *, max_length: int = 240) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, (dict, list, tuple, set)):
+        text = json.dumps(value, default=str, sort_keys=True)
+    else:
+        text = str(value)
+    text = " ".join(text.split())
+    if len(text) > max_length:
+        return text[: max_length - 1] + "..."
+    return text
+
+
+def _prepare_skipped_symbols_display(frame: pd.DataFrame) -> pd.DataFrame:
+    display = frame.copy()
+    display = display.replace([float("inf"), -float("inf")], pd.NA)
+    column_order = [
+        "symbol",
+        "direction",
+        "candidate_rank",
+        "reason",
+        "replacement_status",
+        "contract_value",
+        "target_dollars",
+        "quote_contract_value",
+        "contract_price_source",
+        "quote_contract_price_source",
+        "error",
+    ]
+    existing_columns = [column for column in column_order if column in display.columns]
+    remaining_columns = [column for column in display.columns if column not in existing_columns]
+    display = display[existing_columns + remaining_columns]
+
+    numeric_columns = {"candidate_rank", "contract_value", "target_dollars", "quote_contract_value"}
+    for column in display.columns:
+        if column in numeric_columns:
+            display[column] = pd.to_numeric(display[column], errors="coerce")
+        else:
+            display[column] = display[column].map(_format_display_object)
+
+    return display.rename(
+        columns={
+            "symbol": "Symbol",
+            "direction": "Direction",
+            "candidate_rank": "Candidate Rank",
+            "reason": "Reason",
+            "replacement_status": "Replacement Status",
+            "contract_value": "Contract Value",
+            "target_dollars": "Slot Budget",
+            "quote_contract_value": "Quote Contract Value",
+            "contract_price_source": "Limit Price Source",
+            "quote_contract_price_source": "Quote Price Source",
+            "error": "Error",
+        }
+    )
+
+
+def _render_plain_html_table(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return '<div class="leaderboard-empty">No rows available.</div>'
+    columns = [str(column) for column in frame.columns]
+    header_html = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
+    row_parts: list[str] = []
+    for _, row in frame.iterrows():
+        cells = []
+        for column in columns:
+            value = row.get(column)
+            cells.append(f"<td>{html.escape(_format_display_object(value, max_length=500))}</td>")
+        row_parts.append(f"<tr>{''.join(cells)}</tr>")
+    return f"""
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table">
+        <thead><tr>{header_html}</tr></thead>
+        <tbody>{''.join(row_parts)}</tbody>
       </table>
     </div>
     """
@@ -427,18 +513,20 @@ if leaderboard_payload is None:
         )
         stale_score_reason = latest_scored_staleness_reason(artifact_dir=saved_artifact_dir)
 
-should_build = bool(run_build or stale_score_reason)
+if stale_score_reason:
+    st.warning(
+        f"{stale_score_reason} Rerun the leaderboard refresh notebook to regenerate the saved scores."
+    )
+
+should_build = bool(run_build)
 if should_build:
     build_log_lines: list[str] = []
-    status_label = "Refreshing stale latest scores..." if stale_score_reason and not run_build else "Starting leaderboard build..."
-    with st.status(status_label, expanded=True) as status:
+    with st.status("Starting leaderboard build...", expanded=True) as status:
         def _progress_logger(message: str) -> None:
             build_log_lines.append(str(message))
             status.write(str(message))
 
         try:
-            if stale_score_reason and not run_build:
-                status.write(stale_score_reason)
             result = run_live_trade_leaderboard_build(
                 config=build_cfg,
                 progress_logger=_progress_logger,
@@ -595,6 +683,9 @@ else:
             rh_plan_log_lines: list[str] = []
             with st.status("Connecting to Robinhood and generating the target portfolio...", expanded=True) as status:
                 try:
+                    import trading.robinhood as robinhood_module
+
+                    robinhood_module = importlib.reload(robinhood_module)
                     from trading.robinhood import (
                         build_robinhood_option_trade_plan,
                         enrich_robinhood_option_prices,
@@ -605,6 +696,10 @@ else:
                         robinhood_login,
                     )
 
+                    rh_plan_log_lines.append(
+                        f"Loaded trading.robinhood from {getattr(robinhood_module, '__file__', '<unknown>')}."
+                    )
+                    status.write(rh_plan_log_lines[-1])
                     rh_plan_log_lines.append("Step 0: logging in to Robinhood.")
                     status.write(rh_plan_log_lines[-1])
                     robinhood_login(
@@ -698,6 +793,10 @@ else:
                     status.update(label="Robinhood target portfolio ready", state="complete", expanded=False)
 
         robinhood_option_plan = st.session_state.get("robinhood_option_plan")
+        if isinstance(robinhood_option_plan, dict) and not robinhood_option_plan.get("code_version"):
+            st.session_state.pop("robinhood_option_plan", None)
+            st.warning("Cleared an older Robinhood target portfolio plan. Generate a fresh target portfolio to use the latest option lookup code.")
+            robinhood_option_plan = None
         if robinhood_option_plan:
             plan_log_lines = list(robinhood_option_plan.get("plan_log_lines") or [])
             if plan_log_lines:
@@ -775,7 +874,7 @@ else:
                         pending_display["current_qty"] = pending_display["current_qty"].fillna(
                             pd.to_numeric(pending_display[qty_column], errors="coerce")
                         )
-                discount_rate = 0.10
+                discount_rate = 0.05
                 if "discount_rate" in pending_display.columns:
                     rate_values = pd.to_numeric(pending_display["discount_rate"], errors="coerce")
                     if not rate_values.dropna().empty:
@@ -820,7 +919,12 @@ else:
             skipped_df = robinhood_option_plan.get("skipped_symbols", pd.DataFrame())
             if isinstance(skipped_df, pd.DataFrame) and not skipped_df.empty:
                 st.markdown("**Skipped Symbols**")
-                st.dataframe(skipped_df, use_container_width=True, hide_index=True)
+                skipped_display = _prepare_skipped_symbols_display(skipped_df)
+                try:
+                    st.dataframe(skipped_display, use_container_width=True, hide_index=True)
+                except Exception as exc:
+                    st.warning(f"Could not render the interactive skipped-symbols table: {type(exc).__name__}: {exc}")
+                    st.markdown(_render_plain_html_table(skipped_display), unsafe_allow_html=True)
 
             st.caption(
                 "Use `Generate Robinhood Target Portfolio` first to refresh entries and exits from the current leaderboard. "
@@ -863,6 +967,11 @@ else:
                         "Cancel",
                         f"{int(preview_orders['action'].astype(str).str.startswith('cancel_').sum()):,}",
                     )
+                    bid_limit_columns = [
+                        column
+                        for column in preview_orders.columns
+                        if str(column).startswith("bid_price_x_")
+                    ]
                     preview_columns = [
                         column
                         for column in [
@@ -877,7 +986,7 @@ else:
                             "price",
                             "limit_price_source",
                             "bid_price",
-                            "bid_price_x_0_1",
+                            *bid_limit_columns,
                             "previous_close_price",
                             "ask_price",
                             "mark_price",
@@ -915,6 +1024,9 @@ else:
                     if confirm_submit:
                         with st.status("Submitting Robinhood option orders...", expanded=True) as status:
                             try:
+                                import trading.robinhood as robinhood_module
+
+                                importlib.reload(robinhood_module)
                                 from trading.robinhood import robinhood_login, submit_robinhood_option_orders
 
                                 robinhood_login(

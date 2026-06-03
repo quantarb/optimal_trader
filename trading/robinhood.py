@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -15,9 +16,14 @@ except Exception:  # pragma: no cover - optional dependency
     load_dotenv = None
 
 _REPO_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-_OPTION_LIMIT_TICK_SIZE = 0.05
-_BUY_OPTION_BID_MULTIPLIER = 0.10
+_OPTION_PENNY_TICK_THRESHOLD = 3.00
+_OPTION_PENNY_TICK_SIZE = 0.01
+_OPTION_NICKEL_TICK_SIZE = 0.05
+_BUY_OPTION_BID_MULTIPLIER = 0.05
 _OPTION_CONTRACT_MULTIPLIER = 100.0
+_ROBINHOOD_OPTION_API_ATTEMPTS = 3
+_OPTION_MARKET_DATA_CANDIDATE_LIMIT = 16
+ROBINHOOD_OPTION_PLAN_CODE_VERSION = "option_lookup_v2"
 
 
 def _load_repo_env() -> None:
@@ -91,6 +97,45 @@ def _coerce_robinhood_market_row(payload: Any) -> dict[str, Any]:
                 return _coerce_robinhood_market_row(first)
         return _coerce_robinhood_market_row(first)
     return {}
+
+
+def _is_broken_pipe_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, BrokenPipeError):
+            return True
+        if isinstance(current, OSError) and getattr(current, "errno", None) == 32:
+            return True
+        if "broken pipe" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _call_robinhood_option_api(label: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    last_exc: Exception | None = None
+    for attempt in range(1, _ROBINHOOD_OPTION_API_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_broken_pipe_error(exc) or attempt >= _ROBINHOOD_OPTION_API_ATTEMPTS:
+                break
+            time.sleep(0.25 * attempt)
+    if last_exc is not None and _is_broken_pipe_error(last_exc):
+        raise RuntimeError(
+            f"Robinhood option API call failed during {label} after "
+            f"{_ROBINHOOD_OPTION_API_ATTEMPTS} attempt(s): {last_exc}"
+        ) from last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Robinhood option API call failed during {label}.")
+
+
+def _is_robinhood_option_api_error(exc: BaseException) -> bool:
+    return _is_broken_pipe_error(exc) or "robinhood option api call failed" in str(exc).lower()
 
 
 def _positive_float(value: Any) -> float | None:
@@ -185,21 +230,49 @@ def _decimal_from_float(value: float) -> Decimal:
     return Decimal(str(float(value)))
 
 
+def _multiplier_label(value: float) -> str:
+    decimal_value = Decimal(str(float(value))).normalize()
+    text = format(decimal_value, "f").rstrip("0").rstrip(".")
+    return text.replace("-", "neg_").replace(".", "_")
+
+
+def _buy_option_bid_limit_source() -> str:
+    return f"bid_price_x_{_multiplier_label(_BUY_OPTION_BID_MULTIPLIER)}"
+
+
+def _buy_option_bid_limit_column() -> str:
+    return _buy_option_bid_limit_source()
+
+
+def _option_limit_tick_size(price: float | None) -> float | None:
+    number = _positive_float(price)
+    if number is None:
+        return None
+    if float(number) < _OPTION_PENNY_TICK_THRESHOLD:
+        return _OPTION_PENNY_TICK_SIZE
+    return _OPTION_NICKEL_TICK_SIZE
+
+
 def _round_option_limit_price(price: float | None) -> float | None:
     number = _positive_float(price)
     if number is None:
         return None
-    rounded = _decimal_from_float(number).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tick = _option_limit_tick_size(float(number))
+    if tick is None:
+        return None
+    decimal_number = _decimal_from_float(number)
+    decimal_tick = _decimal_from_float(tick)
+    rounded = (decimal_number / decimal_tick).to_integral_value(rounding=ROUND_HALF_UP) * decimal_tick
     if rounded <= 0:
         return None
-    return float(rounded)
+    return float(rounded.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _floor_option_limit_price(price: float | None, tick_size: float = _OPTION_LIMIT_TICK_SIZE) -> float | None:
+def _floor_option_limit_price(price: float | None) -> float | None:
     if price is None:
         return None
     number = _positive_float(price)
-    tick = _positive_float(tick_size)
+    tick = _option_limit_tick_size(float(number)) if number is not None else None
     if number is None or tick is None:
         return None
     decimal_number = _decimal_from_float(number)
@@ -287,7 +360,7 @@ def _buy_option_limit_price(row: Mapping[str, Any] | pd.Series | dict[str, Any])
     bid_price = _positive_float(data.get("bid_price"))
     if bid_price is not None:
         tick_price = _floor_option_limit_price(_BUY_OPTION_BID_MULTIPLIER * bid_price)
-        return tick_price, "bid_price_x_0_1" if tick_price is not None else ""
+        return tick_price, _buy_option_bid_limit_source() if tick_price is not None else ""
     mark_price = _positive_float(data.get("mark_price"))
     if mark_price is not None:
         tick_price = _floor_option_limit_price(float(mark_price))
@@ -746,6 +819,68 @@ def _rank_option_candidates(
     )
 
 
+def _pre_rank_option_instruments(
+    options: list[dict[str, Any]],
+    *,
+    target_strike: float,
+    option_type: str,
+) -> list[dict[str, Any]]:
+    return _rank_option_candidates(
+        options,
+        target_strike=float(target_strike),
+        option_type=str(option_type),
+        spot_price=None,
+        min_breakeven_move_pct=None,
+    )
+
+
+def _merge_option_market_data(
+    rh: Any,
+    *,
+    symbol: str,
+    option: Mapping[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(option or {})
+    option_id = str(enriched.get("id") or "").strip()
+    if not option_id or not hasattr(rh, "get_option_market_data_by_id"):
+        return enriched
+    market_payload = _call_robinhood_option_api(
+        f"get_option_market_data_by_id({symbol}, {option_id})",
+        rh.get_option_market_data_by_id,
+        option_id,
+    )
+    market_row = _coerce_robinhood_market_row(market_payload)
+    if market_row:
+        enriched.update(market_row)
+    return enriched
+
+
+def _find_robinhood_option_instruments(
+    rh: Any,
+    *,
+    symbol: str,
+    expiry_date: str,
+    option_type: str,
+) -> list[dict[str, Any]]:
+    if hasattr(rh, "find_tradable_options"):
+        options = _call_robinhood_option_api(
+            f"find_tradable_options({symbol}, {expiry_date}, {option_type})",
+            rh.find_tradable_options,
+            symbol,
+            expirationDate=expiry_date,
+            optionType=option_type,
+        ) or []
+    else:
+        options = _call_robinhood_option_api(
+            f"find_options_by_expiration({symbol}, {expiry_date}, {option_type})",
+            rh.find_options_by_expiration,
+            symbol,
+            expirationDate=expiry_date,
+            optionType=option_type,
+        ) or []
+    return [_coerce_robinhood_market_row(item) for item in options if item]
+
+
 def select_robinhood_long_option_contract(
     *,
     symbol: str,
@@ -757,18 +892,41 @@ def select_robinhood_long_option_contract(
     min_breakeven_move_pct: float = 0.05,
 ) -> dict[str, Any]:
     rh = _require_robin_stocks()
-    chain = _coerce_robinhood_market_row(rh.get_chains(str(symbol).strip().upper()) or {})
+    clean_symbol = str(symbol).strip().upper()
+    clean_option_type = str(option_type).strip().lower()
+    chain = _coerce_robinhood_market_row(
+        _call_robinhood_option_api(
+            f"get_chains({clean_symbol})",
+            rh.get_chains,
+            clean_symbol,
+        )
+        or {}
+    )
     expirations = list(chain.get("expiration_dates") or [])
     expiry_date = _resolve_nearest_option_expiry(as_of_date, expirations, int(target_hold_days))
     if not expiry_date:
         raise RuntimeError(f"No future Robinhood option expiry found for {symbol}.")
-    options = rh.find_options_by_expiration(str(symbol).strip().upper(), expirationDate=expiry_date, optionType=str(option_type).strip().lower()) or []
-    options = [_coerce_robinhood_market_row(item) for item in options if item]
+    options = _find_robinhood_option_instruments(
+        rh,
+        symbol=clean_symbol,
+        expiry_date=expiry_date,
+        option_type=clean_option_type,
+    )
     if not options:
         raise RuntimeError(f"No Robinhood {option_type} contracts found for {symbol} at {expiry_date}.")
     target_strike = float(spot_price) * float(strike_multiplier)
-    ranked = _rank_option_candidates(
+    pre_ranked = _pre_rank_option_instruments(
         options,
+        target_strike=target_strike,
+        option_type=option_type,
+    )
+    options_to_enrich = pre_ranked[:_OPTION_MARKET_DATA_CANDIDATE_LIMIT]
+    enriched_options = [
+        _merge_option_market_data(rh, symbol=clean_symbol, option=item)
+        for item in options_to_enrich
+    ]
+    ranked = _rank_option_candidates(
+        enriched_options,
         target_strike=target_strike,
         option_type=option_type,
         spot_price=float(spot_price),
@@ -785,8 +943,8 @@ def select_robinhood_long_option_contract(
     if pd.isna(bid_price):
         bid_price = mark_price
     return {
-        "symbol": str(symbol).strip().upper(),
-        "option_type": str(option_type).strip().lower(),
+        "symbol": clean_symbol,
+        "option_type": clean_option_type,
         "expiry_date": str(selected.get("expiration_date") or expiry_date),
         "strike_price": float(pd.to_numeric(pd.Series([selected.get("strike_price")]), errors="coerce").iloc[0]),
         "ask_price": None if pd.isna(ask_price) else float(ask_price),
@@ -820,6 +978,7 @@ def build_robinhood_option_trade_plan(
     max_contracts_per_position: int | None = None,
 ) -> dict[str, Any]:
     plan_log_lines: list[str] = []
+    plan_log_lines.append(f"Robinhood option plan code version: {ROBINHOOD_OPTION_PLAN_CODE_VERSION}.")
     current_df = current_option_positions.copy() if current_option_positions is not None else pd.DataFrame()
     pending_df = pending_option_orders.copy() if pending_option_orders is not None else pd.DataFrame()
     work = latest_scored_df.copy()
@@ -1151,16 +1310,22 @@ def build_robinhood_option_trade_plan(
                 strike_multiplier=strike_multiplier,
             )
         except Exception as exc:
-            plan_log_lines.append(f"Step 5 option skip: {symbol} | reason=no_eligible_option_contract | error={str(exc)}.")
+            skip_reason = "option_lookup_failed" if _is_robinhood_option_api_error(exc) else "no_eligible_option_contract"
+            plan_log_lines.append(f"Step 5 option skip: {symbol} | reason={skip_reason} | error={str(exc)}.")
             skipped_rows.append(
                 {
                     "symbol": symbol,
                     "direction": "Long" if side > 0 else "Short",
                     "candidate_rank": int(candidate_rank),
-                    "reason": "no_eligible_option_contract",
+                    "reason": skip_reason,
                     "error": str(exc),
                 }
             )
+            if skip_reason == "option_lookup_failed":
+                plan_log_lines.append(
+                    "Step 5: stopping new option lookups because Robinhood option data is unavailable."
+                )
+                break
             continue
         quote_contract_price = (
             _positive_float(contract.get("bid_price"))
@@ -1271,6 +1436,7 @@ def build_robinhood_option_trade_plan(
         limit_price = _positive_float(row.get("limit_order_price"))
         limit_price_source = str(row.get("limit_price_source") or "").strip() or _buy_option_limit_price(row)[1]
         bid_limit = _BUY_OPTION_BID_MULTIPLIER * float(row.get("bid_price")) if _positive_float(row.get("bid_price")) is not None else np.nan
+        bid_limit_column = _buy_option_bid_limit_column()
         actions_rows.append(
             {
                 "symbol": str(row["symbol"]).upper(),
@@ -1285,7 +1451,7 @@ def build_robinhood_option_trade_plan(
                 "limit_order_price": float(limit_price) if limit_price is not None else np.nan,
                 "limit_price_source": limit_price_source,
                 "bid_price": row.get("bid_price"),
-                "bid_price_x_0_1": bid_limit,
+                bid_limit_column: bid_limit,
                 "previous_close_price": row.get("previous_close_price"),
                 "mark_price": row.get("mark_price"),
                 "breakeven_price": row.get("breakeven_price"),
@@ -1426,6 +1592,7 @@ def build_robinhood_option_trade_plan(
         "skipped_symbols": pd.DataFrame(skipped_rows).reset_index(drop=True),
         "pending_option_orders": pending_df.reset_index(drop=True),
         "plan_log_lines": plan_log_lines,
+        "code_version": ROBINHOOD_OPTION_PLAN_CODE_VERSION,
     }
 
 
@@ -1449,9 +1616,10 @@ def enrich_robinhood_option_prices(orders_df: pd.DataFrame) -> pd.DataFrame:
         ask_price = _positive_float(price_fields.get("ask_price")) or _positive_float(row.get("ask_price"))
         mark_price = _positive_float(price_fields.get("mark_price")) or _positive_float(row.get("mark_price"))
         previous_close_price = price_fields.get("previous_close_price") or _option_previous_close_price(row.to_dict())
+        bid_limit_column = _buy_option_bid_limit_column()
         if bid_price is not None:
             enriched.at[idx, "bid_price"] = float(bid_price)
-            enriched.at[idx, "bid_price_x_0_1"] = _BUY_OPTION_BID_MULTIPLIER * float(bid_price)
+            enriched.at[idx, bid_limit_column] = _BUY_OPTION_BID_MULTIPLIER * float(bid_price)
         if ask_price is not None:
             enriched.at[idx, "ask_price"] = float(ask_price)
         if mark_price is not None:
@@ -1527,10 +1695,12 @@ def annotate_robinhood_option_limit_savings(orders_df: pd.DataFrame) -> pd.DataF
         current_reference_price = bid_price or mark_price or ask_price
         discount_rate = float(_BUY_OPTION_BID_MULTIPLIER)
         inferred_original_reference_price = float(submitted_limit) / discount_rate
+        bid_limit_column = _buy_option_bid_limit_column()
+        target_bid_limit_column = f"target_{_buy_option_bid_limit_source()}_limit_price"
         if bid_price is not None:
             annotated.at[idx, "bid_price"] = float(bid_price)
-            annotated.at[idx, "bid_price_x_0_1"] = _BUY_OPTION_BID_MULTIPLIER * float(bid_price)
-            annotated.at[idx, "target_10pct_bid_limit_price"] = _floor_option_limit_price(_BUY_OPTION_BID_MULTIPLIER * float(bid_price))
+            annotated.at[idx, bid_limit_column] = _BUY_OPTION_BID_MULTIPLIER * float(bid_price)
+            annotated.at[idx, target_bid_limit_column] = _floor_option_limit_price(_BUY_OPTION_BID_MULTIPLIER * float(bid_price))
         if mark_price is not None:
             annotated.at[idx, "mark_price"] = float(mark_price)
         if ask_price is not None:
