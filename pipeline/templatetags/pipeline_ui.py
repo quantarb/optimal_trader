@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django import template
+from django.urls import NoReverseMatch, reverse
 
 from pipeline.feature_presentation import (
     format_feature_value,
@@ -12,6 +13,128 @@ from pipeline.feature_presentation import (
 
 
 register = template.Library()
+
+
+SIDEBAR_PAGE_GROUPS = [
+    {
+        "title": "Data",
+        "links": [
+            {"label": "Forms", "route": "form-tabs"},
+            {
+                "label": "Runs",
+                "route": "pipeline-ui",
+                "active_routes": [
+                    "pipeline-ui",
+                    "pipeline-run-list",
+                    "pipeline-run-status",
+                    "pipeline-job-catalog",
+                ],
+            },
+            {
+                "label": "Artifacts",
+                "route": "pipeline-cohorts",
+                "active_routes": [
+                    "pipeline-cohorts",
+                    "pipeline-artifact-detail",
+                    "pipeline-artifact-preview",
+                    "pipeline-artifact-symbol-breakdown",
+                    "pipeline-artifact-list",
+                    "pipeline-artifact-latest",
+                ],
+            },
+            {"label": "Status", "route": "pipeline-status-board"},
+        ],
+    },
+    {
+        "title": "Models",
+        "links": [
+            {"label": "Experiments", "route": "pipeline-lab"},
+            {
+                "label": "Models",
+                "route": "pipeline-strategies",
+                "active_routes": ["pipeline-strategies", "pipeline-strategy-detail"],
+            },
+            {
+                "label": "Definitions",
+                "route": "pipeline-strategy-definitions",
+                "active_routes": [
+                    "pipeline-strategy-definitions",
+                    "pipeline-strategy-definition-edit",
+                ],
+            },
+        ],
+    },
+    {
+        "title": "Reports",
+        "links": [
+            {
+                "label": "Research",
+                "route": "pipeline-research-reports",
+                "active_routes": ["pipeline-research-reports", "pipeline-backtest-detail"],
+            },
+            {"label": "Oracle", "route": "pipeline-oracle-reports"},
+            {"label": "Feature Attribution", "route": "pipeline-feature-attribution-reports"},
+            {"label": "RL Policies", "route": "pipeline-rl-policy-reports"},
+        ],
+    },
+    {
+        "title": "Insights",
+        "links": [
+            {"label": "Market Situations", "route": "pipeline-market-situations"},
+            {
+                "label": "Opportunities",
+                "route": "pipeline-opportunities",
+                "active_routes": ["pipeline-opportunities", "pipeline-top-opportunities"],
+            },
+            {
+                "label": "Stock Analysis",
+                "route": "pipeline-stock-intelligence",
+                "active_routes": [
+                    "pipeline-stock-intelligence",
+                    "pipeline-stock-intelligence-symbol",
+                    "pipeline-symbol-research",
+                ],
+            },
+            {"label": "Portfolio Analysis", "route": "pipeline-portfolio-analysis"},
+        ],
+    },
+    {
+        "title": "Trading",
+        "links": [
+            {
+                "label": "Cockpit",
+                "route": "trading-leaderboard",
+                "active_routes": ["trading-leaderboard", "trading-similar-trades"],
+            },
+        ],
+    },
+]
+
+
+@register.simple_tag(takes_context=True)
+def sidebar_page_groups(context) -> list[dict[str, object]]:
+    request = context.get("request")
+    current_route = getattr(getattr(request, "resolver_match", None), "url_name", "") or ""
+    groups: list[dict[str, object]] = []
+    for group in SIDEBAR_PAGE_GROUPS:
+        links = []
+        for link in group["links"]:
+            route = str(link["route"])
+            try:
+                url = reverse(route)
+            except NoReverseMatch:
+                continue
+            active_routes = set(link.get("active_routes") or [route])
+            links.append(
+                {
+                    "label": str(link["label"]),
+                    "url": url,
+                    "is_active": current_route in active_routes,
+                }
+            )
+        if links:
+            groups.append({"title": str(group["title"]), "links": links})
+    return groups
 
 
 @register.filter

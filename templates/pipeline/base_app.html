@@ -9,69 +9,40 @@
   {% block extra_head %}{% endblock %}
 </head>
 <body class="app-body">
-  {% with route=request.resolver_match.url_name %}
-    <div class="app-shell">
-      <aside class="app-sidebar">
-        <div class="app-brand">
-          <div class="eyebrow">Optimal Trader</div>
-          <h1 class="app-brand-title">Market Intelligence</h1>
-          <div class="caption">Shared research engine, unified insight surface.</div>
-        </div>
+  {% sidebar_page_groups as nav_groups %}
+  <div class="app-shell">
+    <aside class="app-sidebar">
+      <div class="app-brand">
+        <div class="eyebrow">Optimal Trader</div>
+        <h1 class="app-brand-title">Market Intelligence</h1>
+        <div class="caption">Shared research engine, unified insight surface.</div>
+      </div>
 
+      {% for group in nav_groups %}
         <div class="sidebar-section">
-          <div class="sidebar-title">Research</div>
+          <div class="sidebar-title">{{ group.title }}</div>
           <div class="sidebar-links">
-            <a class="sidebar-link {% if route == 'pipeline-lab' %}is-active{% endif %}" href="{% url 'pipeline-lab' %}">Experiments</a>
-            <a class="sidebar-link {% if route == 'pipeline-strategies' or route == 'pipeline-strategy-detail' %}is-active{% endif %}" href="{% url 'pipeline-strategies' %}">Models</a>
-            <a class="sidebar-link {% if route == 'pipeline-research-reports' %}is-active{% endif %}" href="{% url 'pipeline-research-reports' %}">Reports</a>
+            {% for link in group.links %}
+              <a class="sidebar-link {% if link.is_active %}is-active{% endif %}" href="{{ link.url }}">{{ link.label }}</a>
+            {% endfor %}
           </div>
         </div>
+      {% endfor %}
+    </aside>
 
-        <div class="sidebar-section">
-          <div class="sidebar-title">Reports</div>
-          <div class="sidebar-links">
-            <a class="sidebar-link {% if route == 'pipeline-oracle-reports' %}is-active{% endif %}" href="{% url 'pipeline-oracle-reports' %}">Oracle Reports</a>
-            <a class="sidebar-link {% if route == 'pipeline-feature-attribution-reports' %}is-active{% endif %}" href="{% url 'pipeline-feature-attribution-reports' %}">Feature Attribution</a>
-            <a class="sidebar-link {% if route == 'pipeline-rl-policy-reports' %}is-active{% endif %}" href="{% url 'pipeline-rl-policy-reports' %}">RL Policies</a>
-            <a class="sidebar-link {% if route == 'pipeline-backtest-detail' %}is-active{% endif %}" href="{% url 'pipeline-research-reports' %}">Backtests</a>
-          </div>
+    <main class="app-main">
+      <div class="app-topbar">
+        <div class="topbar-links">
+          {% block topbar_links %}
+            <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
+            <a class="topbar-link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
+          {% endblock %}
         </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-title">Pipeline</div>
-          <div class="sidebar-links">
-            <a class="sidebar-link {% if route == 'pipeline-ui' %}is-active{% endif %}" href="{% url 'pipeline-ui' %}">Runs</a>
-            <a class="sidebar-link {% if route == 'pipeline-cohorts' %}is-active{% endif %}" href="{% url 'pipeline-cohorts' %}">Artifacts</a>
-            <a class="sidebar-link {% if route == 'pipeline-status-board' %}is-active{% endif %}" href="{% url 'pipeline-status-board' %}">Status Board</a>
-          </div>
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-title">Insights</div>
-          <div class="sidebar-links">
-            <a class="sidebar-link {% if route == 'pipeline-market-situations' %}is-active{% endif %}" href="{% url 'pipeline-market-situations' %}">Market Situations</a>
-            <a class="sidebar-link {% if route == 'pipeline-opportunities' or route == 'pipeline-top-opportunities' %}is-active{% endif %}" href="{% url 'pipeline-opportunities' %}">Opportunities</a>
-            <a class="sidebar-link {% if route == 'pipeline-stock-intelligence' or route == 'pipeline-stock-intelligence-symbol' or route == 'pipeline-symbol-research' %}is-active{% endif %}" href="{% url 'pipeline-stock-intelligence' %}">Stock Analysis</a>
-            <a class="sidebar-link {% if route == 'pipeline-portfolio-analysis' %}is-active{% endif %}" href="{% url 'pipeline-portfolio-analysis' %}">Portfolio Analysis</a>
-            <a class="sidebar-link {% if route == 'trading-leaderboard' or route == 'trading-similar-trades' %}is-active{% endif %}" href="{% url 'trading-leaderboard' %}">Trading</a>
-          </div>
-        </div>
-      </aside>
-
-      <main class="app-main">
-        <div class="app-topbar">
-          <div class="topbar-links">
-            {% block topbar_links %}
-              <a class="topbar-link" href="{% url 'pipeline-ui' %}">Dashboard</a>
-              <a class="topbar-link" href="{% url 'pipeline-lab' %}">Pipeline Lab</a>
-            {% endblock %}
-          </div>
-          <div class="caption">{% block topbar_meta %}{% endblock %}</div>
-        </div>
-        {% block page_body %}{% endblock %}
-      </main>
-    </div>
-  {% endwith %}
+        <div class="caption">{% block topbar_meta %}{% endblock %}</div>
+      </div>
+      {% block page_body %}{% endblock %}
+    </main>
+  </div>
   {% include "pipeline/components/_design_system_js.html" %}
   {% block extra_js %}{% endblock %}
 </body>
