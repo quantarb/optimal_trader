@@ -28,6 +28,7 @@ def train_rf_models(
     feature_list: Sequence[str],
     *,
     split_ratio: float = 0.8,
+    validation_df: pd.DataFrame | None = None,
     classifier_target_col: str = "label",
     ranking_target_col: str = "rank_y",
     classifier_market_position_col: str = "market_position",
@@ -67,7 +68,7 @@ def train_rf_models(
         class_weight="balanced",
         n_jobs=-1,
     )
-    clf.fit(train_df, spec_clf, verbose=True)
+    clf.fit(train_df, spec_clf, verbose=True, validation_df=validation_df)
 
     spec_reg = FitSpec(
         feature_cols=list(feature_list),
@@ -84,7 +85,7 @@ def train_rf_models(
         max_features="sqrt",
         n_jobs=-1,
     )
-    reg.fit(train_df, spec_reg, verbose=True)
+    reg.fit(train_df, spec_reg, verbose=True, validation_df=validation_df)
 
     trade_return_reg = None
     if train_trade_return_model and trade_return_target_col in train_df.columns:
@@ -107,7 +108,7 @@ def train_rf_models(
                 max_features="sqrt",
                 n_jobs=-1,
             )
-            trade_return_reg.fit(return_df, spec_ret, verbose=True)
+            trade_return_reg.fit(return_df, spec_ret, verbose=True, validation_df=validation_df)
 
     duration_reg = None
     if train_duration_model and duration_target_col in train_df.columns:
@@ -130,7 +131,7 @@ def train_rf_models(
                 max_features="sqrt",
                 n_jobs=-1,
             )
-            duration_reg.fit(duration_df, spec_dur, verbose=True)
+            duration_reg.fit(duration_df, spec_dur, verbose=True, validation_df=validation_df)
 
     return RawRFModels(
         clf=clf,

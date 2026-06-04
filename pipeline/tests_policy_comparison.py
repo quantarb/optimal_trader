@@ -8,6 +8,7 @@ from .symbol_diagnostics import compute_symbol_strategy_diagnostics
 from .symbol_filters import (
     build_symbol_feature_summary,
     build_symbol_metadata_filter_summary,
+    select_top_symbols_by_latest_market_cap,
     select_symbols_with_learned_filter,
     select_symbols_with_metadata_filter,
     select_top_symbols_from_diagnostics,
@@ -301,6 +302,26 @@ class PolicyComparisonCapabilityTests(ArtifactTestMixin, TestCase):
         self.assertEqual(set(filter_result["selected_symbols"]), {"AAA1", "BBB1"})
         self.assertGreaterEqual(int(filter_result["tree_depth"]), 1)
         self.assertIn("sector", "\n".join(filter_result.get("feature_columns") or []))
+
+    def test_top_market_cap_selection_uses_latest_feature_rows(self):
+        feature_df = pd.DataFrame(
+            [
+                {"date": "2024-01-01", "symbol": "AAA1", "km__marketcap": 100.0},
+                {"date": "2024-01-02", "symbol": "AAA1", "km__marketcap": 120.0},
+                {"date": "2024-01-01", "symbol": "BBB1", "km__marketcap": 200.0},
+                {"date": "2024-01-02", "symbol": "BBB1", "km__marketcap": 190.0},
+                {"date": "2024-01-01", "symbol": "CCC1", "km__marketcap": 150.0},
+                {"date": "2024-01-02", "symbol": "CCC1", "km__marketcap": 155.0},
+            ]
+        )
+        result = select_top_symbols_by_latest_market_cap(
+            feature_df,
+            end_date="2024-01-02",
+            top_n=2,
+        )
+
+        self.assertEqual(result["selection_count"], 2)
+        self.assertEqual(result["selected_symbols"], ["BBB1", "CCC1"])
 
     def test_market_cap_policy_comparison_report_includes_runtime_and_conclusions(self):
         report_path = self.temp_path / "market_cap_policy_comparison_report.md"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 import pandas as pd
@@ -144,3 +145,53 @@ def screen_companies_fmp(
         .tolist()
     )
     return tuple(sorted(syms)), records
+
+
+def resolve_symbol_universe_from_screener(
+    *,
+    api_key: str | None = None,
+    marketCapMoreThan: Optional[float] = None,
+    marketCapLowerThan: Optional[float] = None,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
+    betaMoreThan: Optional[float] = None,
+    betaLowerThan: Optional[float] = None,
+    priceMoreThan: Optional[float] = None,
+    priceLowerThan: Optional[float] = None,
+    dividendMoreThan: Optional[float] = None,
+    dividendLowerThan: Optional[float] = None,
+    volumeMoreThan: Optional[float] = None,
+    volumeLowerThan: Optional[float] = None,
+    exchange: Optional[str] = None,
+    country: Optional[str] = None,
+    isEtf: Optional[bool] = False,
+    isFund: Optional[bool] = False,
+    isActivelyTrading: Optional[bool] = None,
+    limit: int = 10_000,
+    includeAllShareClasses: Optional[bool] = None,
+) -> tuple[str, ...]:
+    key = str(api_key or os.getenv("FMP_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("FMP API key is required to resolve the symbol universe from the screener.")
+    return build_large_liquid_universe_single_call(
+        api_key=key,
+        marketCapMoreThan=marketCapMoreThan,
+        marketCapLowerThan=marketCapLowerThan,
+        sector=sector,
+        industry=industry,
+        betaMoreThan=betaMoreThan,
+        betaLowerThan=betaLowerThan,
+        priceMoreThan=priceMoreThan,
+        priceLowerThan=priceLowerThan,
+        dividendMoreThan=dividendMoreThan,
+        dividendLowerThan=dividendLowerThan,
+        volumeMoreThan=volumeMoreThan,
+        volumeLowerThan=volumeLowerThan,
+        exchange=exchange,
+        country=country,
+        isEtf=isEtf,
+        isFund=isFund,
+        isActivelyTrading=isActivelyTrading,
+        limit=limit,
+        includeAllShareClasses=includeAllShareClasses,
+    )

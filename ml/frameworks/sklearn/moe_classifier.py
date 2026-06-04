@@ -89,6 +89,8 @@ class SklearnMoERFClassifier(Model):
 
     def _positive_class_index(self) -> int:
         classes = list(self._classes)
+        if not classes:
+            return -1
         if 1 in classes:
             return classes.index(1)
         if "1" in classes:
@@ -110,13 +112,24 @@ class SklearnMoERFClassifier(Model):
             counts[int(np.argmax(raw - np.floor(raw)))] += 1
         return {family: int(count) for family, count in zip(families, counts)}
 
-    def fit(self, df_train: pd.DataFrame, spec: FitSpec, verbose: bool = True) -> "SklearnMoERFClassifier":
+    def fit(
+        self,
+        df_train: pd.DataFrame,
+        spec: FitSpec,
+        verbose: bool = True,
+        validation_df: pd.DataFrame | None = None,
+    ) -> "SklearnMoERFClassifier":
         if not spec.target_col:
             raise ValueError("SklearnMoERFClassifier requires spec.target_col")
         if self.n_estimators <= 0:
             raise ValueError("SklearnMoERFClassifier requires n_estimators > 0")
 
         df = df_train.dropna(subset=[spec.target_col]).copy()
+        val_df = None
+        if validation_df is not None:
+            val_df = validation_df.dropna(subset=[spec.target_col]).copy()
+            if val_df.empty:
+                raise ValueError("validation_df has no usable rows for SklearnMoERFClassifier.")
         requested_features = [str(col) for col in spec.feature_cols if str(col) in df.columns]
         numeric_cols = df[requested_features].select_dtypes(include=[np.number]).columns.tolist()
         numeric_set = set(numeric_cols)
@@ -141,9 +154,11 @@ class SklearnMoERFClassifier(Model):
             codes, uniques = pd.factorize(target_series)
             y = pd.Series(codes, index=df.index)
             self._class_mapping = {i: str(value) for i, value in enumerate(uniques)}
+            categories = list(self._class_mapping.values())
         else:
             y = pd.to_numeric(target_series, errors="coerce").fillna(0).astype(int)
             self._class_mapping = {int(value): str(value) for value in np.sort(y.unique())}
+            categories = None
         self._classes = np.sort(y.unique())
         if len(self._classes) < 2:
             raise ValueError(f"Target '{spec.target_col}' has only one class: {self._classes.tolist()}.")
@@ -154,24 +169,41 @@ class SklearnMoERFClassifier(Model):
 
         split_ratio = float(getattr(spec, "split_ratio", 0.8))
         test_size = 1.0 - split_ratio
-        use_holdout = (test_size > 0.0) and (test_size < 1.0)
-        if use_holdout:
-            train_index, valid_index = train_test_split(
-                df.index,
-                test_size=test_size,
-                random_state=self.random_state,
-                shuffle=True,
-                stratify=y,
-            )
+        if val_df is not None:
+            train_df = df
+            y_train = y
+            valid_df = val_df
+            if categories is not None:
+                y_valid = pd.Series(
+                    pd.Categorical(valid_df[spec.target_col].astype(str), categories=categories).codes,
+                    index=valid_df.index,
+                )
+            else:
+                y_valid = pd.to_numeric(valid_df[spec.target_col], errors="coerce").fillna(0).astype(int)
+            if (y_valid < 0).any():
+                raise ValueError(f"validation_df contains unseen labels for target '{spec.target_col}'.")
+            w_train = weights
+            eval_mode = "external_validation"
         else:
-            train_index = df.index
-            valid_index = df.index
+            use_holdout = (test_size > 0.0) and (test_size < 1.0)
+            if use_holdout:
+                train_index, valid_index = train_test_split(
+                    df.index,
+                    test_size=test_size,
+                    random_state=self.random_state,
+                    shuffle=True,
+                    stratify=y,
+                )
+            else:
+                train_index = df.index
+                valid_index = df.index
 
-        train_df = df.loc[train_index]
-        y_train = y.loc[train_index]
-        valid_df = df.loc[valid_index]
-        y_valid = y.loc[valid_index]
-        w_train = weights.loc[train_index] if weights is not None else None
+            train_df = df.loc[train_index]
+            y_train = y.loc[train_index]
+            valid_df = df.loc[valid_index]
+            y_valid = y.loc[valid_index]
+            w_train = weights.loc[train_index] if weights is not None else None
+            eval_mode = "holdout" if use_holdout else "in_sample"
 
         tree_counts = self._allocate_tree_counts()
         self.model = []
@@ -228,7 +260,7 @@ class SklearnMoERFClassifier(Model):
             "n_train": len(train_df),
             "n_test": len(valid_df),
             "split_ratio": split_ratio,
-            "eval_mode": "holdout" if use_holdout else "in_sample",
+            "eval_mode": eval_mode,
             "target_col": str(spec.target_col),
             "model_tag": str(spec.model_tag or "optimized family-forest MoE"),
             "n_features_numeric": len(self._used_features),
@@ -356,6 +388,8 @@ class SklearnMoERFClassifier(Model):
         print(f"  - Features:           {stats['n_features_numeric']} numeric across families")
         if stats.get("eval_mode") == "holdout":
             print(f"  - Random Split:       {stats['split_ratio']:.1%} Train / {1 - stats['split_ratio']:.1%} Test")
+        elif stats.get("eval_mode") == "external_validation":
+            print("  - Split Mode:         External validation frame")
         else:
             print("  - Split Mode:         In-sample eval (no internal holdout split)")
         print("\nTEST PERFORMANCE:")

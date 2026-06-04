@@ -24,6 +24,8 @@ def run_scoring_data_refresh_from_fmp(
     refresh_mode: str = "scoring_ready",
     refresh_symbol_sections_before_build: bool = True,
     refresh_macro_before_build: bool = False,
+    skip_cached_inactive_symbols: bool = True,
+    skip_recent_price_attempts: bool = True,
     max_symbols=None,
     existing_historical_sections_only: bool = True,
     required_historical_sections: Sequence[str] | None = None,
@@ -62,6 +64,8 @@ def run_scoring_data_refresh_from_fmp(
                 symbols=symbols,
                 target_end_date=target_end_date,
                 max_symbols=max_symbols,
+                skip_cached_inactive_symbols=bool(skip_cached_inactive_symbols),
+                skip_recent_price_attempts=bool(skip_recent_price_attempts),
             )
             results["price_plan"] = price_plan
             price_symbols = tuple(
@@ -94,6 +98,8 @@ def run_scoring_data_refresh_from_fmp(
                 target_start_date=None,
                 target_end_date=target_end_date,
                 max_symbols=max_symbols,
+                skip_cached_inactive_symbols=bool(skip_cached_inactive_symbols),
+                skip_recent_price_attempts=bool(skip_recent_price_attempts),
                 verbose=bool(verbose),
                 progress_logger=progress_logger,
             )
@@ -107,6 +113,7 @@ def run_scoring_data_refresh_from_fmp(
                 symbols=symbols,
                 target_end_date=target_end_date,
                 max_symbols=max_symbols,
+                skip_cached_inactive_symbols=bool(skip_cached_inactive_symbols),
             )
             results["price_plan"] = price_plan
             price_symbols = tuple(
@@ -139,6 +146,8 @@ def run_scoring_data_refresh_from_fmp(
                 target_start_date=None,
                 target_end_date=target_end_date,
                 max_symbols=max_symbols,
+                skip_cached_inactive_symbols=bool(skip_cached_inactive_symbols),
+                skip_recent_price_attempts=bool(skip_recent_price_attempts),
                 verbose=bool(verbose),
                 progress_logger=progress_logger,
             )

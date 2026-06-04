@@ -36,7 +36,7 @@ EVENTS_OPTIONAL_DEFAULTS: Dict[str, Any] = {
 # Labels produced by labels.directional.label_events_directional
 # (supervision contract)
 LABELS_REQUIRED: List[str] = [
-    "target",   # 0/1
+    "target",
     "side",
     "horizon",
 ]

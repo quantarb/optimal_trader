@@ -44,8 +44,10 @@ def _train_classifier(
     model_params: dict[str, Any],
     target_col: str,
     split_ratio: float,
+    validation_df: pd.DataFrame | None = None,
 ) -> Any:
     df = _attach_target(train_df, target_col=target_col, task_type="classification")
+    val_df = _attach_target(validation_df, target_col=target_col, task_type="classification") if validation_df is not None else None
     spec = FitSpec(
         feature_cols=list(feature_cols),
         target_col=target_col,
@@ -53,7 +55,7 @@ def _train_classifier(
         split_ratio=float(split_ratio),
     )
     model = SklearnRFClassifier(random_state=1337, **model_params)
-    model.fit(df, spec, verbose=False)
+    model.fit(df, spec, verbose=False, validation_df=val_df)
     return model
 
 
@@ -64,8 +66,10 @@ def _train_regressor(
     model_params: dict[str, Any],
     target_col: str,
     split_ratio: float,
+    validation_df: pd.DataFrame | None = None,
 ) -> Any:
     df = _attach_target(train_df, target_col=target_col, task_type="regression")
+    val_df = _attach_target(validation_df, target_col=target_col, task_type="regression") if validation_df is not None else None
     model = SklearnRFRegressor(
         test_size=max(0.0, 1.0 - float(split_ratio)),
         random_state=1337,
@@ -77,7 +81,7 @@ def _train_regressor(
         weight_col="sample_weight",
         split_ratio=float(split_ratio),
     )
-    model.fit(df, spec, verbose=False)
+    model.fit(df, spec, verbose=False, validation_df=val_df)
     return model
 
 
@@ -94,6 +98,7 @@ def _train_multi_task_bundle(
     feature_cols: Sequence[str],
     model_params: dict[str, Any],
     split_ratio: float,
+    validation_df: pd.DataFrame | None = None,
 ) -> Any:
     bundle = train_multi_task_forest_bundle(
         train_df=train_df,
@@ -113,10 +118,12 @@ def _train_moe_classifier(
     model_params: dict[str, Any],
     target_col: str,
     split_ratio: float,
+    validation_df: pd.DataFrame | None = None,
     feature_families: Mapping[str, Sequence[str]] | None = None,
 ) -> Any:
     """Train a Mixture-of-Experts classifier with per-family expert forests."""
     df = _attach_target(train_df, target_col=target_col, task_type="classification")
+    val_df = _attach_target(validation_df, target_col=target_col, task_type="classification") if validation_df is not None else None
 
     # Build feature family mapping: prefer explicit, fall back to prefix inference
     if feature_families:
@@ -173,7 +180,7 @@ def _train_moe_classifier(
         family_weights=family_weights,
         **model_params_clean,
     )
-    model.fit(df, spec, verbose=False)
+    model.fit(df, spec, verbose=False, validation_df=val_df)
     return model
 
 
@@ -185,6 +192,7 @@ def fit_model_for_algorithm(
     model_params: dict[str, Any],
     target_col: str,
     split_ratio: float,
+    validation_df: pd.DataFrame | None = None,
 ) -> Any:
     """Fit the selected model adapter on an artifact-backed training frame."""
 
@@ -196,6 +204,7 @@ def fit_model_for_algorithm(
             model_params=model_params,
             target_col=target_col,
             split_ratio=float(split_ratio),
+            validation_df=validation_df,
         )
     if algorithm_value == "random_forest_regressor":
         return _train_regressor(
@@ -204,6 +213,7 @@ def fit_model_for_algorithm(
             model_params=model_params,
             target_col=target_col,
             split_ratio=float(split_ratio),
+            validation_df=validation_df,
         )
     if algorithm_value == "autoencoder":
         return _train_autoencoder(train_df=train_df, feature_cols=feature_cols)
@@ -213,6 +223,7 @@ def fit_model_for_algorithm(
             feature_cols=feature_cols,
             model_params=model_params,
             split_ratio=float(split_ratio),
+            validation_df=validation_df,
         )
     if algorithm_value == "moe_random_forest_classifier":
         return _train_moe_classifier(
@@ -221,6 +232,7 @@ def fit_model_for_algorithm(
             model_params=model_params,
             target_col=target_col,
             split_ratio=float(split_ratio),
+            validation_df=validation_df,
             feature_families=model_params.get("feature_families"),
         )
     raise ValueError(f"Unsupported pipeline training algorithm: {algorithm!r}")

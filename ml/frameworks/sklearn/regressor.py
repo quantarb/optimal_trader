@@ -30,11 +30,22 @@ class SklearnRFRegressor(Model):
         self._feature_importance: dict[str, float] = {}
         self._train_stats: dict[str, Any] = {}
 
-    def fit(self, df_train: pd.DataFrame, spec: FitSpec, verbose: bool = True) -> "SklearnRFRegressor":
+    def fit(
+        self,
+        df_train: pd.DataFrame,
+        spec: FitSpec,
+        verbose: bool = True,
+        validation_df: pd.DataFrame | None = None,
+    ) -> "SklearnRFRegressor":
         if not spec.target_col:
             raise ValueError("SklearnRFRegressor requires spec.target_col")
 
         df = df_train.dropna(subset=[spec.target_col]).copy()
+        val_df = None
+        if validation_df is not None:
+            val_df = validation_df.dropna(subset=[spec.target_col]).copy()
+            if val_df.empty:
+                raise ValueError("validation_df has no usable rows for SklearnRFRegressor.")
 
         full_x = df[list(spec.feature_cols)]
         self._used_features = full_x.select_dtypes(include=[np.number]).columns.tolist()
@@ -49,19 +60,29 @@ class SklearnRFRegressor(Model):
         if spec.weight_col and spec.weight_col in df.columns:
             weights = pd.to_numeric(df[spec.weight_col], errors="coerce").fillna(1.0).to_numpy()
 
-        use_holdout = (self.test_size > 0.0) and (self.test_size < 1.0)
-        if use_holdout:
-            x_tr, x_va, y_tr, y_va, w_tr, w_va = train_test_split(
-                x,
-                y,
-                weights,
-                test_size=self.test_size,
-                random_state=self.random_state,
-                shuffle=True,
-            )
-        else:
+        if val_df is not None:
             x_tr, y_tr, w_tr = x, y, weights
-            x_va, y_va, w_va = x, y, weights
+            x_va = val_df[self._used_features]
+            y_va = pd.to_numeric(val_df[spec.target_col], errors="coerce").fillna(0.0).astype(float)
+            w_va = None
+            if spec.weight_col and spec.weight_col in val_df.columns:
+                w_va = pd.to_numeric(val_df[spec.weight_col], errors="coerce").fillna(1.0).to_numpy()
+            eval_mode = "external_validation"
+        else:
+            use_holdout = (self.test_size > 0.0) and (self.test_size < 1.0)
+            if use_holdout:
+                x_tr, x_va, y_tr, y_va, w_tr, w_va = train_test_split(
+                    x,
+                    y,
+                    weights,
+                    test_size=self.test_size,
+                    random_state=self.random_state,
+                    shuffle=True,
+                )
+            else:
+                x_tr, y_tr, w_tr = x, y, weights
+                x_va, y_va, w_va = x, y, weights
+            eval_mode = "holdout" if use_holdout else "in_sample"
 
         self.model.fit(x_tr, y_tr, sample_weight=w_tr)
         self._is_fit = True
@@ -72,7 +93,7 @@ class SklearnRFRegressor(Model):
             "n_obs": len(df),
             "n_train": len(x_tr),
             "n_test": len(x_va),
-            "eval_mode": "holdout" if use_holdout else "in_sample",
+            "eval_mode": eval_mode,
             "target_col": str(spec.target_col),
             "model_tag": str(spec.model_tag or ""),
             "signal": str(spec.signal or ""),
@@ -119,6 +140,8 @@ class SklearnRFRegressor(Model):
             print(f"  - Signal:     {stats['signal']}")
         if stats.get("eval_mode") == "in_sample":
             print("  - Split Mode: In-sample eval (no internal holdout split).")
+        elif stats.get("eval_mode") == "external_validation":
+            print("  - Split Mode: External validation frame.")
         print(f"  - Dropped {stats['dropped_count']} non-numeric features.")
 
         print("\nTARGET VS PREDICTION DIST:")

@@ -151,10 +151,7 @@ def build_fmp_endpoint_feature_families(
             )
 
     try:
-        prime_section_record_cache(
-            list(symbol_objs.values()),
-            [key for key in endpoint_builders.keys() if key != "time_calendar"] + ["dividends", "splits"],
-        )
+        prime_section_record_cache(list(symbol_objs.values()), list(endpoint_builders.keys()))
         if callable(progress_logger):
             progress_logger(f"FMP feature build start | symbols={total:,} | workers={workers:,} | families={len(endpoint_builders):,}")
         if workers == 1:

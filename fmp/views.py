@@ -1061,6 +1061,10 @@ _FUNDAMENTAL_STATEMENT_ANCHOR_SECTION_KEYS = (
 _FUNDAMENTAL_FALLBACK_ANCHOR_SECTION_KEYS = (
     "earnings",
 )
+_SPARSE_EVENT_HISTORICAL_SECTION_KEYS = {
+    "dividends",
+    "splits",
+}
 _FUNDAMENTAL_DEPENDENT_SECTION_KEYS = {
     "key_metrics",
     "ratios",
@@ -1357,6 +1361,12 @@ def _historical_section_fetch_mode(
     is_recent_enough = bool(max_date and max_date >= (target_end - timedelta(days=threshold_days)))
     state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
     fundamental_anchor_date = _latest_company_fundamental_anchor_date(symbol_obj)
+
+    if section_key in _SPARSE_EVENT_HISTORICAL_SECTION_KEYS:
+        section_count = int((section_range or {}).get("count") or 0)
+        if section_count > 0 and state is not None and state.last_fetched_at is not None:
+            if state.last_fetched_at >= (timezone.now() - timedelta(days=threshold_days)):
+                return "skip", []
 
     if (
         section_key in _FUNDAMENTAL_DEPENDENT_SECTION_KEYS

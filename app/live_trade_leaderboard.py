@@ -72,6 +72,8 @@ def default_live_trade_config() -> dict[str, Any]:
             "refresh_symbol_sections_before_build": True,
             "refresh_macro_before_build": True,
             "mode": "scoring_ready",
+            "skip_cached_inactive_symbols": True,
+            "skip_recent_price_attempts": True,
             "existing_historical_sections_only": True,
             "max_symbols": None,
             "verbose": False,
@@ -105,6 +107,7 @@ def run_live_trade_leaderboard_build(
     from features.macro import MacroFeatureConfig
     from ml.raw_stack import save_raw_stack_artifacts, train_ae, train_rf_models
     from pipeline.api import build_fundamental_dataframe, build_label_dataframe, build_macro_dataframe
+    from pipeline.symbol_filters import select_top_symbols_by_latest_market_cap
     from pipeline.universe_selection import resolve_symbol_universe
     from trading.live_trade import (
         build_technical_dataframe_from_django,
@@ -130,6 +133,7 @@ def run_live_trade_leaderboard_build(
         )
     log(f"Resolving symbol universe from {START_DATE} to {END_DATE}")
 
+    ctx = SimpleNamespace(api_key=resolve_fmp_api_key(required=False))
     resolved_universe = tuple(
         resolve_symbol_universe(
             min_market_cap=float(cfg["universe"]["min_market_cap"]),
@@ -139,21 +143,15 @@ def run_live_trade_leaderboard_build(
             limit=cfg["universe"]["size"],
         )
     )
+    universe_source = "local DB"
     if not resolved_universe:
         raise RuntimeError("No symbols resolved for the configured universe.")
-    from fmp.models import Symbol
-
-    universe = _filter_actively_trading_symbols(resolved_universe, symbol_model=Symbol)
+    universe = tuple(str(symbol).strip().upper() for symbol in resolved_universe if str(symbol).strip())
     if not universe:
-        raise RuntimeError("No actively trading symbols remained after filtering the resolved universe.")
-    removed_inactive = int(len(resolved_universe) - len(universe))
-    log(
-        f"Resolved {len(universe):,} actively trading symbols for the training universe"
-        f" | filtered inactive {removed_inactive:,}"
-    )
+        raise RuntimeError("No symbols remained after universe resolution.")
+    log(f"Resolved {len(universe):,} symbols for the training universe from {universe_source}")
 
     fmp_refresh_cfg = dict(cfg.get("fmp_refresh", {}))
-    ctx = SimpleNamespace(api_key=resolve_fmp_api_key(required=False))
     macro_feature_config = MacroFeatureConfig()
     auto_refresh_enabled = bool(fmp_refresh_cfg.get("enabled", False))
     has_fmp_api_key = bool(str(ctx.api_key or "").strip())
@@ -167,6 +165,8 @@ def run_live_trade_leaderboard_build(
                 refresh_mode=str(fmp_refresh_cfg.get("mode") or "prices_only"),
                 refresh_symbol_sections_before_build=True,
                 refresh_macro_before_build=bool(fmp_refresh_cfg.get("refresh_macro_before_build", False)),
+                skip_cached_inactive_symbols=bool(fmp_refresh_cfg.get("skip_cached_inactive_symbols", True)),
+                skip_recent_price_attempts=bool(fmp_refresh_cfg.get("skip_recent_price_attempts", True)),
                 max_symbols=fmp_refresh_cfg.get("max_symbols"),
                 existing_historical_sections_only=bool(
                     fmp_refresh_cfg.get("existing_historical_sections_only", True)
@@ -247,6 +247,33 @@ def run_live_trade_leaderboard_build(
         verbose=False,
     )
     final_df = pd.concat([technical_df, fund_df, macro_df], axis=1).sort_index()
+    top_market_cap_n = cfg.get("universe", {}).get("top_market_cap_n")
+    if top_market_cap_n not in (None, ""):
+        market_cap_selection = select_top_symbols_by_latest_market_cap(
+            final_df,
+            end_date=END_DATE,
+            top_n=int(top_market_cap_n),
+            symbols=universe,
+        )
+        selected_universe = tuple(
+            str(symbol).strip().upper()
+            for symbol in market_cap_selection.get("selected_symbols", [])
+            if str(symbol).strip()
+        )
+        if selected_universe:
+            universe = selected_universe
+            technical_df = technical_df.loc[technical_df.index.get_level_values("symbol").isin(universe)].copy()
+            fund_df = fund_df.loc[fund_df.index.get_level_values("symbol").isin(universe)].copy()
+            macro_df = macro_df.loc[macro_df.index.get_level_values("symbol").isin(universe)].copy()
+            final_df = final_df.loc[final_df.index.get_level_values("symbol").isin(universe)].copy()
+            log(
+                f"Applied historical market-cap filter | top_n={int(top_market_cap_n):,} | selected {len(universe):,} symbols"
+            )
+        else:
+            log(
+                f"Historical market-cap filter returned no symbols; continuing with resolved universe of {len(universe):,}"
+            )
+
     panel_dates = pd.DatetimeIndex(final_df.index.get_level_values("date")).normalize()
     allowed_mask = panel_dates <= completed_market_date
     if not allowed_mask.any():
@@ -417,37 +444,6 @@ def run_live_trade_leaderboard_build(
         latest_scored=latest_scored.copy(),
         reference_trade_count=int(len(reference_catalog)),
         vector_metadata=vector_metadata,
-    )
-
-
-def _is_explicitly_inactive_payload(payload: object, company_name: object) -> bool:
-    payload_dict = payload if isinstance(payload, dict) else {}
-    active_value = payload_dict.get("isActivelyTrading")
-    if active_value is None:
-        active_value = payload_dict.get("activelyTrading")
-    if active_value is None:
-        active_value = payload_dict.get("is_active")
-    if active_value is not None:
-        return not bool(active_value)
-    text = str(company_name or "").strip().lower()
-    return "(delisted)" in text
-
-
-def _filter_actively_trading_symbols(
-    symbols: tuple[str, ...],
-    *,
-    symbol_model,
-) -> tuple[str, ...]:
-    if not symbols:
-        return tuple()
-    rows = symbol_model.objects.filter(symbol__in=list(symbols)).values_list("symbol", "payload", "company_name")
-    active_rows = {
-        str(symbol or "").strip().upper(): not _is_explicitly_inactive_payload(payload, company_name)
-        for symbol, payload, company_name in rows
-    }
-    return tuple(
-        code for code in (str(symbol).strip().upper() for symbol in symbols)
-        if code and active_rows.get(code, True)
     )
 
 

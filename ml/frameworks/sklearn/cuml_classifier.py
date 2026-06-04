@@ -40,11 +40,31 @@ class CumlRFClassifier(Model):
         self._class_mapping: dict[int, str] = {}
         self._classes: list[int] = []
 
-    def fit(self, df_train: pd.DataFrame, spec: FitSpec, verbose: bool = True) -> "CumlRFClassifier":
+    def positive_class_index(self) -> int:
+        if not self._classes:
+            return -1
+        if 1 in self._classes:
+            return self._classes.index(1)
+        if "1" in self._classes:
+            return self._classes.index("1")
+        return max(len(self._classes) - 1, 0)
+
+    def fit(
+        self,
+        df_train: pd.DataFrame,
+        spec: FitSpec,
+        verbose: bool = True,
+        validation_df: pd.DataFrame | None = None,
+    ) -> "CumlRFClassifier":
         if not spec.target_col:
             raise ValueError("CumlRFClassifier requires spec.target_col")
 
         df = df_train.dropna(subset=[spec.target_col]).copy()
+        val_df = None
+        if validation_df is not None:
+            val_df = validation_df.dropna(subset=[spec.target_col]).copy()
+            if val_df.empty:
+                raise ValueError("validation_df has no usable rows for CumlRFClassifier.")
 
         full_x = df[list(spec.feature_cols)]
         self._used_features = full_x.select_dtypes(include=[np.number]).columns.tolist()
@@ -73,26 +93,40 @@ class CumlRFClassifier(Model):
         split_ratio = getattr(spec, "split_ratio", 0.8)
         test_size = 1.0 - split_ratio
 
-        use_holdout = (test_size > 0.0) and (test_size < 1.0)
-        if use_holdout:
-            x_tr, x_va, y_tr, y_va = train_test_split(
-                x,
-                y,
-                test_size=test_size,
-                random_state=self.random_state,
-                shuffle=True,
-                stratify=y,
-            )
-        else:
+        if val_df is not None:
             x_tr, y_tr = x, y
-            x_va, y_va = x, y
+            x_va = val_df[self._used_features]
+            val_target_series = val_df[spec.target_col]
+            if target_series.dtype == "object" or target_series.dtype.name == "category":
+                y_va = pd.Series(pd.Categorical(val_target_series.astype(str), categories=list(self._class_mapping.values())).codes, index=val_df.index)
+            else:
+                y_va = pd.to_numeric(val_target_series, errors="coerce").fillna(0).astype(int)
+            if (y_va < 0).any():
+                raise ValueError(f"validation_df contains unseen labels for target '{spec.target_col}'.")
+            use_holdout = False
+            eval_mode = "external_validation"
+        else:
+            use_holdout = (test_size > 0.0) and (test_size < 1.0)
+            if use_holdout:
+                x_tr, x_va, y_tr, y_va = train_test_split(
+                    x,
+                    y,
+                    test_size=test_size,
+                    random_state=self.random_state,
+                    shuffle=True,
+                    stratify=y,
+                )
+            else:
+                x_tr, y_tr = x, y
+                x_va, y_va = x, y
+            eval_mode = "holdout" if use_holdout else "in_sample"
 
         self._train_stats = {
             "n_obs": len(df),
             "n_train": len(x_tr),
             "n_test": len(x_va),
             "split_ratio": split_ratio,
-            "eval_mode": "holdout" if use_holdout else "in_sample",
+            "eval_mode": eval_mode,
             "target_col": str(spec.target_col),
             "model_tag": str(spec.model_tag or ""),
             "signal": str(spec.signal or ""),
@@ -115,8 +149,9 @@ class CumlRFClassifier(Model):
         y_pred = np.asarray(self.model.predict(x_va.astype("float32", copy=False)), dtype=int)
         if self._train_stats["is_binary"]:
             proba_matrix = np.asarray(self.model.predict_proba(x_va.astype("float32", copy=False)), dtype=float)
-            positive_class = self._classes[-1]
-            positive_idx = self._classes.index(positive_class)
+            positive_idx = self.positive_class_index()
+            if positive_idx < 0 or positive_idx >= proba_matrix.shape[1]:
+                positive_idx = min(1, proba_matrix.shape[1] - 1)
             proba = proba_matrix[:, positive_idx] if proba_matrix.shape[1] > positive_idx else proba_matrix[:, -1]
             self._metrics = binary_classifier_metrics_from_scores(y_va.to_numpy(), proba, threshold=0.5)
         else:
@@ -169,11 +204,14 @@ class CumlRFClassifier(Model):
             print(f"  - Signal:             {stats['signal']}")
         if stats.get("eval_mode") == "holdout":
             print(f"  - Random Split:       {stats['split_ratio']:.1%} Train / {1 - stats['split_ratio']:.1%} Test")
+        elif stats.get("eval_mode") == "external_validation":
+            print("  - Split Mode:         External validation frame")
         else:
             print("  - Split Mode:         In-sample eval (no internal holdout split)")
         print(f"  - Features:           {stats['n_features_numeric']} numeric (filtered {stats['dropped_count']} strings)")
         if stats["is_binary"]:
-            positive_class = stats["classes"][-1]
+            positive_idx = self.positive_class_index()
+            positive_class = stats["classes"][positive_idx] if 0 <= positive_idx < len(stats["classes"]) else stats["classes"][-1]
             positive_name = self._class_mapping.get(positive_class, str(positive_class))
             print(f"  - Positive Class:     {positive_class} => {positive_name}")
 

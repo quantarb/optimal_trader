@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import timedelta
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+from django.utils import timezone
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -17,6 +19,7 @@ from fmp.models import (
     EconomicIndicatorObservation,
     EconomicIndicatorSeries,
     Symbol,
+    SymbolSectionState,
     TreasuryRateObservation,
     TreasuryRateSeries,
 )
@@ -159,6 +162,23 @@ def _symbol_is_explicitly_inactive(symbol_obj: Symbol) -> bool:
     return "(delisted)" in company_name
 
 
+def _symbol_has_price_history(symbol_obj: Symbol) -> bool:
+    ranges = dict(symbol_obj.historical_date_ranges or {})
+    price_range = ranges.get("prices_div_adj") if isinstance(ranges, dict) else None
+    if not isinstance(price_range, dict):
+        return False
+    if int(price_range.get("count") or 0) > 0:
+        return True
+    return bool(price_range.get("min_date")) and bool(price_range.get("max_date"))
+
+
+def _symbol_recent_price_refresh_attempt(symbol_obj: Symbol, *, threshold_days: int = 1) -> bool:
+    state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key="prices_div_adj").first()
+    if state is None or state.last_fetched_at is None:
+        return False
+    return state.last_fetched_at >= (timezone.now() - timedelta(days=threshold_days))
+
+
 def _historical_section_max_date(symbol_obj: Symbol, section_key: str):
     ranges = dict(symbol_obj.historical_date_ranges or {})
     payload = ranges.get(section_key) if isinstance(ranges, dict) else None
@@ -175,10 +195,16 @@ def _latest_fundamental_anchor_date(symbol_obj: Symbol):
     return max(dates) if dates else None
 
 
-def symbol_needs_price_refresh(symbol_obj: Symbol, *, target_end_date=None) -> tuple[bool, str]:
+def symbol_needs_price_refresh(
+    symbol_obj: Symbol,
+    *,
+    target_end_date=None,
+    skip_cached_inactive_symbols: bool = True,
+    skip_recent_price_attempts: bool = True,
+) -> tuple[bool, str]:
     symbol_obj.refresh_from_db(fields=["historical_date_ranges", "payload", "company_name"])
-    if _symbol_is_explicitly_inactive(symbol_obj):
-        return False, "inactive_symbol"
+    if skip_cached_inactive_symbols and _symbol_is_explicitly_inactive(symbol_obj) and _symbol_has_price_history(symbol_obj):
+        return False, "inactive_symbol_cached"
     expected_price_date = (
         pd.Timestamp(target_end_date).date()
         if target_end_date is not None
@@ -186,8 +212,12 @@ def symbol_needs_price_refresh(symbol_obj: Symbol, *, target_end_date=None) -> t
     )
     price_max_date = _historical_section_max_date(symbol_obj, "prices_div_adj")
     if price_max_date is None:
+        if skip_recent_price_attempts and _symbol_recent_price_refresh_attempt(symbol_obj):
+            return False, "recent_price_attempt_no_history"
         return True, "missing_prices_div_adj"
     if price_max_date < expected_price_date:
+        if skip_recent_price_attempts and _symbol_recent_price_refresh_attempt(symbol_obj):
+            return False, "recent_price_attempt"
         return True, f"prices_div_adj_max_date_lt_{expected_price_date.isoformat()}"
     return False, "fresh_prices_div_adj"
 
@@ -443,6 +473,8 @@ def plan_symbol_price_refresh_from_fmp(
     symbols: Sequence[str],
     target_end_date=None,
     max_symbols=None,
+    skip_cached_inactive_symbols: bool = True,
+    skip_recent_price_attempts: bool = True,
 ) -> pd.DataFrame:
     selected = list(symbols or [])
     if max_symbols is not None:
@@ -460,6 +492,8 @@ def plan_symbol_price_refresh_from_fmp(
         needs_refresh, refresh_reason = symbol_needs_price_refresh(
             symbol_obj,
             target_end_date=target_end_date,
+            skip_cached_inactive_symbols=bool(skip_cached_inactive_symbols),
+            skip_recent_price_attempts=bool(skip_recent_price_attempts),
         )
         rows.append({"symbol": code, "needs_refresh": bool(needs_refresh), "refresh_reason": str(refresh_reason)})
     return pd.DataFrame(rows)
@@ -500,6 +534,8 @@ def refresh_universe_price_history_from_fmp(
     target_start_date=None,
     target_end_date=None,
     max_symbols=None,
+    skip_cached_inactive_symbols: bool = True,
+    skip_recent_price_attempts: bool = True,
     verbose: bool = True,
     progress_logger=None,
 ) -> pd.DataFrame:
@@ -521,15 +557,31 @@ def refresh_universe_price_history_from_fmp(
         symbol_obj = Symbol.objects.filter(symbol__iexact=code).only("id", "symbol", "historical_date_ranges", "payload", "company_name").first()
         if symbol_obj is None:
             symbol_obj = Symbol.objects.create(symbol=code)
-        elif _symbol_is_explicitly_inactive(symbol_obj):
+        elif skip_cached_inactive_symbols and _symbol_is_explicitly_inactive(symbol_obj) and _symbol_has_price_history(symbol_obj):
             if callable(progress_logger):
                 progress_logger(
-                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=skipped_inactive | reason=inactive_symbol"
+                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=skipped_inactive | reason=inactive_symbol_cached"
                 )
             rows.append(
                 {
                     "symbol": code,
                     "status": "skipped_inactive",
+                    "fetch_mode": "skip",
+                    "records_fetched": 0,
+                    "retries_used": 0,
+                    "range_after": {},
+                }
+            )
+            continue
+        elif skip_recent_price_attempts and _symbol_recent_price_refresh_attempt(symbol_obj):
+            if callable(progress_logger):
+                progress_logger(
+                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=skipped_recent_attempt | reason=recent_price_attempt"
+                )
+            rows.append(
+                {
+                    "symbol": code,
+                    "status": "skipped_recent_attempt",
                     "fetch_mode": "skip",
                     "records_fetched": 0,
                     "retries_used": 0,

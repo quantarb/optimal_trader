@@ -162,7 +162,7 @@ def copy_feature_importance(feature_importance: dict[str, float]) -> dict[str, f
 
 
 class ModelProtocol:
-    def fit(self, df_train: pd.DataFrame, spec: FitSpec) -> "ModelProtocol":
+    def fit(self, df_train: pd.DataFrame, spec: FitSpec, verbose: bool = True, validation_df: pd.DataFrame | None = None) -> "ModelProtocol":
         raise NotImplementedError
 
     def predict(self, df: pd.DataFrame, *, feature_cols: Sequence[str]) -> np.ndarray:

@@ -467,7 +467,15 @@ with st.sidebar:
         value=float(default_cfg["universe"]["min_market_cap"]) / 1_000_000_000.0,
         step=1.0,
     )
+    top_market_cap_n = st.number_input(
+        "Top Market Cap Count",
+        min_value=1,
+        value=int(default_cfg["universe"].get("top_market_cap_n") or 500),
+        step=50,
+    )
     refresh_fmp = st.toggle("Download Missing FMP Data First", value=True)
+    skip_cached_inactive_symbols = st.toggle("Skip Cached Inactive Symbols", value=True)
+    skip_recent_price_attempts = st.toggle("Skip Recent Price Attempts", value=True)
     run_build = st.button("Train Models And Build Leaderboard", type="primary", use_container_width=True)
 
 
@@ -478,14 +486,17 @@ build_cfg = {
     },
     "universe": {
         "min_market_cap": float(min_market_cap_b) * 1_000_000_000.0,
+        "top_market_cap_n": int(top_market_cap_n),
     },
-    "fmp_refresh": {
-        "enabled": bool(refresh_fmp),
-        "refresh_symbol_sections_before_build": bool(refresh_fmp),
-        "refresh_macro_before_build": bool(refresh_fmp),
-        "existing_historical_sections_only": True,
-        "verbose": False,
-    },
+        "fmp_refresh": {
+            "enabled": bool(refresh_fmp),
+            "refresh_symbol_sections_before_build": bool(refresh_fmp),
+            "refresh_macro_before_build": bool(refresh_fmp),
+            "skip_cached_inactive_symbols": bool(skip_cached_inactive_symbols),
+            "skip_recent_price_attempts": bool(skip_recent_price_attempts),
+            "existing_historical_sections_only": True,
+            "verbose": False,
+        },
 }
 
 leaderboard_payload = st.session_state.get("live_trade_leaderboard_payload")

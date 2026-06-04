@@ -11,7 +11,7 @@ from domain.models.specs import FitSpec
 class ModelTrainer(Protocol):
     """Framework-agnostic model trainer contract."""
 
-    def fit(self, df_train: pd.DataFrame, spec: FitSpec) -> Any:
+    def fit(self, df_train: pd.DataFrame, spec: FitSpec, verbose: bool = True, validation_df: pd.DataFrame | None = None) -> Any:
         ...
 
 
@@ -40,4 +40,3 @@ class BacktestRunner(Protocol):
 
     def run(self, frame: pd.DataFrame, *, config: dict[str, Any]) -> pd.DataFrame:
         ...
-

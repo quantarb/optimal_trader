@@ -648,11 +648,122 @@ def select_symbols_with_learned_filter(
     }
 
 
+def select_top_symbols_by_latest_market_cap(
+    feature_frame_or_artifact,
+    *,
+    end_date: str | None = None,
+    top_n: int = 500,
+    symbols: Sequence[str] | None = None,
+    market_cap_col_candidates: Sequence[str] = MARKET_CAP_METADATA_COL_CANDIDATES,
+    exact_date_only: bool = True,
+) -> dict[str, Any]:
+    if isinstance(feature_frame_or_artifact, pd.DataFrame):
+        feature_df = pd.DataFrame(feature_frame_or_artifact).copy()
+    elif feature_frame_or_artifact is None:
+        feature_df = pd.DataFrame()
+    else:
+        feature_df = read_frame_artifact(
+            feature_frame_or_artifact,
+            parse_dates=False,
+            normalize_symbols=True,
+        )
+
+    if feature_df.empty:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    if isinstance(feature_df.index, pd.MultiIndex):
+        feature_df = feature_df.reset_index()
+    if "symbol" not in feature_df.columns or "date" not in feature_df.columns:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    feature_df = feature_df.copy()
+    feature_df["symbol"] = feature_df["symbol"].astype(str).str.strip().str.upper()
+    feature_df = filter_frame_by_date(feature_df, end_date=end_date)
+    if symbols:
+        allowed = {str(symbol).strip().upper() for symbol in list(symbols or []) if str(symbol).strip()}
+        feature_df = feature_df[feature_df["symbol"].astype(str).isin(allowed)].copy()
+    if feature_df.empty:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    market_cap_col = first_available_column(feature_df.columns, market_cap_col_candidates)
+    if not market_cap_col:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    feature_df["date"] = pd.to_datetime(feature_df["date"], errors="coerce").dt.normalize()
+    target_date = pd.Timestamp(end_date).normalize() if end_date is not None else None
+    if exact_date_only and target_date is not None:
+        feature_df = feature_df.loc[feature_df["date"] == target_date].copy()
+    elif target_date is not None:
+        feature_df = feature_df.loc[feature_df["date"] <= target_date].copy()
+    if feature_df.empty:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    feature_df[market_cap_col] = pd.to_numeric(feature_df[market_cap_col], errors="coerce")
+    feature_df = feature_df.dropna(subset=[market_cap_col]).copy()
+    if feature_df.empty:
+        return {
+            "selected_symbols": [],
+            "selection_count": 0,
+            "top_n": int(top_n),
+            "score_rows": [],
+        }
+
+    feature_df = feature_df.sort_values(["symbol", "date"])
+    if exact_date_only and target_date is not None:
+        latest_rows = feature_df.groupby("symbol", observed=True).tail(1).copy()
+    else:
+        latest_rows = feature_df.groupby("symbol", observed=True).tail(1).copy()
+    latest_rows[market_cap_col] = pd.to_numeric(latest_rows[market_cap_col], errors="coerce").fillna(0.0)
+    ranked = latest_rows.sort_values([market_cap_col, "symbol"], ascending=[False, True]).head(max(int(top_n), 0)).copy()
+    ranked = ranked.reset_index(drop=True)
+    score_rows = [
+        {
+            "symbol": str(row["symbol"]),
+            "market_cap": _round_float(_safe_float(row.get(market_cap_col))),
+            "date": str(row.get("date") or ""),
+        }
+        for row in ranked.to_dict(orient="records")
+    ]
+    return {
+        "selected_symbols": [str(symbol) for symbol in ranked["symbol"].astype(str).tolist()],
+        "selection_count": int(len(ranked)),
+        "top_n": int(top_n),
+        "market_cap_col": str(market_cap_col),
+        "score_rows": score_rows,
+    }
+
+
 __all__ = [
     "build_symbol_feature_summary",
     "build_symbol_metadata_filter_summary",
     "MARKET_CAP_METADATA_COL_CANDIDATES",
     "resolve_symbol_selection_count",
+    "select_top_symbols_by_latest_market_cap",
     "select_symbols_with_metadata_filter",
     "select_symbols_with_learned_filter",
     "select_top_symbols_from_diagnostics",

@@ -98,4 +98,3 @@ def add_action_labels(events: pd.DataFrame) -> pd.DataFrame:
     if "trade_return" in out.columns:
         keep.append("trade_return")
     return out[keep]
-
