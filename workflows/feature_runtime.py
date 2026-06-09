@@ -24,6 +24,7 @@ from features.feature_builders import (
     build_statement_quality_features,
     build_ta_classic_technical_features,
     build_time_calendar_feature_family,
+    build_ttm_financial_statement_features,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.section_utils import clear_section_record_cache, prime_section_record_cache
@@ -379,6 +380,38 @@ def _add_statement_quality_features(
     return merged
 
 
+def _add_ttm_financial_statement_features(
+    *,
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame,
+    merged: pd.DataFrame,
+    feature_columns: list[str],
+    grouped_feature_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    built = build_ttm_financial_statement_features(symbol_obj, target_index, df_prices=df_prices)
+    if built.df.empty:
+        return merged
+    merged = merged.join(built.df[built.feature_cols], how="left")
+    feature_columns.extend(built.feature_cols)
+    grouped_feature_columns["key_metrics_ttm"] = [
+        col for col in built.feature_cols if col.startswith("km_ttm__")
+    ]
+    grouped_feature_columns["ratios_ttm"] = [
+        col for col in built.feature_cols if col.startswith("rt_ttm__")
+    ]
+    grouped_feature_columns["income_statement_ttm"] = [
+        col for col in built.feature_cols if col.startswith("is_ttm__")
+    ]
+    grouped_feature_columns["cash_flow_ttm"] = [
+        col for col in built.feature_cols if col.startswith("cf_ttm__")
+    ]
+    grouped_feature_columns["balance_sheet_ttm"] = [
+        col for col in built.feature_cols if col.startswith("bs_ttm__")
+    ]
+    return merged
+
+
 def _add_event_features(
     *,
     symbol_obj: Symbol,
@@ -517,6 +550,15 @@ def build_symbol_feature_result(
         merged = _add_statement_quality_features(
             symbol_obj=symbol_obj,
             target_index=target_index,
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_ttm_financial_statements:
+        merged = _add_ttm_financial_statement_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
+            df_prices=df_prices,
             merged=merged,
             feature_columns=feature_columns,
             grouped_feature_columns=grouped_feature_columns,

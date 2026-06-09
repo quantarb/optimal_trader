@@ -12,25 +12,46 @@ def build_key_metrics_features(
     df_prices: pd.DataFrame | None = None,
     filing_lag_days: int = 45,
 ) -> BuiltFeatureSet:
-    sparse = load_section_payload(symbol_obj, "key_metrics", prefix="km__", keep_fields=None, filing_lag_days=filing_lag_days)
+    return _build_key_metrics_features(symbol_obj, target_index, section_key="key_metrics", prefix="km__", df_prices=df_prices, filing_lag_days=filing_lag_days)
+
+
+def build_key_metrics_ttm_features(
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame | None = None,
+    filing_lag_days: int = 45,
+) -> BuiltFeatureSet:
+    return _build_key_metrics_features(symbol_obj, target_index, section_key="key_metrics_ttm", prefix="km_ttm__", df_prices=df_prices, filing_lag_days=filing_lag_days)
+
+
+def _build_key_metrics_features(
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    *,
+    section_key: str,
+    prefix: str,
+    df_prices: pd.DataFrame | None,
+    filing_lag_days: int,
+) -> BuiltFeatureSet:
+    sparse = load_section_payload(symbol_obj, section_key, prefix=prefix, keep_fields=None, filing_lag_days=filing_lag_days)
     if sparse.empty:
         return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
     work = sparse.reset_index().sort_values(["symbol", "date"])
-    value_cols = [c for c in sparse.columns if c.startswith("km__") and pd.api.types.is_numeric_dtype(sparse[c])]
+    value_cols = [c for c in sparse.columns if c.startswith(prefix) and pd.api.types.is_numeric_dtype(sparse[c])]
     if not value_cols:
         return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
     daily = broadcast_sparse(sparse[value_cols].sort_index(), target_index)
 
-    daily_market_cap = _infer_daily_market_cap_from_sparse(work, target_index, df_prices)
+    daily_market_cap = _infer_daily_market_cap_from_sparse(work, target_index, df_prices, prefix)
     if daily_market_cap is not None:
-        daily["km__marketcap"] = daily_market_cap
+        daily[f"{prefix}marketcap"] = daily_market_cap
 
     if daily_market_cap is not None:
-        free_cf_yield_base = _broadcast_inferred_yield_base(work, "km__marketcap", "km__freecashflowyield", target_index)
+        free_cf_yield_base = _broadcast_inferred_yield_base(work, f"{prefix}marketcap", f"{prefix}freecashflowyield", target_index)
         if free_cf_yield_base is not None:
-            daily["km__freecashflowyield"] = safe_ratio(free_cf_yield_base, daily_market_cap)
+            daily[f"{prefix}freecashflowyield"] = safe_ratio(free_cf_yield_base, daily_market_cap)
 
-    return BuiltFeatureSet(df=daily, feature_cols=[c for c in daily.columns if c.startswith("km__")])
+    return BuiltFeatureSet(df=daily, feature_cols=[c for c in daily.columns if c.startswith(prefix)])
 
 
 def _broadcast_inferred_denominator(
@@ -71,11 +92,12 @@ def _infer_daily_market_cap_from_sparse(
     work: pd.DataFrame,
     target_index: pd.MultiIndex,
     df_prices: pd.DataFrame | None,
+    prefix: str = "km__",
 ) -> pd.Series | None:
     if df_prices is None or df_prices.empty or "close" not in df_prices.columns:
         return None
     shares_col = None
-    for candidate in ("km__sharesoutstanding", "km__weightedaverageshsout", "km__weightedaverageshsoutdil"):
+    for candidate in (f"{prefix}sharesoutstanding", f"{prefix}weightedaverageshsout", f"{prefix}weightedaverageshsoutdil"):
         if candidate in work.columns:
             shares_col = candidate
             break

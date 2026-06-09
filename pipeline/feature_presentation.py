@@ -152,10 +152,14 @@ def _infer_format(name: str, family: str) -> tuple[str, int]:
         return "ratio", 2
     if family in {
         "income_statement",
+        "income_statement_ttm",
         "cash_flow",
+        "cash_flow_ttm",
         "balance_sheet",
+        "balance_sheet_ttm",
         "financial_growth",
         "key_metrics",
+        "key_metrics_ttm",
     } and not any(token in lowered for token in ("ratio", "margin", "yield", "growth", "eps")):
         return "currency", 2
     if lowered.endswith(("volume", "_count", "shares", "rows")):
@@ -187,13 +191,18 @@ def _heuristic_display_name(name: str) -> str:
         "ta_overlap__",
         "ta_performance__",
         "is__",
+        "is_ttm__",
         "isg__",
         "cf__",
+        "cf_ttm__",
         "cfg__",
         "bs__",
+        "bs_ttm__",
         "bsg__",
         "fg__",
         "km__",
+        "km_ttm__",
+        "rt_ttm__",
         "ratio__",
         "evt__",
         "econ__",

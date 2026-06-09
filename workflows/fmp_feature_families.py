@@ -8,17 +8,17 @@ import numpy as np
 import pandas as pd
 
 from fmp.models import Symbol
-from features.balance_sheet_features import build_balance_sheet_features
+from features.balance_sheet_features import build_balance_sheet_features, build_balance_sheet_ttm_features
 from features.balance_sheet_growth_features import build_balance_sheet_growth_features
-from features.cash_flow_features import build_cash_flow_features
+from features.cash_flow_features import build_cash_flow_features, build_cash_flow_ttm_features
 from features.cash_flow_growth_features import build_cash_flow_growth_features
 from features.earnings_features import build_earnings_features
 from features.financial_growth_features import build_financial_growth_features
-from features.income_statement_features import build_income_statement_features
+from features.income_statement_features import build_income_statement_features, build_income_statement_ttm_features
 from features.income_statement_growth_features import build_income_statement_growth_features
-from features.key_metrics_features import build_key_metrics_features
-from features.ratios_features import build_ratios_features
-from features.section_utils import clear_section_record_cache, prime_section_record_cache
+from features.key_metrics_features import build_key_metrics_features, build_key_metrics_ttm_features
+from features.ratios_features import build_ratios_features, build_ratios_ttm_features
+from features.section_utils import clear_section_record_cache, daily_price_series, first_existing, prime_section_record_cache
 from features.time_features import build_time_calendar_features
 from django.db import close_old_connections
 
@@ -62,6 +62,11 @@ def _fmp_endpoint_builders(filing_lag_days: int) -> dict[str, Any]:
     return {
         "key_metrics": lambda symbol_obj, idx, px, market_cap, valuation_context: build_key_metrics_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
         "ratios": lambda symbol_obj, idx, px, market_cap, valuation_context: build_ratios_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
+        "key_metrics_ttm": lambda symbol_obj, idx, px, market_cap, valuation_context: build_key_metrics_ttm_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
+        "ratios_ttm": lambda symbol_obj, idx, px, market_cap, valuation_context: build_ratios_ttm_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
+        "income_statement_ttm": lambda symbol_obj, idx, px, market_cap, valuation_context: build_income_statement_ttm_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
+        "balance_sheet_ttm": lambda symbol_obj, idx, px, market_cap, valuation_context: build_balance_sheet_ttm_features(symbol_obj, idx, df_prices=px, market_cap=market_cap, filing_lag_days=filing_lag_days),
+        "cash_flow_ttm": lambda symbol_obj, idx, px, market_cap, valuation_context: build_cash_flow_ttm_features(symbol_obj, idx, df_prices=px, market_cap=market_cap, filing_lag_days=filing_lag_days),
         "income_statement": lambda symbol_obj, idx, px, market_cap, valuation_context: build_income_statement_features(symbol_obj, idx, df_prices=px, filing_lag_days=filing_lag_days),
         "income_statement_growth": lambda symbol_obj, idx, px, market_cap, valuation_context: build_income_statement_growth_features(symbol_obj, idx, valuation_frame=valuation_context, filing_lag_days=filing_lag_days),
         "balance_sheet": lambda symbol_obj, idx, px, market_cap, valuation_context: build_balance_sheet_features(symbol_obj, idx, df_prices=px, market_cap=market_cap, filing_lag_days=filing_lag_days),
@@ -89,15 +94,27 @@ def _build_fmp_endpoint_features_for_symbol(
             return code, {}, {}, "empty_index", 0.0
         symbol_prices = _price_frame_for_symbol(price_panel, code)
         symbol_market_cap = None
+        symbol_ttm_market_cap = None
         valuation_context = pd.DataFrame(index=symbol_index)
         frames: dict[str, pd.DataFrame] = {}
         cols_by_endpoint: dict[str, list[str]] = {}
         start_time = time.perf_counter()
         for endpoint_name, builder in endpoint_builders.items():
-            built = builder(symbol_obj, symbol_index, symbol_prices, symbol_market_cap, valuation_context)
+            market_cap = symbol_ttm_market_cap if endpoint_name.endswith("_ttm") else symbol_market_cap
+            built = builder(symbol_obj, symbol_index, symbol_prices, market_cap, valuation_context)
             active_cols = [c for c in built.feature_cols if c in built.df.columns and pd.api.types.is_numeric_dtype(built.df[c])]
             if endpoint_name == "key_metrics" and "km__marketcap" in built.df.columns:
                 symbol_market_cap = pd.to_numeric(built.df["km__marketcap"], errors="coerce")
+            if endpoint_name == "key_metrics_ttm" and "km_ttm__marketcap" in built.df.columns:
+                symbol_ttm_market_cap = pd.to_numeric(built.df["km_ttm__marketcap"], errors="coerce")
+            if endpoint_name == "income_statement_ttm" and symbol_ttm_market_cap is None:
+                close = daily_price_series(symbol_prices, symbol_index)
+                shares = first_existing(
+                    built.df,
+                    ("is_ttm__weightedaverageshsoutdil", "is_ttm__weightedaverageshsout"),
+                )
+                if close is not None and shares is not None:
+                    symbol_ttm_market_cap = shares.reindex(symbol_index) * close.reindex(symbol_index)
             if endpoint_name in {"key_metrics", "ratios", "income_statement", "balance_sheet", "cash_flow"} and not built.df.empty:
                 valuation_context = pd.concat([valuation_context, built.df], axis=1)
                 if valuation_context.columns.has_duplicates:

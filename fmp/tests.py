@@ -19,6 +19,16 @@ class EndpointRegistryTests(SimpleTestCase):
         self.assertIn("income_statement_growth", keys)
         self.assertIn("balance_sheet_growth", keys)
         self.assertIn("cash_flow_growth", keys)
+        self.assertIn("key_metrics_ttm", keys)
+        self.assertIn("ratios_ttm", keys)
+        self.assertIn("income_statement_ttm", keys)
+        self.assertIn("balance_sheet_ttm", keys)
+        self.assertIn("cash_flow_ttm", keys)
+
+        ttm_endpoints = {endpoint.key: endpoint for endpoint in endpoints if endpoint.key.endswith("_ttm")}
+        self.assertEqual(ttm_endpoints["income_statement_ttm"].max_rows, 1)
+        self.assertEqual(ttm_endpoints["balance_sheet_ttm"].max_rows, 1)
+        self.assertEqual(ttm_endpoints["cash_flow_ttm"].max_rows, 1)
 
     def test_endpoint_definitions_keep_raw_candidate_shapes(self):
         symbol_obj = Symbol(symbol="MSFT")

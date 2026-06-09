@@ -12,11 +12,32 @@ def build_ratios_features(
     df_prices: pd.DataFrame | None = None,
     filing_lag_days: int = 45,
 ) -> BuiltFeatureSet:
-    sparse = load_section_payload(symbol_obj, "ratios", prefix="rt__", keep_fields=None, filing_lag_days=filing_lag_days)
+    return _build_ratios_features(symbol_obj, target_index, section_key="ratios", prefix="rt__", df_prices=df_prices, filing_lag_days=filing_lag_days)
+
+
+def build_ratios_ttm_features(
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame | None = None,
+    filing_lag_days: int = 45,
+) -> BuiltFeatureSet:
+    return _build_ratios_features(symbol_obj, target_index, section_key="ratios_ttm", prefix="rt_ttm__", df_prices=df_prices, filing_lag_days=filing_lag_days)
+
+
+def _build_ratios_features(
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    *,
+    section_key: str,
+    prefix: str,
+    df_prices: pd.DataFrame | None,
+    filing_lag_days: int,
+) -> BuiltFeatureSet:
+    sparse = load_section_payload(symbol_obj, section_key, prefix=prefix, keep_fields=None, filing_lag_days=filing_lag_days)
     if sparse.empty:
         return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
     work = sparse.reset_index().sort_values(["symbol", "date"])
-    value_cols = [c for c in sparse.columns if c.startswith("rt__") and pd.api.types.is_numeric_dtype(sparse[c])]
+    value_cols = [c for c in sparse.columns if c.startswith(prefix) and pd.api.types.is_numeric_dtype(sparse[c])]
     if not value_cols:
         return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
     daily = broadcast_sparse(sparse[value_cols].sort_index(), target_index)
@@ -25,30 +46,30 @@ def build_ratios_features(
     if daily_price is not None:
         price_on_sparse = _price_on_sparse_dates(df_prices, work["date"]) if df_prices is not None and not df_prices.empty else None
         if price_on_sparse is not None:
-            eps_per_share = _broadcast_inferred_per_share(work, price_on_sparse, "rt__pricetoearningsratio", target_index)
-            book_value_per_share = _broadcast_inferred_per_share(work, price_on_sparse, "rt__pricetobookratio", target_index)
-            revenue_per_share = _broadcast_inferred_per_share(work, price_on_sparse, "rt__pricetosalesratio", target_index)
-            free_cash_flow_per_share = _broadcast_inferred_per_share(work, price_on_sparse, "rt__pricetofreecashflowratio", target_index)
-            operating_cash_flow_per_share = _broadcast_inferred_per_share(work, price_on_sparse, "rt__pricetooperatingcashflowratio", target_index)
+            eps_per_share = _broadcast_inferred_per_share(work, price_on_sparse, f"{prefix}pricetoearningsratio", target_index)
+            book_value_per_share = _broadcast_inferred_per_share(work, price_on_sparse, f"{prefix}pricetobookratio", target_index)
+            revenue_per_share = _broadcast_inferred_per_share(work, price_on_sparse, f"{prefix}pricetosalesratio", target_index)
+            free_cash_flow_per_share = _broadcast_inferred_per_share(work, price_on_sparse, f"{prefix}pricetofreecashflowratio", target_index)
+            operating_cash_flow_per_share = _broadcast_inferred_per_share(work, price_on_sparse, f"{prefix}pricetooperatingcashflowratio", target_index)
 
             if eps_per_share is not None:
-                daily["rt__pricetoearningsratio"] = safe_ratio(daily_price, eps_per_share)
+                daily[f"{prefix}pricetoearningsratio"] = safe_ratio(daily_price, eps_per_share)
             if book_value_per_share is not None:
-                daily["rt__pricetobookratio"] = safe_ratio(daily_price, book_value_per_share)
+                daily[f"{prefix}pricetobookratio"] = safe_ratio(daily_price, book_value_per_share)
             if revenue_per_share is not None:
-                daily["rt__pricetosalesratio"] = safe_ratio(daily_price, revenue_per_share)
+                daily[f"{prefix}pricetosalesratio"] = safe_ratio(daily_price, revenue_per_share)
             if free_cash_flow_per_share is not None:
-                daily["rt__pricetofreecashflowratio"] = safe_ratio(daily_price, free_cash_flow_per_share)
+                daily[f"{prefix}pricetofreecashflowratio"] = safe_ratio(daily_price, free_cash_flow_per_share)
             if operating_cash_flow_per_share is not None:
-                daily["rt__pricetooperatingcashflowratio"] = safe_ratio(daily_price, operating_cash_flow_per_share)
+                daily[f"{prefix}pricetooperatingcashflowratio"] = safe_ratio(daily_price, operating_cash_flow_per_share)
 
-        dividend_per_share = _broadcast_existing_series(work, "rt__dividendpershare", target_index)
+        dividend_per_share = _broadcast_existing_series(work, f"{prefix}dividendpershare", target_index)
         if dividend_per_share is not None:
             dividend_yield = safe_ratio(dividend_per_share, daily_price)
-            daily["rt__dividendyield"] = dividend_yield
-            daily["rt__dividendyieldpercentage"] = dividend_yield * 100.0
+            daily[f"{prefix}dividendyield"] = dividend_yield
+            daily[f"{prefix}dividendyieldpercentage"] = dividend_yield * 100.0
 
-    return BuiltFeatureSet(df=daily, feature_cols=[c for c in daily.columns if c.startswith("rt__")])
+    return BuiltFeatureSet(df=daily, feature_cols=[c for c in daily.columns if c.startswith(prefix)])
 
 
 def _daily_price_series(df_prices: pd.DataFrame | None, target_index: pd.MultiIndex) -> pd.Series | None:

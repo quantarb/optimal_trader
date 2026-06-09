@@ -207,12 +207,17 @@ def _normalize_payload_timestamp(date_val: Any, *, record_date: Any, filing_lag_
 def section_prefix(section_key: str) -> str:
     return {
         "key_metrics": "km__",
+        "key_metrics_ttm": "km_ttm__",
         "ratios": "rt__",
+        "ratios_ttm": "rt_ttm__",
         "income_statement": "is__",
+        "income_statement_ttm": "is_ttm__",
         "income_statement_growth": "isg__",
         "cash_flow": "cf__",
+        "cash_flow_ttm": "cf_ttm__",
         "cash_flow_growth": "cfg__",
         "balance_sheet": "bs__",
+        "balance_sheet_ttm": "bs_ttm__",
         "balance_sheet_growth": "bsg__",
         "financial_growth": "fg__",
         "earnings": "earn__",

@@ -132,3 +132,19 @@ class RepresentationEmbeddingBuilderTests(TestCase):
         grouped = infer_feature_family_columns(["close", "embedding_0", "embedding_1"])
         self.assertEqual(grouped["prices_div_adj"], ["close"])
         self.assertEqual(grouped["representation_embedding"], ["embedding_0", "embedding_1"])
+
+    def test_infer_feature_family_columns_keeps_ttm_families_separate(self):
+        grouped = infer_feature_family_columns(
+            [
+                "km_ttm__marketcap",
+                "rt_ttm__currentratio",
+                "is_ttm__revenue",
+                "cf_ttm__freecashflow",
+                "bs_ttm__totalassets",
+            ]
+        )
+        self.assertEqual(grouped["key_metrics_ttm"], ["km_ttm__marketcap"])
+        self.assertEqual(grouped["ratios_ttm"], ["rt_ttm__currentratio"])
+        self.assertEqual(grouped["income_statement_ttm"], ["is_ttm__revenue"])
+        self.assertEqual(grouped["cash_flow_ttm"], ["cf_ttm__freecashflow"])
+        self.assertEqual(grouped["balance_sheet_ttm"], ["bs_ttm__totalassets"])

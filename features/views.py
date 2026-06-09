@@ -20,6 +20,7 @@ from features.feature_builders import (
     build_price_technical_features,
     build_statement_quality_features,
     build_ta_classic_technical_features,
+    build_ttm_financial_statement_features,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.naming import feature_display_name
@@ -86,6 +87,7 @@ def _default_feature_preview_data(symbol: str) -> dict[str, Any]:
         "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
+        "include_ttm_financial_statements": False,
         "include_event_features": True,
         "include_ownership_features": True,
         "include_economic_indicators": True,
@@ -101,6 +103,7 @@ def _default_feature_form_data() -> dict[str, Any]:
         "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
+        "include_ttm_financial_statements": False,
         "include_event_features": True,
         "include_ownership_features": True,
         "include_economic_indicators": True,
@@ -131,6 +134,10 @@ def _feature_form_toggle_data(source: dict[str, Any] | None = None) -> dict[str,
         ),
         "include_fundamental_change": _as_bool(raw.get("include_fundamental_change"), bool(defaults["include_fundamental_change"])),
         "include_statement_quality": _as_bool(raw.get("include_statement_quality"), bool(defaults["include_statement_quality"])),
+        "include_ttm_financial_statements": _as_bool(
+            raw.get("include_ttm_financial_statements"),
+            bool(defaults["include_ttm_financial_statements"]),
+        ),
         "include_event_features": _as_bool(raw.get("include_event_features"), bool(defaults["include_event_features"])),
         "include_ownership_features": _as_bool(raw.get("include_ownership_features"), bool(defaults["include_ownership_features"])),
         "include_economic_indicators": _as_bool(raw.get("include_economic_indicators"), bool(defaults["include_economic_indicators"])),
@@ -163,6 +170,11 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance",
         "key_metrics",
         "ratios",
+        "key_metrics_ttm",
+        "ratios_ttm",
+        "income_statement_ttm",
+        "cash_flow_ttm",
+        "balance_sheet_ttm",
         "income_statement",
         "income_statement_growth",
         "cash_flow",
@@ -188,6 +200,11 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance": "Technical Performance",
         "key_metrics": "Key Metrics",
         "ratios": "Ratios",
+        "key_metrics_ttm": "Key Metrics TTM",
+        "ratios_ttm": "Ratios TTM",
+        "income_statement_ttm": "Income Statement TTM",
+        "cash_flow_ttm": "Cash Flow TTM",
+        "balance_sheet_ttm": "Balance Sheet TTM",
         "income_statement": "Income Statement",
         "income_statement_growth": "Income Statement Growth",
         "cash_flow": "Cash Flow",
@@ -251,6 +268,11 @@ def _section_toggle_name(section_key: str) -> str:
         "technical_performance": "include_ta_classic_technicals",
         "key_metrics": "include_fundamental_change",
         "ratios": "include_fundamental_change",
+        "key_metrics_ttm": "include_ttm_financial_statements",
+        "ratios_ttm": "include_ttm_financial_statements",
+        "income_statement_ttm": "include_ttm_financial_statements",
+        "cash_flow_ttm": "include_ttm_financial_statements",
+        "balance_sheet_ttm": "include_ttm_financial_statements",
         "income_statement": "include_statement_quality",
         "income_statement_growth": "include_statement_quality",
         "cash_flow": "include_statement_quality",
@@ -510,6 +532,23 @@ def _build_feature_preview_result(
                     "balance_sheet_growth",
                     "financial_growth",
                 ):
+                    source_counts[key] = len(grouped_feature_columns[key])
+
+        if data.get("include_ttm_financial_statements"):
+            ttm_sections = {
+                "key_metrics_ttm": "km_ttm__",
+                "ratios_ttm": "rt_ttm__",
+                "income_statement_ttm": "is_ttm__",
+                "cash_flow_ttm": "cf_ttm__",
+                "balance_sheet_ttm": "bs_ttm__",
+            }
+            selected_sections.update(ttm_sections)
+            built = build_ttm_financial_statement_features(symbol_obj, target_index, df_prices=df_prices)
+            if not built.df.empty:
+                merged = merged.join(built.df[built.feature_cols], how="left")
+                feature_columns.extend(built.feature_cols)
+                for key, prefix in ttm_sections.items():
+                    grouped_feature_columns[key] = [col for col in built.feature_cols if col.startswith(prefix)]
                     source_counts[key] = len(grouped_feature_columns[key])
 
         if data.get("include_event_features"):

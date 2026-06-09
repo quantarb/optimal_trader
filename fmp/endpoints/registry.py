@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from .analyst_estimates import build as build_analyst_estimates
 from .balance_sheet import build as build_balance_sheet
+from .balance_sheet_ttm import build as build_balance_sheet_ttm
 from .balance_sheet_growth import build as build_balance_sheet_growth
 from .cash_flow import build as build_cash_flow
+from .cash_flow_ttm import build as build_cash_flow_ttm
 from .cash_flow_growth import build as build_cash_flow_growth
 from .dividends import build as build_dividends
 from .earnings import build as build_earnings
@@ -12,11 +14,13 @@ from .financial_growth import build as build_financial_growth
 from .grades import build as build_grades
 from .grades_historical import build as build_grades_historical
 from .income_statement import build as build_income_statement
+from .income_statement_ttm import build as build_income_statement_ttm
 from .income_statement_growth import build as build_income_statement_growth
 from .insider_trading import build as build_insider_trading
 from .institutional_holders import build as build_institutional_holders
 from .key_executives import build as build_key_executives
 from .key_metrics import build as build_key_metrics
+from .key_metrics_ttm import build as build_key_metrics_ttm
 from .mutual_fund_holders import build as build_mutual_fund_holders
 from .news import build as build_news
 from .peer_symbols import build as build_peer_symbols
@@ -27,6 +31,7 @@ from .quote import build as build_quote
 from .ratings_historical import build as build_ratings_historical
 from .ratings_snapshot import build as build_ratings_snapshot
 from .ratios import build as build_ratios
+from .ratios_ttm import build as build_ratios_ttm
 from .revenue_geographic_segmentation import build as build_revenue_geographic_segmentation
 from .revenue_product_segmentation import build as build_revenue_product_segmentation
 from .sec_filings import build as build_sec_filings
@@ -37,7 +42,9 @@ _BUILDERS = (
     build_prices_div_adj,
     build_prices_unadjusted,
     build_key_metrics,
+    build_key_metrics_ttm,
     build_ratios,
+    build_ratios_ttm,
     build_profile,
     build_quote,
     build_dividends,
@@ -49,10 +56,13 @@ _BUILDERS = (
     build_grades,
     build_grades_historical,
     build_income_statement,
+    build_income_statement_ttm,
     build_income_statement_growth,
     build_balance_sheet,
+    build_balance_sheet_ttm,
     build_balance_sheet_growth,
     build_cash_flow,
+    build_cash_flow_ttm,
     build_cash_flow_growth,
     build_financial_growth,
     build_key_executives,

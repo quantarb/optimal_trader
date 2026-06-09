@@ -4,11 +4,16 @@ from typing import Sequence
 
 
 FUNDAMENTAL_PREFIXES = {
+    "key_metrics_ttm": ("km_ttm__",),
+    "ratios_ttm": ("rt_ttm__",),
     "key_metrics": ("km__",),
     "ratios": ("ratio__", "rt__"),
 }
 
 STATEMENT_PREFIXES = {
+    "income_statement_ttm": ("is_ttm__",),
+    "cash_flow_ttm": ("cf_ttm__",),
+    "balance_sheet_ttm": ("bs_ttm__",),
     "income_statement": ("is__",),
     "income_statement_growth": ("isg__",),
     "cash_flow": ("cf__",),
@@ -68,6 +73,11 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         "time_calendar": [],
         "key_metrics": [],
         "ratios": [],
+        "key_metrics_ttm": [],
+        "ratios_ttm": [],
+        "income_statement_ttm": [],
+        "cash_flow_ttm": [],
+        "balance_sheet_ttm": [],
         "income_statement": [],
         "income_statement_growth": [],
         "cash_flow": [],

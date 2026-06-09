@@ -19,6 +19,11 @@ SECTION_ORDER = [
     "time_calendar",
     "key_metrics",
     "ratios",
+    "key_metrics_ttm",
+    "ratios_ttm",
+    "income_statement_ttm",
+    "cash_flow_ttm",
+    "balance_sheet_ttm",
     "income_statement",
     "income_statement_growth",
     "cash_flow",
@@ -47,6 +52,11 @@ SECTION_LABELS = {
     "time_calendar": "Time Calendar",
     "key_metrics": "Key Metrics",
     "ratios": "Ratios",
+    "key_metrics_ttm": "Key Metrics TTM",
+    "ratios_ttm": "Ratios TTM",
+    "income_statement_ttm": "Income Statement TTM",
+    "cash_flow_ttm": "Cash Flow TTM",
+    "balance_sheet_ttm": "Balance Sheet TTM",
     "income_statement": "Income Statement",
     "income_statement_growth": "Income Statement Growth",
     "cash_flow": "Cash Flow",
@@ -77,6 +87,13 @@ REPRESENTATION_EMBEDDING_FAMILY_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "time_calendar": ("time_calendar",),
     "valuation_quality": ("key_metrics", "ratios"),
+    "ttm_financial_statements": (
+        "key_metrics_ttm",
+        "ratios_ttm",
+        "income_statement_ttm",
+        "cash_flow_ttm",
+        "balance_sheet_ttm",
+    ),
     "income_statement": ("income_statement", "income_statement_growth"),
     "cash_flow": ("cash_flow", "cash_flow_growth"),
     "balance_sheet": ("balance_sheet", "balance_sheet_growth"),
@@ -120,6 +137,16 @@ def needed_sparse_sections(feature_flags: FeatureToggleSpec | dict[str, Any]) ->
     sections: list[str] = []
     if toggles.include_fundamental_change:
         sections.extend(["key_metrics", "ratios"])
+    if toggles.include_ttm_financial_statements:
+        sections.extend(
+            [
+                "key_metrics_ttm",
+                "ratios_ttm",
+                "income_statement_ttm",
+                "cash_flow_ttm",
+                "balance_sheet_ttm",
+            ]
+        )
     if getattr(toggles, "include_time_calendar_features", False):
         sections.extend(["earnings", "dividends", "splits"])
     if toggles.include_statement_quality:
