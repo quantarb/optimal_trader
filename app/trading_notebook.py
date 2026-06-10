@@ -51,6 +51,11 @@ def bootstrap_repo(repo_root: Path) -> None:
     load_repo_env(repo_root)
     os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
+    import django
+    from django.apps import apps
+
+    if not apps.ready:
+        django.setup()
 
 
 def make_live_trade_notebook_config(
@@ -115,7 +120,7 @@ def load_recent_similarity_build(
     *,
     max_age: pd.Timedelta = pd.Timedelta(days=1),
 ):
-    from fmp.refresh import expected_latest_price_date_from_market_clock
+    from fmp.market_clock import expected_latest_price_date_from_market_clock
 
     artifact_dir = Path(str(cfg["runtime"]["artifact_dir"])).expanduser().resolve()
     required_paths = [artifact_dir / name for name in REQUIRED_SIMILARITY_ARTIFACTS]

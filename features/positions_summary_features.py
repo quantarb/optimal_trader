@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
 
-from fmp.models import Symbol
 from fmp.positions_summary import POSITIONS_SUMMARY_SECTION_KEY, load_positions_summary_frame
 from features.section_utils import (
     BuiltFeatureSet,
@@ -14,6 +15,9 @@ from features.section_utils import (
     safe_ratio,
     target_dates,
 )
+
+if TYPE_CHECKING:
+    from fmp.models import Symbol
 
 
 POSITION_PREFIX = "ps__"

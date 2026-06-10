@@ -66,6 +66,20 @@ def url_responds(url: str, *, timeout: float = 1.0) -> bool:
         return False
 
 
+def _python_has_module(executable: str, module: str) -> bool:
+    """Return True if the given Python executable can import the module."""
+    try:
+        subprocess.run(
+            [executable, "-c", f"import {module}"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
 class StreamlitProcess:
     """Own a Streamlit subprocess started from a notebook session."""
 
@@ -74,6 +88,55 @@ class StreamlitProcess:
         self.app_path = Path(app_path).resolve()
         self.logger = logger
         self.process: subprocess.Popen[str] | None = None
+
+    def _ensure_streamlit_available(self) -> None:
+        """Ensure the 'streamlit' package (and friends) are importable in the current interpreter.
+
+        If missing, best-effort install from app/requirements_streamlit.txt using pip.
+        On failure, raise a clear actionable error.
+        """
+        if _python_has_module(sys.executable, "streamlit"):
+            return
+
+        self.logger("streamlit not found in the current Python environment.")
+
+        req_file = self.repo_root / "app" / "requirements_streamlit.txt"
+        if req_file.exists():
+            self.logger(f"Attempting to install streamlit requirements from {req_file} ...")
+            self.logger("(This may take a minute the first time, especially for faiss-cpu wheels.)")
+            try:
+                # Use the same Python that the notebook (and future child) is using.
+                install_cmd = [sys.executable, "-m", "pip", "install", "-r", str(req_file)]
+                # Run install and let its output go to the notebook logs for transparency.
+                proc = subprocess.run(
+                    install_cmd,
+                    cwd=str(self.repo_root),
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.stdout:
+                    for line in proc.stdout.strip().splitlines()[-30:]:  # last bit of output
+                        self.logger(f"  pip: {line}")
+                if proc.returncode == 0 and _python_has_module(sys.executable, "streamlit"):
+                    self.logger("Successfully installed streamlit requirements.")
+                    return
+                if proc.stderr:
+                    for line in proc.stderr.strip().splitlines()[-20:]:
+                        self.logger(f"  pip error: {line}")
+            except Exception as exc:
+                self.logger(f"Auto-install attempt raised: {exc}")
+
+        # Still not available — give the user a precise command they can run.
+        py = sys.executable
+        raise RuntimeError(
+            "streamlit is not installed in the Python environment used by this notebook "
+            f"({py}).\n\n"
+            "To fix, run one of the following in your terminal (with the same conda env active):\n\n"
+            f"    {py} -m pip install -r app/requirements_streamlit.txt\n\n"
+            "Or (conda):\n\n"
+            "    conda install -c conda-forge streamlit faiss-cpu\n\n"
+            "Then re-run the cell that calls streamlit_process.start(...)."
+        )
 
     def start(
         self,
@@ -108,6 +171,9 @@ class StreamlitProcess:
             return root_url
 
         self.logger(f"Starting Streamlit trading app: {self.app_path} on port {port}")
+
+        self._ensure_streamlit_available()
+
         self.process = subprocess.Popen(
             [
                 sys.executable,
@@ -130,7 +196,15 @@ class StreamlitProcess:
                 return root_url
             if self.process.poll() is not None:
                 output = self.process.stdout.read() if self.process.stdout is not None else ""
-                raise RuntimeError(f"Streamlit exited before serving {root_url}: {output[-2000:]}")
+                tail = (output or "")[-2000:]
+                hint = ""
+                if "No module named streamlit" in tail or "No module named 'streamlit'" in tail:
+                    hint = (
+                        "\n\nHint: streamlit is missing from the environment. "
+                        "The launcher tried to auto-install from app/requirements_streamlit.txt. "
+                        "You can also run:  python -m pip install -r app/requirements_streamlit.txt"
+                    )
+                raise RuntimeError(f"Streamlit exited before serving {root_url}: {tail}{hint}")
             time.sleep(1)
         raise RuntimeError(f"Streamlit did not respond at {root_url}.")
 

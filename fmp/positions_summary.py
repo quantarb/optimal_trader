@@ -5,10 +5,14 @@ from datetime import date
 from typing import Any
 
 import pandas as pd
+from django.db import DatabaseError
 from django.db.models import Count, Max, Min
 from django.utils import timezone
 
-from .models import PositionSummaryObservation, PositionSummarySeries, Symbol
+# Note: Django models (PositionSummarySeries etc.) are imported locally inside
+# the functions that touch the DB. This (plus from __future__ annotations)
+# keeps importing this module safe before django.setup(). The tables are
+# optional; callers fall back to raw section payloads when data/tables absent.
 
 
 POSITIONS_SUMMARY_SECTION_KEY = "positions_summary"
@@ -180,84 +184,110 @@ def normalize_positions_summary_record(symbol: Symbol, payload: dict[str, Any]) 
 
 
 def save_positions_summary_records(symbol: Symbol, records: list[dict[str, Any]]) -> None:
+    from .models import PositionSummaryObservation, PositionSummarySeries
+
     normalized_records = [normalize_positions_summary_record(symbol, record) for record in list(records or [])]
     normalized_records = [record for record in normalized_records if record is not None]
-    series, _created = PositionSummarySeries.objects.get_or_create(symbol=symbol)
+    try:
+        series, _created = PositionSummarySeries.objects.get_or_create(symbol=symbol)
+    except DatabaseError:
+        # Table(s) do not exist (migrations not run, or using an older DB snapshot).
+        # The raw section payload path can still provide data for features.
+        return
     if not normalized_records:
-        series.last_fetched_at = timezone.now()
-        series.save(update_fields=["last_fetched_at", "last_updated"])
+        try:
+            series.last_fetched_at = timezone.now()
+            series.save(update_fields=["last_fetched_at", "last_updated"])
+        except DatabaseError:
+            pass
         return
 
     for record in normalized_records:
-        PositionSummaryObservation.objects.update_or_create(
-            series=series,
-            report_year=int(record["report_year"]),
-            report_quarter=int(record["report_quarter"]),
-            defaults={
-                "report_date": record.get("report_date"),
-                "investor_count": record.get("investor_count"),
-                "shares_held": record.get("shares_held"),
-                "investment_value": record.get("investment_value"),
-                "ownership_pct": record.get("ownership_pct"),
-                "shares_change": record.get("shares_change"),
-                "investment_change": record.get("investment_change"),
-                "ownership_pct_change": record.get("ownership_pct_change"),
-                "put_call_ratio": record.get("put_call_ratio"),
-                "call_count": record.get("call_count"),
-                "put_count": record.get("put_count"),
-                "payload": record.get("payload") or {},
-            },
-        )
+        try:
+            PositionSummaryObservation.objects.update_or_create(
+                series=series,
+                report_year=int(record["report_year"]),
+                report_quarter=int(record["report_quarter"]),
+                defaults={
+                    "report_date": record.get("report_date"),
+                    "investor_count": record.get("investor_count"),
+                    "shares_held": record.get("shares_held"),
+                    "investment_value": record.get("investment_value"),
+                    "ownership_pct": record.get("ownership_pct"),
+                    "shares_change": record.get("shares_change"),
+                    "investment_change": record.get("investment_change"),
+                    "ownership_pct_change": record.get("ownership_pct_change"),
+                    "put_call_ratio": record.get("put_call_ratio"),
+                    "call_count": record.get("call_count"),
+                    "put_count": record.get("put_count"),
+                    "payload": record.get("payload") or {},
+                },
+            )
+        except DatabaseError:
+            return
 
-    aggregate = PositionSummaryObservation.objects.filter(series=series).aggregate(
-        min_date=Min("report_date"),
-        max_date=Max("report_date"),
-        count=Count("id"),
-    )
-    series.last_fetched_at = timezone.now()
-    series.min_report_date = aggregate["min_date"]
-    series.max_report_date = aggregate["max_date"]
-    latest_row = max(normalized_records, key=lambda record: (int(record["report_year"]), int(record["report_quarter"])))
-    series.last_year = int(latest_row["report_year"])
-    series.last_quarter = int(latest_row["report_quarter"])
-    series.report_count = int(aggregate["count"] or 0)
-    series.save(
-        update_fields=[
-            "last_fetched_at",
-            "min_report_date",
-            "max_report_date",
-            "last_year",
-            "last_quarter",
-            "report_count",
-            "last_updated",
-        ]
-    )
+    try:
+        aggregate = PositionSummaryObservation.objects.filter(series=series).aggregate(
+            min_date=Min("report_date"),
+            max_date=Max("report_date"),
+            count=Count("id"),
+        )
+        series.last_fetched_at = timezone.now()
+        series.min_report_date = aggregate["min_date"]
+        series.max_report_date = aggregate["max_date"]
+        latest_row = max(normalized_records, key=lambda record: (int(record["report_year"]), int(record["report_quarter"])))
+        series.last_year = int(latest_row["report_year"])
+        series.last_quarter = int(latest_row["report_quarter"])
+        series.report_count = int(aggregate["count"] or 0)
+        series.save(
+            update_fields=[
+                "last_fetched_at",
+                "min_report_date",
+                "max_report_date",
+                "last_year",
+                "last_quarter",
+                "report_count",
+                "last_updated",
+            ]
+        )
+    except DatabaseError:
+        pass
 
 
 def load_positions_summary_frame(symbol: Symbol) -> pd.DataFrame:
-    series = PositionSummarySeries.objects.filter(symbol=symbol).first()
+    from .models import PositionSummaryObservation, PositionSummarySeries
+
+    try:
+        series = PositionSummarySeries.objects.filter(symbol=symbol).first()
+    except DatabaseError:
+        # Table does not exist yet (migrations not applied for positions-summary models,
+        # or the DB is an older snapshot). Fall back to raw section payload or no data.
+        return pd.DataFrame()
     if series is None:
         return pd.DataFrame()
-    rows = (
-        PositionSummaryObservation.objects.filter(series=series)
-        .order_by("report_date", "report_year", "report_quarter")
-        .values(
-            "report_date",
-            "report_year",
-            "report_quarter",
-            "investor_count",
-            "shares_held",
-            "investment_value",
-            "ownership_pct",
-            "shares_change",
-            "investment_change",
-            "ownership_pct_change",
-            "put_call_ratio",
-            "call_count",
-            "put_count",
+    try:
+        rows = (
+            PositionSummaryObservation.objects.filter(series=series)
+            .order_by("report_date", "report_year", "report_quarter")
+            .values(
+                "report_date",
+                "report_year",
+                "report_quarter",
+                "investor_count",
+                "shares_held",
+                "investment_value",
+                "ownership_pct",
+                "shares_change",
+                "investment_change",
+                "ownership_pct_change",
+                "put_call_ratio",
+                "call_count",
+                "put_count",
+            )
         )
-    )
-    records = list(rows)
+        records = list(rows)
+    except DatabaseError:
+        return pd.DataFrame()
     if not records:
         return pd.DataFrame()
     frame = pd.DataFrame(records)

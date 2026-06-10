@@ -16,6 +16,7 @@ from features.macro import MacroFeatureConfig
 
 from .endpoints import get_symbol_endpoint_definitions
 from .endpoints.prices_div_adj import build as build_prices_div_adj_endpoint
+from .market_clock import expected_latest_price_date_from_market_clock
 from .models import (
     EconomicIndicatorObservation,
     EconomicIndicatorSeries,
@@ -376,13 +377,6 @@ def symbol_needs_fundamental_refresh(
         if section_max_date < anchor_date:
             return True, f"{section_key}_lt_anchor_{anchor_date.isoformat()}"
     return False, "fresh_fundamental_sections"
-
-
-def expected_latest_price_date_from_market_clock() -> Any:
-    now_et = pd.Timestamp.now(tz="America/New_York")
-    if now_et.weekday() < 5 and now_et.hour >= 17:
-        return now_et.date()
-    return (now_et.normalize() - pd.offsets.BDay(1)).date()
 
 
 def symbol_needs_required_refresh(symbol_obj: Symbol, *, target_start_date=None, target_end_date=None) -> tuple[bool, str]:

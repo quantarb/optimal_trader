@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from django.db import DatabaseError
 
-from fmp.models import Symbol, WorkflowState
-
 if TYPE_CHECKING:
     from django.http import HttpRequest
 
@@ -21,6 +19,8 @@ class UniverseArtifactRecord:
 
 
 def workflow_symbols_from_request(request: HttpRequest) -> list[str]:
+    from fmp.models import WorkflowState
+
     artifact_id = selected_universe_artifact_id(request)
     if artifact_id > 0:
         selected = universe_symbols_from_artifact_id(artifact_id)
@@ -85,6 +85,8 @@ def universe_symbols_from_artifact_id(artifact_id: int) -> list[str]:
 
 
 def build_symbol_choices(preferred_symbols: list[str] | None = None) -> list[tuple[str, str]]:
+    from fmp.models import Symbol
+
     rows = Symbol.objects.order_by("symbol").values_list("symbol", "company_name")
     label_map: dict[str, str] = {}
     for symbol, company_name in rows:
@@ -109,6 +111,8 @@ def build_symbol_choices(preferred_symbols: list[str] | None = None) -> list[tup
 
 
 def default_feature_symbol(request: HttpRequest, fallback: str = "AAPL") -> str:
+    from fmp.models import Symbol
+
     symbols = workflow_symbols_from_request(request)
     if symbols:
         return symbols[0]
