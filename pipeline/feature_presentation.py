@@ -159,7 +159,6 @@ def _infer_format(name: str, family: str) -> tuple[str, int]:
         "balance_sheet_ttm",
         "financial_growth",
         "key_metrics",
-        "key_metrics_ttm",
     } and not any(token in lowered for token in ("ratio", "margin", "yield", "growth", "eps")):
         return "currency", 2
     if lowered.endswith(("volume", "_count", "shares", "rows")):

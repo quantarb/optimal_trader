@@ -5,7 +5,8 @@ from typing import Any, Sequence
 import pandas as pd
 
 from features.macro import MacroFeatureConfig
-from trading.live_trade import (
+
+from .refresh import (
     REQUIRED_SCORING_HISTORICAL_SECTIONS,
     plan_symbol_price_refresh_from_fmp,
     plan_symbol_section_refresh_from_fmp,

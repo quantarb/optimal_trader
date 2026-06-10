@@ -11,7 +11,7 @@ import pandas as pd
 from domain.models.datasets import dedupe_label_frame
 from domain.models.feature_families import infer_feature_family_columns
 from ml.base import FitSpec
-from ml.frameworks.sklearn import SklearnMoERFClassifier, SklearnRFClassifier, SklearnRFRegressor
+from ml.frameworks.sklearn import SklearnMoERFClassifier, SklearnRFClassifier, SklearnRFRegressor, SklearnRoutedMoERFClassifier
 from pipeline.contracts import normalize_prediction_output_frame
 from settings import BASE_DIR
 
@@ -184,6 +184,36 @@ def _train_moe_classifier(
     return model
 
 
+def _train_routed_moe_classifier(
+    *,
+    train_df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    model_params: dict[str, Any],
+    target_col: str,
+    split_ratio: float,
+    route_col: str,
+    validation_df: pd.DataFrame | None = None,
+) -> Any:
+    """Train sector- or industry-routed experts from FMP profile classifications."""
+
+    df = _attach_target(train_df, target_col=target_col, task_type="classification")
+    val_df = _attach_target(validation_df, target_col=target_col, task_type="classification") if validation_df is not None else None
+    if route_col not in df.columns:
+        raise ValueError(f"{route_col.title()} MoE requires FMP profile metadata column {route_col!r}.")
+    spec = FitSpec(
+        feature_cols=list(feature_cols),
+        target_col=target_col,
+        weight_col="sample_weight",
+        split_ratio=float(split_ratio),
+        model_tag=f"{route_col}-routed-moe",
+    )
+    clean_params = dict(model_params)
+    clean_params.pop("route_col", None)
+    model = SklearnRoutedMoERFClassifier(route_col=route_col, **clean_params)
+    model.fit(df, spec, verbose=False, validation_df=val_df)
+    return model
+
+
 def fit_model_for_algorithm(
     *,
     algorithm: str,
@@ -234,6 +264,26 @@ def fit_model_for_algorithm(
             split_ratio=float(split_ratio),
             validation_df=validation_df,
             feature_families=model_params.get("feature_families"),
+        )
+    if algorithm_value == "sector_moe_random_forest_classifier":
+        return _train_routed_moe_classifier(
+            train_df=train_df,
+            feature_cols=feature_cols,
+            model_params=model_params,
+            target_col=target_col,
+            split_ratio=float(split_ratio),
+            validation_df=validation_df,
+            route_col="sector",
+        )
+    if algorithm_value == "industry_moe_random_forest_classifier":
+        return _train_routed_moe_classifier(
+            train_df=train_df,
+            feature_cols=feature_cols,
+            model_params=model_params,
+            target_col=target_col,
+            split_ratio=float(split_ratio),
+            validation_df=validation_df,
+            route_col="industry",
         )
     raise ValueError(f"Unsupported pipeline training algorithm: {algorithm!r}")
 

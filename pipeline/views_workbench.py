@@ -87,6 +87,7 @@ def pipeline_lab_view(
                     target_job=str(data["job_type"]),
                     mode="strict",
                     config={
+                        "algorithm": str(data.get("algorithm") or "random_forest_classifier"),
                         "target_col": str(data.get("target_col") or ""),
                         "split_ratio": float(data["split_ratio"]),
                         "research_scope": str(data.get("research_scope") or ""),

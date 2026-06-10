@@ -19,8 +19,12 @@ from fmp.models import EconomicIndicatorSeries, Symbol, TreasuryRateSeries
 from features.feature_builders import (
     build_event_features,
     build_fundamental_change_features,
+    build_industry_performance_features,
+    build_industry_pe_features,
     build_ownership_features,
     build_price_technical_features,
+    build_sector_performance_features,
+    build_sector_pe_features,
     build_statement_quality_features,
     build_ta_classic_technical_features,
     build_time_calendar_feature_family,
@@ -394,12 +398,6 @@ def _add_ttm_financial_statement_features(
         return merged
     merged = merged.join(built.df[built.feature_cols], how="left")
     feature_columns.extend(built.feature_cols)
-    grouped_feature_columns["key_metrics_ttm"] = [
-        col for col in built.feature_cols if col.startswith("km_ttm__")
-    ]
-    grouped_feature_columns["ratios_ttm"] = [
-        col for col in built.feature_cols if col.startswith("rt_ttm__")
-    ]
     grouped_feature_columns["income_statement_ttm"] = [
         col for col in built.feature_cols if col.startswith("is_ttm__")
     ]
@@ -465,6 +463,45 @@ def _add_macro_features(
     merged = merged.join(daily_frame[macro_cols], how="left")
     feature_columns.extend(macro_cols)
     grouped_feature_columns[family_key] = macro_cols
+    return merged
+
+
+def _add_classification_performance_features(
+    *,
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    df_prices: pd.DataFrame,
+    family_key: str,
+    merged: pd.DataFrame,
+    feature_columns: list[str],
+    grouped_feature_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    builder = build_sector_performance_features if family_key == "sector_performance" else build_industry_performance_features
+    built = builder(symbol_obj, target_index, df_prices=df_prices)
+    if built.df.empty or not built.feature_cols:
+        return merged
+    merged = merged.join(built.df[built.feature_cols], how="left")
+    feature_columns.extend(built.feature_cols)
+    grouped_feature_columns[family_key] = list(built.feature_cols)
+    return merged
+
+
+def _add_classification_pe_features(
+    *,
+    symbol_obj: Symbol,
+    target_index: pd.MultiIndex,
+    family_key: str,
+    merged: pd.DataFrame,
+    feature_columns: list[str],
+    grouped_feature_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    builder = build_sector_pe_features if family_key == "sector_pe" else build_industry_pe_features
+    built = builder(symbol_obj, target_index)
+    if built.df.empty or not built.feature_cols:
+        return merged
+    merged = merged.join(built.df[built.feature_cols], how="left")
+    feature_columns.extend(built.feature_cols)
+    grouped_feature_columns[family_key] = list(built.feature_cols)
     return merged
 
 
@@ -593,6 +630,44 @@ def build_symbol_feature_result(
             macro_df=treasury_df,
             target_index=target_index,
             family_key="treasury_rates",
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_sector_performance:
+        merged = _add_classification_performance_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
+            df_prices=df_prices,
+            family_key="sector_performance",
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_industry_performance:
+        merged = _add_classification_performance_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
+            df_prices=df_prices,
+            family_key="industry_performance",
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_sector_pe:
+        merged = _add_classification_pe_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
+            family_key="sector_pe",
+            merged=merged,
+            feature_columns=feature_columns,
+            grouped_feature_columns=grouped_feature_columns,
+        )
+    if build_spec.toggles.include_industry_pe:
+        merged = _add_classification_pe_features(
+            symbol_obj=symbol_obj,
+            target_index=target_index,
+            family_key="industry_pe",
             merged=merged,
             feature_columns=feature_columns,
             grouped_feature_columns=grouped_feature_columns,

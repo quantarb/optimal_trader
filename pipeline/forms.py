@@ -8,7 +8,14 @@ from .models import StrategyDefinition
 
 MODEL_ALGORITHM_CHOICES = (
     ("random_forest_classifier", "Random Forest Classifier"),
+    ("moe_random_forest_classifier", "Feature Family MoE Random Forest"),
+    ("sector_moe_random_forest_classifier", "Sector MoE Random Forest"),
+    ("industry_moe_random_forest_classifier", "Industry MoE Random Forest"),
     ("random_forest_regressor", "Random Forest Regressor"),
+)
+
+CLASSIFIER_ALGORITHM_CHOICES = tuple(
+    choice for choice in MODEL_ALGORITHM_CHOICES if choice[0] != "random_forest_regressor"
 )
 
 
@@ -31,6 +38,12 @@ class FitModelPipelineForm(forms.Form):
             ("fit_regressor", "Fit Regressor"),
             ("fit_mtl", "Fit Multi-Task"),
         )
+    )
+    algorithm = forms.ChoiceField(
+        choices=CLASSIFIER_ALGORITHM_CHOICES,
+        required=False,
+        initial="random_forest_classifier",
+        help_text="Used by Fit Classifier. Sector and industry MoE routes use FMP profile classifications.",
     )
     feature_artifact_id = forms.TypedChoiceField(coerce=int, choices=(), empty_value=0, label="Feature Artifact")
     label_artifact_id = forms.TypedChoiceField(coerce=int, choices=(), empty_value=0, label="Label Artifact")

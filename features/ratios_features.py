@@ -15,15 +15,6 @@ def build_ratios_features(
     return _build_ratios_features(symbol_obj, target_index, section_key="ratios", prefix="rt__", df_prices=df_prices, filing_lag_days=filing_lag_days)
 
 
-def build_ratios_ttm_features(
-    symbol_obj: Symbol,
-    target_index: pd.MultiIndex,
-    df_prices: pd.DataFrame | None = None,
-    filing_lag_days: int = 45,
-) -> BuiltFeatureSet:
-    return _build_ratios_features(symbol_obj, target_index, section_key="ratios_ttm", prefix="rt_ttm__", df_prices=df_prices, filing_lag_days=filing_lag_days)
-
-
 def _build_ratios_features(
     symbol_obj: Symbol,
     target_index: pd.MultiIndex,

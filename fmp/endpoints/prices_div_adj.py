@@ -22,4 +22,8 @@ def build(symbol_obj) -> EndpointDefinition:
                 },
             )
         ],
+        supports_date_window=True,
+        chunk_years=10,
+        dedupe_by_date=True,
+        stability_mode="daily",
     )

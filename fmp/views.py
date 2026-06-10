@@ -5,6 +5,7 @@ import re
 import json
 import time
 import hashlib
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 import pandas as pd
@@ -18,6 +19,24 @@ from django.utils import timezone
 from django.db.models import Min, Max, Count
 
 from .endpoints import get_symbol_endpoint_definitions
+from .endpoints.base import EndpointDefinition
+from .records import dedupe_historical_records
+from .section_store import (
+    mark_section_fetched,
+    save_historical_section,
+    save_snapshot_section,
+    sync_symbol_historical_ranges,
+    update_symbol_historical_range,
+)
+from .stability import assess_historical_section_stability
+from .transport import (
+    candidates_support_date_window,
+    fetch_first_success,
+    fetch_historical_records,
+    run_with_retries,
+    to_records,
+    with_date_window,
+)
 from .forms import (
     COUNTRY_CHOICES,
     EXCHANGE_CHOICES,
@@ -646,35 +665,11 @@ def _records_to_table(records: list[dict], *, max_rows: int = 20) -> tuple[list[
 
 
 def _to_records(data: Any) -> list[dict]:
-    if data is None:
-        return []
-    if isinstance(data, list):
-        out: list[dict] = []
-        for item in data:
-            if isinstance(item, dict):
-                out.append(item)
-            else:
-                out.append({"value": item})
-        return out
-    if isinstance(data, dict):
-        # Some endpoints wrap rows inside one list-valued key.
-        list_values = [v for v in data.values() if isinstance(v, list)]
-        if len(list_values) == 1:
-            return _to_records(list_values[0])
-        return [data]
-    return [{"value": data}]
+    return to_records(data)
 
 
 def _fetch_first_success(client: FMPClient, candidates: list[tuple[str, dict]]) -> Any:
-    last_exc: Exception | None = None
-    for path, params in candidates:
-        try:
-            return client.get_json(path, params=params)
-        except Exception as exc:
-            last_exc = exc
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("No endpoint candidates provided.")
+    return fetch_first_success(client, candidates)
 
 
 def _fetch_all_historical_records(client: FMPClient, candidates: list[tuple[str, dict]]) -> list[dict]:
@@ -683,68 +678,19 @@ def _fetch_all_historical_records(client: FMPClient, candidates: list[tuple[str,
     - If endpoint supports page+limit: paginate until empty/short page.
     - Otherwise: single request (or with increased limit if 'limit' is present).
     """
-    last_exc: Exception | None = None
-    for path, base_params in candidates:
-        try:
-            params = dict(base_params or {})
-            all_records: list[dict] = []
-            if "limit" in params:
-                params["limit"] = 10_000
-
-            if "page" in params and "limit" in params:
-                page = int(params.get("page", 0) or 0)
-                limit = max(1, int(params.get("limit", 10_000) or 10_000))
-                max_pages = 1000
-                for _ in range(max_pages):
-                    page_params = dict(params)
-                    page_params["page"] = page
-                    raw = client.get_json(path, params=page_params)
-                    rows = _to_records(raw)
-                    if not rows:
-                        break
-                    all_records.extend(rows)
-                    if len(rows) < limit:
-                        break
-                    page += 1
-                return all_records
-
-            # Internal chunking mode for endpoints that support from/to date filters
-            # and may truncate large ranges in a single call.
-            if "from" in params and "to" in params:
-                chunk_years = int(params.pop("__chunk_years", 10) or 10)
-                try:
-                    cur = timezone.datetime.strptime(str(params["from"])[:10], "%Y-%m-%d").date()
-                    end = timezone.datetime.strptime(str(params["to"])[:10], "%Y-%m-%d").date()
-                except Exception:
-                    cur = None
-                    end = None
-
-                if cur and end and cur <= end:
-                    while cur <= end:
-                        nxt = min(end, cur + timedelta(days=365 * chunk_years))
-                        chunk_params = dict(params)
-                        chunk_params["from"] = cur.isoformat()
-                        chunk_params["to"] = nxt.isoformat()
-                        raw = client.get_json(path, params=chunk_params)
-                        rows = _to_records(raw)
-                        if rows:
-                            all_records.extend(rows)
-                        cur = nxt + timedelta(days=1)
-                    return all_records
-
-            # Some endpoints support only a limit parameter.
-            if "limit" in params and "page" not in params:
-                params["limit"] = 10_000
-
-            raw = client.get_json(path, params=params)
-            return _to_records(raw)
-        except Exception as exc:
-            last_exc = exc
-            continue
-
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("No endpoint candidates provided.")
+    first_params = dict(candidates[0][1] or {}) if candidates else {}
+    endpoint = EndpointDefinition(
+        key="legacy",
+        title="Legacy",
+        kind="historical",
+        threshold_days=1,
+        max_rows=100,
+        candidates=candidates,
+        pagination="page" if "page" in first_params else "none",
+        supports_date_window="from" in first_params and "to" in first_params,
+        chunk_years=int(first_params.get("__chunk_years", 0) or 0) or None,
+    )
+    return fetch_historical_records(client, endpoint)
 
 
 def _filter_records_for_symbol(records: list[dict], symbol: str) -> list[dict]:
@@ -813,18 +759,7 @@ def _extract_record_date(record: Any):
 
 
 def _dedupe_records_by_record_date(records: list[dict]) -> list[dict]:
-    by_date: dict[str, dict] = {}
-    undated: list[dict] = []
-    for record in records:
-        if not isinstance(record, dict):
-            record = {"value": record}
-        record_date = _extract_record_date(record)
-        if record_date is None:
-            undated.append(record)
-            continue
-        by_date[record_date.isoformat()] = record
-    dated = [by_date[key] for key in sorted(by_date.keys())]
-    return dated + undated
+    return dedupe_historical_records(records, by_date=True, prepare=_prepare_payload_for_storage)
 
 
 def _repair_missing_record_dates(symbol_obj: Symbol, section_key: str):
@@ -903,85 +838,29 @@ def _is_historical_section_stale_from_coverage(
 
 
 def _mark_section_fetched(symbol_obj: Symbol, section_key: str, kind: str):
-    SymbolSectionState.objects.update_or_create(
-        symbol=symbol_obj,
-        section_key=section_key,
-        defaults={
-            "kind": kind,
-            "last_fetched_at": timezone.now(),
-        },
-    )
+    mark_section_fetched(symbol_obj, section_key, kind)
 
 
 def _save_snapshot_section(symbol_obj: Symbol, section_key: str, payload: Any):
-    payload = _prepare_payload_for_storage(payload)
-    SymbolSectionSnapshot.objects.update_or_create(
-        symbol=symbol_obj,
-        section_key=section_key,
-        defaults={"payload": payload},
-    )
+    save_snapshot_section(symbol_obj, section_key, payload)
 
 
-def _save_historical_section(symbol_obj: Symbol, section_key: str, records: list[Any]):
-    for record in records:
-        payload = _prepare_payload_for_storage(record)
-        SymbolSectionHistorical.objects.update_or_create(
-            symbol=symbol_obj,
-            section_key=section_key,
-            record_key=_stable_record_key(record),
-            defaults={
-                "record_date": _extract_record_date(record),
-                "payload": payload,
-            },
-        )
+def _save_historical_section(
+    symbol_obj: Symbol,
+    section_key: str,
+    records: list[Any],
+    *,
+    dedupe_by_date: bool = False,
+):
+    save_historical_section(symbol_obj, section_key, records, dedupe_by_date=dedupe_by_date)
 
 
 def _update_symbol_historical_range(symbol_obj: Symbol, section_key: str):
-    agg = SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key).aggregate(
-        min_date=Min("record_date"),
-        max_date=Max("record_date"),
-        count=Count("id"),
-    )
-    min_date = agg.get("min_date")
-    max_date = agg.get("max_date")
-
-    ranges = dict(symbol_obj.historical_date_ranges or {})
-    ranges[section_key] = {
-        "min_date": min_date.isoformat() if min_date else None,
-        "max_date": max_date.isoformat() if max_date else None,
-        "count": int(agg.get("count") or 0),
-    }
-    symbol_obj.historical_date_ranges = ranges
-    symbol_obj.save(update_fields=["historical_date_ranges"])
+    update_symbol_historical_range(symbol_obj, section_key)
 
 
 def _sync_symbol_historical_ranges_from_db(symbol_obj: Symbol, section_keys: list[str]):
-    if not section_keys:
-        return
-    for key in section_keys:
-        _repair_missing_record_dates(symbol_obj, key)
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key__in=section_keys)
-        .values("section_key")
-        .annotate(min_date=Min("record_date"), max_date=Max("record_date"), count=Count("id"))
-    )
-    ranges = dict(symbol_obj.historical_date_ranges or {})
-    changed = False
-    for row in qs:
-        key = row["section_key"]
-        min_date = row.get("min_date")
-        max_date = row.get("max_date")
-        payload = {
-            "min_date": min_date.isoformat() if min_date else None,
-            "max_date": max_date.isoformat() if max_date else None,
-            "count": int(row.get("count") or 0),
-        }
-        if ranges.get(key) != payload:
-            ranges[key] = payload
-            changed = True
-    if changed:
-        symbol_obj.historical_date_ranges = ranges
-        symbol_obj.save(update_fields=["historical_date_ranges"])
+    sync_symbol_historical_ranges(symbol_obj, section_keys)
 
 
 def _load_snapshot_section(symbol_obj: Symbol, section_key: str, *, max_rows: int = 1):
@@ -1049,33 +928,18 @@ def _load_cached_history_rows(symbol_obj: Symbol, section_limits: dict[str, int]
 _FILTER_CHOICES_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _FILTER_TTL_SECONDS = 21600
 _LOOKUP_MAX_AGE_DAYS = 30
-_UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD = 0.75
-_UNIVERSE_DOWNLOAD_TARGET_YEARS = 20
-_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS = 3
-_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S = 1.5
-_FUNDAMENTAL_STATEMENT_ANCHOR_SECTION_KEYS = (
-    "income_statement",
-    "balance_sheet",
-    "cash_flow",
+
+# Canonical values now live in fmp.sections (single source of truth for refresh planning).
+from .sections import (
+    _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD,
+    _UNIVERSE_DOWNLOAD_TARGET_YEARS,
+    _UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
+    _UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
+    _FUNDAMENTAL_STATEMENT_ANCHOR_SECTION_KEYS,
+    _FUNDAMENTAL_FALLBACK_ANCHOR_SECTION_KEYS,
+    _SPARSE_EVENT_HISTORICAL_SECTION_KEYS,
+    _FUNDAMENTAL_DEPENDENT_SECTION_KEYS,
 )
-_FUNDAMENTAL_FALLBACK_ANCHOR_SECTION_KEYS = (
-    "earnings",
-)
-_SPARSE_EVENT_HISTORICAL_SECTION_KEYS = {
-    "dividends",
-    "splits",
-}
-_FUNDAMENTAL_DEPENDENT_SECTION_KEYS = {
-    "key_metrics",
-    "ratios",
-    "income_statement",
-    "income_statement_growth",
-    "cash_flow",
-    "cash_flow_growth",
-    "balance_sheet",
-    "balance_sheet_growth",
-    "financial_growth",
-}
 
 
 def _dedupe_choice_tuples(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -1220,10 +1084,7 @@ def _parse_iso_date(value: Any):
 
 
 def _candidate_supports_date_window(candidates: list[tuple[str, dict]]) -> bool:
-    if not candidates:
-        return False
-    first_params = dict(candidates[0][1] or {})
-    return "from" in first_params and "to" in first_params
+    return candidates_support_date_window(candidates)
 
 
 def _clone_candidates_with_date_window(
@@ -1232,26 +1093,11 @@ def _clone_candidates_with_date_window(
     from_date,
     to_date,
 ) -> list[tuple[str, dict]]:
-    out: list[tuple[str, dict]] = []
-    for path, params in candidates:
-        p = dict(params or {})
-        if "from" in p and "to" in p:
-            p["from"] = from_date.isoformat()
-            p["to"] = to_date.isoformat()
-        out.append((path, p))
-    return out
+    return with_date_window(candidates, from_date=from_date, to_date=to_date)
 
 
 def _run_with_retries(fetch_fn, *, max_attempts: int, base_delay_s: float) -> tuple[Any, int]:
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            return fetch_fn(), attempt - 1
-        except Exception:
-            if attempt >= max_attempts:
-                raise
-            time.sleep(float(base_delay_s) * (2 ** (attempt - 1)))
+    return run_with_retries(fetch_fn, max_attempts=max_attempts, base_delay_s=base_delay_s)
 
 
 def _section_coverage_ratio(symbol_obj: Symbol, section_key: str, target_start, today) -> float:
@@ -1353,20 +1199,19 @@ def _historical_section_fetch_mode(
     section_key = str(section.key)
     candidates = list(section.candidates or [])
     threshold_days = int(section.threshold_days)
-    coverage_ratio = _section_coverage_ratio(symbol_obj, section_key, target_start, target_end)
-    has_date_window = _candidate_supports_date_window(candidates)
-    section_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
-    max_date = _parse_iso_date(section_range.get("max_date"))
-    min_date = _parse_iso_date(section_range.get("min_date"))
+    has_date_window = candidates_support_date_window(candidates, endpoint=section)
+    assessment = assess_historical_section_stability(
+        symbol_obj,
+        section,
+        target_start=target_start,
+        target_end=target_end,
+    )
+    coverage_ratio = assessment.coverage_ratio
+    max_date = assessment.max_date
+    min_date = assessment.min_date
     is_recent_enough = bool(max_date and max_date >= (target_end - timedelta(days=threshold_days)))
     state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
     fundamental_anchor_date = _latest_company_fundamental_anchor_date(symbol_obj)
-
-    if section_key in _SPARSE_EVENT_HISTORICAL_SECTION_KEYS:
-        section_count = int((section_range or {}).get("count") or 0)
-        if section_count > 0 and state is not None and state.last_fetched_at is not None:
-            if state.last_fetched_at >= (timezone.now() - timedelta(days=threshold_days)):
-                return "skip", []
 
     if (
         section_key in _FUNDAMENTAL_DEPENDENT_SECTION_KEYS
@@ -1376,13 +1221,7 @@ def _historical_section_fetch_mode(
     ):
         return "skip", []
 
-    if _historical_section_fetched_recently(
-        symbol_obj,
-        section_key,
-        target_end=target_end,
-        threshold_days=threshold_days,
-        state=state,
-    ):
+    if assessment.stable:
         return "skip", []
 
     fetch_mode = "full"
@@ -1396,10 +1235,9 @@ def _historical_section_fetch_mode(
             fetch_mode = "tail"
             fetch_ranges = [(max(target_end - timedelta(days=threshold_days), target_start), target_end)]
         else:
-            fetch_mode = "skip"
+            fetch_mode = "full"
     elif coverage_ratio >= _UNIVERSE_DOWNLOAD_COVERAGE_THRESHOLD and is_recent_enough:
-        # Endpoints without date-window params can be skipped when sufficiently covered and fresh.
-        fetch_mode = "skip"
+        fetch_mode = "full"
     elif has_date_window and min_date is not None and min_date > target_start:
         # Backfill only the missing head window when partial history exists.
         fetch_mode = "head"
@@ -1408,206 +1246,10 @@ def _historical_section_fetch_mode(
     return fetch_mode, fetch_ranges
 
 
-def historical_symbol_refresh_needed(
-    symbol_obj: Symbol,
-    *,
-    target_start_date=None,
-    target_end_date=None,
-    existing_historical_sections_only: bool = False,
-    required_historical_sections: Any = None,
-    allowed_historical_sections: Any = None,
-) -> tuple[bool, str]:
-    section_defs = [section for section in get_symbol_endpoint_definitions(symbol_obj) if str(section.kind) == "historical"]
-    allowed_keys = _normalize_section_key_set(allowed_historical_sections)
-    if allowed_keys:
-        section_defs = [section for section in section_defs if str(section.key) in allowed_keys]
-    if not section_defs:
-        return False, "no_historical_sections"
-
-    default_target_end = timezone.now().date()
-    parsed_target_end = _parse_iso_date(target_end_date)
-    target_end = parsed_target_end or default_target_end
-    default_target_start = target_end - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
-    parsed_target_start = _parse_iso_date(target_start_date)
-    target_start = parsed_target_start or default_target_start
-
-    historical_section_keys = [str(section.key) for section in section_defs]
-    _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
-    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
-
-    if existing_historical_sections_only:
-        existing_keys = _existing_historical_section_keys(symbol_obj)
-        required_keys = _normalize_section_key_set(required_historical_sections)
-        allowed_keys = existing_keys | required_keys
-        if not allowed_keys:
-            return False, "no_existing_historical_sections"
-        section_defs = [section for section in section_defs if str(section.key) in allowed_keys]
-        if not section_defs:
-            return False, "no_existing_historical_sections"
-
-    for section in section_defs:
-        fetch_mode, _fetch_ranges = _historical_section_fetch_mode(
-            symbol_obj,
-            section,
-            target_end=target_end,
-            target_start=target_start,
-        )
-        if fetch_mode != "skip":
-            return True, f"{section.key}:{fetch_mode}"
-
-    return False, "fresh_all_historical_sections"
-
-
-def _refresh_all_symbol_sections(
-    symbol_obj: Symbol,
-    client: FMPClient,
-    *,
-    include_snapshot_sections: bool = True,
-    target_start_date=None,
-    target_end_date=None,
-    existing_historical_sections_only: bool = False,
-    required_historical_sections: Any = None,
-    allowed_historical_sections: Any = None,
-) -> tuple[dict[str, str], dict[str, Any]]:
-    section_errors: dict[str, str] = {}
-    section_defs = list(get_symbol_endpoint_definitions(symbol_obj))
-    if not include_snapshot_sections:
-        section_defs = [section for section in section_defs if str(section.kind) != "snapshot"]
-    allowed_keys = _normalize_section_key_set(allowed_historical_sections)
-    if allowed_keys:
-        section_defs = [
-            section
-            for section in section_defs
-            if str(section.kind) != "historical" or str(section.key) in allowed_keys
-        ]
-    refreshed_historical = False
-    historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
-    default_target_end = timezone.now().date()
-    parsed_target_end = _parse_iso_date(target_end_date)
-    target_end = parsed_target_end or default_target_end
-    default_target_start = target_end - timedelta(days=365 * _UNIVERSE_DOWNLOAD_TARGET_YEARS)
-    parsed_target_start = _parse_iso_date(target_start_date)
-    target_start = parsed_target_start or default_target_start
-
-    _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
-    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
-    if existing_historical_sections_only:
-        existing_historical_keys = _existing_historical_section_keys(symbol_obj)
-        required_historical_keys = _normalize_section_key_set(required_historical_sections)
-        allowed_historical_keys = existing_historical_keys | required_historical_keys
-        section_defs = [
-            section
-            for section in section_defs
-            if str(section.kind) != "historical" or str(section.key) in allowed_historical_keys
-        ]
-        historical_section_keys = [s.key for s in section_defs if s.kind == "historical"]
-
-    stats = {
-        "sections_total": len(section_defs),
-        "sections_fetched": 0,
-        "sections_skipped": 0,
-        "partial_sections": 0,
-        "retry_attempts": 0,
-        "duration_s": 0.0,
-    }
-    t0 = time.perf_counter()
-
-    for section in section_defs:
-        section_key = section.key
-        kind = section.kind
-        candidates = section.candidates
-        filter_symbol = bool(section.filter_symbol)
-        threshold_days = int(section.threshold_days)
-        raw = None
-
-        try:
-            if kind == "historical":
-                fetch_mode, fetch_ranges = _historical_section_fetch_mode(
-                    symbol_obj,
-                    section,
-                    target_end=target_end,
-                    target_start=target_start,
-                )
-
-                if fetch_mode == "skip":
-                    stats["sections_skipped"] += 1
-                    continue
-
-                all_records: list[dict] = []
-                retries_used = 0
-                if fetch_mode in {"tail", "head"} and fetch_ranges:
-                    stats["partial_sections"] += 1
-                    for from_date, to_date in fetch_ranges:
-                        if to_date < from_date:
-                            continue
-                        partial_candidates = _clone_candidates_with_date_window(
-                            candidates,
-                            from_date=from_date,
-                            to_date=to_date,
-                        )
-                        fetched, retries = _run_with_retries(
-                            lambda: _fetch_all_historical_records(client, partial_candidates),
-                            max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
-                            base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
-                        )
-                        retries_used += retries
-                        all_records.extend(list(fetched or []))
-                else:
-                    fetched, retries = _run_with_retries(
-                        lambda: _fetch_all_historical_records(client, candidates),
-                        max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
-                        base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
-                    )
-                    retries_used += retries
-                    all_records = list(fetched or [])
-
-                stats["retry_attempts"] += retries_used
-                records = _dedupe_records_by_record_date(all_records)
-            else:
-                raw, retries = _run_with_retries(
-                    lambda: _fetch_first_success(client, candidates),
-                    max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
-                    base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
-                )
-                stats["retry_attempts"] += retries
-                records = _to_records(raw)
-
-            if section_key == "peer_symbols":
-                peer_records: list[dict] = []
-                if isinstance(raw, list):
-                    if raw and isinstance(raw[0], dict):
-                        peer_records = raw
-                    else:
-                        peer_records = [{"peerSymbol": p} for p in raw]
-                elif isinstance(raw, dict):
-                    peers_list = raw.get("peersList") or raw.get("peers") or []
-                    if isinstance(peers_list, list):
-                        peer_records = [{"peerSymbol": p} for p in peers_list]
-                    else:
-                        peer_records = _to_records(raw)
-                records = peer_records
-
-            if filter_symbol:
-                records = _filter_records_for_symbol(records, symbol_obj.symbol)
-
-            if kind == "snapshot":
-                _save_snapshot_section(symbol_obj, section_key, raw)
-            else:
-                _save_historical_section(symbol_obj, section_key, records)
-                _update_symbol_historical_range(symbol_obj, section_key)
-                refreshed_historical = True
-
-            _mark_section_fetched(symbol_obj, section_key, kind)
-            stats["sections_fetched"] += 1
-        except Exception as exc:
-            if "HTTP 404" not in str(exc):
-                section_errors[section_key] = str(exc)
-
-    if refreshed_historical:
-        _sync_symbol_historical_ranges_from_db(symbol_obj, historical_section_keys)
-
-    stats["duration_s"] = round(float(time.perf_counter() - t0), 3)
-    return section_errors, stats
+# historical_symbol_refresh_needed and _refresh_all_symbol_sections (and the
+# supporting _historical_section_* decision logic) have been moved to
+# fmp/refresh.py as the canonical owner of refresh planning/orchestration.
+# Views that need them for UI can import the public versions from .refresh if required.
 
 
 def _serialize_universe_download_job(job: UniverseDownloadJob) -> dict[str, Any]:
@@ -2353,7 +1995,7 @@ def symbol_detail(request: HttpRequest, symbol: str):
         if should_refresh and client is not None:
             try:
                 if kind == "historical":
-                    records = _fetch_all_historical_records(client, candidates)
+                    records = fetch_historical_records(client, section)
                 else:
                     raw = _fetch_first_success(client, candidates)
                     records = _to_records(raw)
@@ -2378,7 +2020,12 @@ def symbol_detail(request: HttpRequest, symbol: str):
                 if kind == "snapshot":
                     _save_snapshot_section(symbol_obj, section_key, raw)
                 else:
-                    _save_historical_section(symbol_obj, section_key, records)
+                    _save_historical_section(
+                        symbol_obj,
+                        section_key,
+                        records,
+                        dedupe_by_date=bool(section.dedupe_by_date),
+                    )
                     _update_symbol_historical_range(symbol_obj, section_key)
                     refreshed_historical = True
                 _mark_section_fetched(symbol_obj, section_key, kind)

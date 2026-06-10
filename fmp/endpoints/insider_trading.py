@@ -13,4 +13,5 @@ def build(symbol_obj) -> EndpointDefinition:
         min_history_years=1,
         max_rows=100,
         candidates=[("/stable/insider-trading/search", {"symbol": symbol_obj.symbol, **paginated_params(page=0)})],
+        pagination="page",
     )

@@ -26,6 +26,10 @@ class FeaturePreviewForm(forms.Form):
     include_ownership_features = forms.BooleanField(required=False, initial=True)
     include_economic_indicators = forms.BooleanField(required=False, initial=True)
     include_treasury_rates = forms.BooleanField(required=False, initial=True)
+    include_sector_performance = forms.BooleanField(required=False, initial=False)
+    include_industry_performance = forms.BooleanField(required=False, initial=False)
+    include_sector_pe = forms.BooleanField(required=False, initial=False)
+    include_industry_pe = forms.BooleanField(required=False, initial=False)
     preview_rows = forms.IntegerField(required=False, min_value=10, max_value=1000, initial=100)
 
     def __init__(

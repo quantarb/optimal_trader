@@ -5,22 +5,27 @@ try:
     from features.naming import feature_display_name
     import pandas as pd
 
+    from fmp.positions_summary import extract_positions_summary_metrics, extract_positions_summary_period
     from features.pipeline_builders import (
         _append_representation_embedding_columns,
         _representation_embedding_dataset_rows,
         REPRESENTATION_EMBEDDING_MODEL_VERSION,
         representation_embedding_config,
     )
+    from features.positions_summary_features import build_positions_summary_features
     from ml.execution import infer_feature_family_columns
 except ModuleNotFoundError as exc:
     if exc.name not in {"pandas", "numpy"}:
         raise
     feature_display_name = None
     pd = None
+    extract_positions_summary_metrics = None
+    extract_positions_summary_period = None
     _append_representation_embedding_columns = None
     _representation_embedding_dataset_rows = None
     REPRESENTATION_EMBEDDING_MODEL_VERSION = None
     representation_embedding_config = None
+    build_positions_summary_features = None
     infer_feature_family_columns = None
 
 
@@ -136,15 +141,72 @@ class RepresentationEmbeddingBuilderTests(TestCase):
     def test_infer_feature_family_columns_keeps_ttm_families_separate(self):
         grouped = infer_feature_family_columns(
             [
-                "km_ttm__marketcap",
-                "rt_ttm__currentratio",
                 "is_ttm__revenue",
                 "cf_ttm__freecashflow",
                 "bs_ttm__totalassets",
             ]
         )
-        self.assertEqual(grouped["key_metrics_ttm"], ["km_ttm__marketcap"])
-        self.assertEqual(grouped["ratios_ttm"], ["rt_ttm__currentratio"])
         self.assertEqual(grouped["income_statement_ttm"], ["is_ttm__revenue"])
         self.assertEqual(grouped["cash_flow_ttm"], ["cf_ttm__freecashflow"])
         self.assertEqual(grouped["balance_sheet_ttm"], ["bs_ttm__totalassets"])
+
+
+@skipUnless(pd is not None, "pandas is required for positions summary feature tests in this environment")
+class PositionsSummaryFeatureTests(TestCase):
+    def test_positions_summary_period_defaults_to_quarter_end(self):
+        year, quarter, report_date = extract_positions_summary_period({"year": 2024, "quarter": 2})
+        self.assertEqual(year, 2024)
+        self.assertEqual(quarter, 2)
+        self.assertEqual(str(report_date), "2024-06-30")
+
+    def test_positions_summary_metric_aliases_are_normalized(self):
+        metrics = extract_positions_summary_metrics(
+            {
+                "investorCount": "12",
+                "sharesHeld": "1000",
+                "investmentValue": "250000",
+                "ownershipPct": "6.25",
+                "putCallRatio": "1.8",
+            }
+        )
+        self.assertEqual(metrics["investor_count"], 12)
+        self.assertEqual(metrics["shares_held"], 1000.0)
+        self.assertEqual(metrics["investment_value"], 250000.0)
+        self.assertEqual(metrics["ownership_pct"], 6.25)
+        self.assertEqual(metrics["put_call_ratio"], 1.8)
+
+    def test_positions_summary_features_broadcast_and_derive_ratios(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "date": "2024-06-30",
+                    "symbol": "AAPL",
+                    "investor_count": 12,
+                    "shares_held": 1200.0,
+                    "investment_value": 240000.0,
+                    "ownership_pct": 6.0,
+                    "put_call_ratio": 1.5,
+                }
+            ]
+        )
+        source["date"] = pd.to_datetime(source["date"])
+        source = source.set_index(["date", "symbol"])
+        target_index = pd.MultiIndex.from_tuples(
+            [
+                (pd.Timestamp("2024-06-30"), "AAPL"),
+                (pd.Timestamp("2024-07-01"), "AAPL"),
+            ],
+            names=["date", "symbol"],
+        )
+
+        class DummySymbol:
+            symbol = "AAPL"
+
+        with patch("features.positions_summary_features.load_positions_summary_frame", return_value=source):
+            result = build_positions_summary_features(DummySymbol(), target_index)
+
+        self.assertIn("ps__investor_count", result.feature_cols)
+        self.assertIn("ps__days_since_report", result.feature_cols)
+        self.assertEqual(result.df.loc[(pd.Timestamp("2024-06-30"), "AAPL"), "ps__investor_count"], 12.0)
+        self.assertEqual(result.df.loc[(pd.Timestamp("2024-07-01"), "AAPL"), "ps__days_since_report"], 1.0)
+        self.assertEqual(result.df.loc[(pd.Timestamp("2024-06-30"), "AAPL"), "ps__shares_per_investor"], 100.0)

@@ -21,4 +21,8 @@ def build(symbol_obj) -> EndpointDefinition:
             ("/stable/historical-price-eod", dict(params)),
             ("/stable/historical-price-eod/full", dict(params)),
         ],
+        supports_date_window=True,
+        chunk_years=10,
+        dedupe_by_date=True,
+        stability_mode="daily",
     )

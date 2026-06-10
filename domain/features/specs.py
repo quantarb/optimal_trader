@@ -28,6 +28,10 @@ class FeatureToggleSpec:
     include_ownership_features: bool = True
     include_economic_indicators: bool = True
     include_treasury_rates: bool = True
+    include_sector_performance: bool = False
+    include_industry_performance: bool = False
+    include_sector_pe: bool = False
+    include_industry_pe: bool = False
     include_representation_embedding: bool = False
 
     @classmethod
@@ -54,6 +58,14 @@ class FeatureToggleSpec:
             include_ownership_features=_as_bool(raw.get("include_ownership_features"), defaults.include_ownership_features),
             include_economic_indicators=_as_bool(raw.get("include_economic_indicators"), defaults.include_economic_indicators),
             include_treasury_rates=_as_bool(raw.get("include_treasury_rates"), defaults.include_treasury_rates),
+            include_sector_performance=_as_bool(
+                raw.get("include_sector_performance"), defaults.include_sector_performance
+            ),
+            include_industry_performance=_as_bool(
+                raw.get("include_industry_performance"), defaults.include_industry_performance
+            ),
+            include_sector_pe=_as_bool(raw.get("include_sector_pe"), defaults.include_sector_pe),
+            include_industry_pe=_as_bool(raw.get("include_industry_pe"), defaults.include_industry_pe),
             include_representation_embedding=_as_bool(
                 raw.get("include_representation_embedding"),
                 defaults.include_representation_embedding,
@@ -72,6 +84,10 @@ class FeatureToggleSpec:
             "include_ownership_features": bool(self.include_ownership_features),
             "include_economic_indicators": bool(self.include_economic_indicators),
             "include_treasury_rates": bool(self.include_treasury_rates),
+            "include_sector_performance": bool(self.include_sector_performance),
+            "include_industry_performance": bool(self.include_industry_performance),
+            "include_sector_pe": bool(self.include_sector_pe),
+            "include_industry_pe": bool(self.include_industry_pe),
             "include_representation_embedding": bool(self.include_representation_embedding),
         }
 

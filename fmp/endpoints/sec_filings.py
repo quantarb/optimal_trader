@@ -25,4 +25,7 @@ def build(symbol_obj) -> EndpointDefinition:
                 },
             )
         ],
+        pagination="page",
+        page_size=50,
+        supports_date_window=True,
     )

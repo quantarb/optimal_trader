@@ -307,11 +307,20 @@ def _run_job_executor(
             performance_tracer=performance_tracer,
         )
     if job_type == "fit_classifier":
+        classifier_algorithm = str(config.get("algorithm") or "random_forest_classifier").strip().lower()
+        allowed_classifier_algorithms = {
+            "random_forest_classifier",
+            "moe_random_forest_classifier",
+            "sector_moe_random_forest_classifier",
+            "industry_moe_random_forest_classifier",
+        }
+        if classifier_algorithm not in allowed_classifier_algorithms:
+            raise PipelineExecutionError(f"Unsupported classifier algorithm: {classifier_algorithm!r}.")
         return execute_fit_model(
             config,
             inputs_by_type["LABELS"],
             inputs_by_type["FEATURES"],
-            algorithm="random_forest_classifier",
+            algorithm=classifier_algorithm,
             task_type="classification",
             artifact_type="CLASSIFIER_MODEL",
             pipeline_run=pipeline_run,

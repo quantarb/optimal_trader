@@ -28,7 +28,7 @@ def _append_job_error(job: UniverseDownloadJob, message: str) -> list[str]:
 
 @shared_task(bind=True, ignore_result=True)
 def run_universe_download_job_task(self, job_id: str, api_key: str) -> dict[str, Any]:
-    from .views import _refresh_all_symbol_sections
+    from .refresh import refresh_all_symbol_sections as _refresh_all_symbol_sections
 
     job = UniverseDownloadJob.objects.filter(pk=str(job_id).strip()).first()
     if job is None:

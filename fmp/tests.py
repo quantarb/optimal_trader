@@ -19,16 +19,14 @@ class EndpointRegistryTests(SimpleTestCase):
         self.assertIn("income_statement_growth", keys)
         self.assertIn("balance_sheet_growth", keys)
         self.assertIn("cash_flow_growth", keys)
-        self.assertIn("key_metrics_ttm", keys)
-        self.assertIn("ratios_ttm", keys)
         self.assertIn("income_statement_ttm", keys)
         self.assertIn("balance_sheet_ttm", keys)
         self.assertIn("cash_flow_ttm", keys)
 
         ttm_endpoints = {endpoint.key: endpoint for endpoint in endpoints if endpoint.key.endswith("_ttm")}
-        self.assertEqual(ttm_endpoints["income_statement_ttm"].max_rows, 1)
-        self.assertEqual(ttm_endpoints["balance_sheet_ttm"].max_rows, 1)
-        self.assertEqual(ttm_endpoints["cash_flow_ttm"].max_rows, 1)
+        self.assertEqual(ttm_endpoints["income_statement_ttm"].max_rows, 10)
+        self.assertEqual(ttm_endpoints["balance_sheet_ttm"].max_rows, 10)
+        self.assertEqual(ttm_endpoints["cash_flow_ttm"].max_rows, 10)
 
     def test_endpoint_definitions_keep_raw_candidate_shapes(self):
         symbol_obj = Symbol(symbol="MSFT")
@@ -58,9 +56,13 @@ class EndpointRegistryTests(SimpleTestCase):
         for endpoint in endpoints:
             expected = expected_periods.get(endpoint.key)
             for _path, params in endpoint.candidates:
-                if expected is None:
+                if expected is None or endpoint.key.endswith("_ttm"):
+                    # TTM endpoints do not accept "period" (unlike their non-TTM counterparts),
+                    # even though we keep supported_periods on the def so the fetch/stability
+                    # logic treats them as time series.
                     self.assertNotIn("period", params)
-                    self.assertEqual(endpoint.supported_periods, ())
+                    if not endpoint.key.endswith("_ttm"):
+                        self.assertEqual(endpoint.supported_periods, ())
                 elif "period" in params:
                     self.assertEqual(params["period"], expected)
                     self.assertEqual(params["period"], preferred_period(*endpoint.supported_periods))
@@ -69,3 +71,13 @@ class EndpointRegistryTests(SimpleTestCase):
         self.assertEqual(preferred_period("annual", "quarter"), "quarter")
         self.assertEqual(preferred_period("day", "quarter"), "day")
         self.assertEqual(GRANULARITY_PREFERENCE[0], "day")
+
+    def test_endpoint_definitions_expose_refresh_policy(self):
+        endpoints = {endpoint.key: endpoint for endpoint in get_symbol_endpoint_definitions(Symbol(symbol="AAPL"))}
+
+        self.assertTrue(endpoints["prices_div_adj"].supports_date_window)
+        self.assertEqual(endpoints["prices_div_adj"].chunk_years, 10)
+        self.assertTrue(endpoints["prices_div_adj"].dedupe_by_date)
+        self.assertEqual(endpoints["insider_trading"].pagination, "page")
+        self.assertFalse(endpoints["insider_trading"].dedupe_by_date)
+        self.assertTrue(endpoints["sec_filings"].supports_date_window)

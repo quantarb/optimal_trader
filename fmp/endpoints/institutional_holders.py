@@ -6,9 +6,9 @@ from .helpers import recent_year_quarters
 
 def build(symbol_obj) -> EndpointDefinition:
     return EndpointDefinition(
-        key="institutional_holders",
-        title="Institutional Holders",
-        kind="snapshot",
+        key="positions_summary",
+        title="Positions Summary",
+        kind="historical",
         threshold_days=30,
         max_rows=100,
         candidates=[
@@ -18,4 +18,6 @@ def build(symbol_obj) -> EndpointDefinition:
             )
             for year, quarter in recent_year_quarters(8)
         ],
+        dedupe_by_date=True,
+        minimum_observations=1,
     )

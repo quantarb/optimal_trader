@@ -13,4 +13,5 @@ def build(symbol_obj) -> EndpointDefinition:
         min_history_years=5,
         max_rows=50,
         candidates=[("/stable/ratings-historical", {"symbol": symbol_obj.symbol, **paginated_params(page=0)})],
+        pagination="page",
     )

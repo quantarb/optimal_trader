@@ -126,6 +126,66 @@ class FMPClient:
             return self._stable_df("/stable/treasury-rates", from_date=from_date, to_date=to_date)
         return self._named_sdk_df(fmpsdk.treasury_rates, from_date=from_date, to_date=to_date)
 
+    def historical_sector_performance(
+        self,
+        sector: str,
+        exchange: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        return self._stable_df(
+            "/stable/historical-sector-performance",
+            from_date=from_date,
+            to_date=to_date,
+            extra_params={"sector": str(sector), "exchange": str(exchange)},
+        )
+
+    def historical_industry_performance(
+        self,
+        industry: str,
+        exchange: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        return self._stable_df(
+            "/stable/historical-industry-performance",
+            from_date=from_date,
+            to_date=to_date,
+            extra_params={"industry": str(industry), "exchange": str(exchange)},
+        )
+
+    def historical_sector_pe(
+        self,
+        sector: str,
+        exchange: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        return self._stable_df(
+            "/stable/historical-sector-pe",
+            from_date=from_date,
+            to_date=to_date,
+            extra_params={"sector": str(sector), "exchange": str(exchange)},
+        )
+
+    def historical_industry_pe(
+        self,
+        industry: str,
+        exchange: str,
+        *,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        return self._stable_df(
+            "/stable/historical-industry-pe",
+            from_date=from_date,
+            to_date=to_date,
+            extra_params={"industry": str(industry), "exchange": str(exchange)},
+        )
+
     def key_metrics(self, symbol: str, *, period: str = "quarter", limit: int = 400) -> pd.DataFrame:
         return self._named_sdk_df(fmpsdk.key_metrics, symbol=str(symbol), period=period, limit=limit)
 

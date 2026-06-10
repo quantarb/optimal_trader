@@ -15,15 +15,6 @@ def build_key_metrics_features(
     return _build_key_metrics_features(symbol_obj, target_index, section_key="key_metrics", prefix="km__", df_prices=df_prices, filing_lag_days=filing_lag_days)
 
 
-def build_key_metrics_ttm_features(
-    symbol_obj: Symbol,
-    target_index: pd.MultiIndex,
-    df_prices: pd.DataFrame | None = None,
-    filing_lag_days: int = 45,
-) -> BuiltFeatureSet:
-    return _build_key_metrics_features(symbol_obj, target_index, section_key="key_metrics_ttm", prefix="km_ttm__", df_prices=df_prices, filing_lag_days=filing_lag_days)
-
-
 def _build_key_metrics_features(
     symbol_obj: Symbol,
     target_index: pd.MultiIndex,

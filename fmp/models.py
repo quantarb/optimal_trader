@@ -139,6 +139,53 @@ class TreasuryRateObservation(models.Model):
         return f"{self.series.code}:{self.observation_date.isoformat()}"
 
 
+class PositionSummarySeries(models.Model):
+    symbol = models.OneToOneField(Symbol, on_delete=models.CASCADE, related_name="position_summary_series")
+    last_fetched_at = models.DateTimeField(null=True, blank=True)
+    min_report_date = models.DateField(null=True, blank=True)
+    max_report_date = models.DateField(null=True, blank=True)
+    last_year = models.IntegerField(null=True, blank=True)
+    last_quarter = models.IntegerField(null=True, blank=True)
+    report_count = models.IntegerField(default=0)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["symbol__symbol"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol.symbol}:positions-summary"
+
+
+class PositionSummaryObservation(models.Model):
+    series = models.ForeignKey(PositionSummarySeries, on_delete=models.CASCADE, related_name="observations")
+    report_year = models.IntegerField()
+    report_quarter = models.IntegerField()
+    report_date = models.DateField(null=True, blank=True)
+    investor_count = models.IntegerField(null=True, blank=True)
+    shares_held = models.FloatField(null=True, blank=True)
+    investment_value = models.FloatField(null=True, blank=True)
+    ownership_pct = models.FloatField(null=True, blank=True)
+    shares_change = models.FloatField(null=True, blank=True)
+    investment_change = models.FloatField(null=True, blank=True)
+    ownership_pct_change = models.FloatField(null=True, blank=True)
+    put_call_ratio = models.FloatField(null=True, blank=True)
+    call_count = models.IntegerField(null=True, blank=True)
+    put_count = models.IntegerField(null=True, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = (("series", "report_year", "report_quarter"),)
+        indexes = [
+            models.Index(fields=["series", "-report_year", "-report_quarter"]),
+            models.Index(fields=["series", "-report_date"]),
+        ]
+        ordering = ["-report_date", "-report_year", "-report_quarter"]
+
+    def __str__(self) -> str:
+        return f"{self.series.symbol.symbol}:{int(self.report_year)}Q{int(self.report_quarter)}"
+
+
 class MacroSeries(models.Model):
     code = models.CharField(max_length=128, unique=True, db_index=True)
     display_name = models.CharField(max_length=255, blank=True, default="")

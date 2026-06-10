@@ -7,6 +7,7 @@ import pandas as pd
 from domain.models import ArtifactTrainingDatasetSpec
 from domain.models.datasets import dedupe_label_frame, feature_columns_from_frame, filter_frame_by_date
 from domain.models.feature_families import infer_feature_family_columns
+from fmp.models import Symbol, SymbolSectionSnapshot
 from pipeline.models import Artifact
 from pipeline.service_runtime import read_frame_artifact
 
@@ -24,6 +25,52 @@ def load_artifact_csv_frame(artifact: Artifact) -> pd.DataFrame:
     if "date" not in df.columns or "symbol" not in df.columns:
         raise ValueError(f"Artifact #{artifact.id} must contain 'date' and 'symbol' columns.")
     return df.dropna(subset=["date", "symbol"])
+
+
+def attach_symbol_classifications(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach FMP profile sector/industry metadata without making them numeric features."""
+
+    if df.empty or "symbol" not in df.columns:
+        return df
+    out = df.copy()
+    symbols = sorted({str(value).strip().upper() for value in out["symbol"] if str(value).strip()})
+    symbol_rows = list(Symbol.objects.filter(symbol__in=symbols).only("id", "symbol", "sector", "industry"))
+    metadata = {
+        str(row.symbol).strip().upper(): {
+            "symbol_id": int(row.id),
+            "sector": str(row.sector or "").strip() or "Unknown",
+            "industry": str(row.industry or "").strip() or "Unknown",
+        }
+        for row in symbol_rows
+    }
+    symbol_by_id = {int(row.id): str(row.symbol).strip().upper() for row in symbol_rows}
+    for snapshot in SymbolSectionSnapshot.objects.filter(
+        symbol_id__in=list(symbol_by_id),
+        section_key="profile",
+    ).only("symbol_id", "payload"):
+        code = symbol_by_id.get(int(snapshot.symbol_id))
+        if not code:
+            continue
+        payload = snapshot.payload
+        if isinstance(payload, list):
+            payload = next((item for item in payload if isinstance(item, dict)), {})
+        if not isinstance(payload, dict):
+            continue
+        for column in ("sector", "industry"):
+            current = str(metadata[code].get(column) or "").strip()
+            endpoint_value = str(payload.get(column) or "").strip()
+            if current in {"", "Unknown"} and endpoint_value:
+                metadata[code][column] = endpoint_value
+    normalized_symbols = out["symbol"].astype(str).str.strip().str.upper()
+    for column in ("sector", "industry"):
+        mapped = normalized_symbols.map(lambda symbol: metadata.get(symbol, {}).get(column, "Unknown"))
+        if column in out.columns:
+            existing = out[column].fillna("").astype(str).str.strip()
+            out[column] = existing.where(existing.ne(""), mapped)
+        else:
+            out[column] = mapped
+        out[column] = out[column].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+    return out
 
 
 def _coverage_metadata(df: pd.DataFrame, feature_cols: Sequence[str]) -> dict[str, Any]:
@@ -93,6 +140,7 @@ def _join_feature_panels(
         )
 
     feature_cols = list(dict.fromkeys(feature_cols))
+    joined = attach_symbol_classifications(joined)
     return joined, feature_cols, {
         "base_feature_artifact_id": int(base_feature_artifact.id),
         "panel_artifact_ids": source_artifact_ids,

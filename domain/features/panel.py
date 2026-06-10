@@ -19,8 +19,6 @@ SECTION_ORDER = [
     "time_calendar",
     "key_metrics",
     "ratios",
-    "key_metrics_ttm",
-    "ratios_ttm",
     "income_statement_ttm",
     "cash_flow_ttm",
     "balance_sheet_ttm",
@@ -38,6 +36,10 @@ SECTION_ORDER = [
     "insider_trading",
     "economic_indicators",
     "treasury_rates",
+    "sector_performance",
+    "industry_performance",
+    "sector_pe",
+    "industry_pe",
     "representation_embedding",
 ]
 
@@ -52,8 +54,6 @@ SECTION_LABELS = {
     "time_calendar": "Time Calendar",
     "key_metrics": "Key Metrics",
     "ratios": "Ratios",
-    "key_metrics_ttm": "Key Metrics TTM",
-    "ratios_ttm": "Ratios TTM",
     "income_statement_ttm": "Income Statement TTM",
     "cash_flow_ttm": "Cash Flow TTM",
     "balance_sheet_ttm": "Balance Sheet TTM",
@@ -71,6 +71,10 @@ SECTION_LABELS = {
     "insider_trading": "Insider Trading",
     "economic_indicators": "Economic Indicators",
     "treasury_rates": "Treasury Rates",
+    "sector_performance": "Sector Performance",
+    "industry_performance": "Industry Performance",
+    "sector_pe": "Sector P/E",
+    "industry_pe": "Industry P/E",
     "representation_embedding": "Representation Embedding",
 }
 
@@ -88,8 +92,6 @@ REPRESENTATION_EMBEDDING_FAMILY_GROUPS: dict[str, tuple[str, ...]] = {
     "time_calendar": ("time_calendar",),
     "valuation_quality": ("key_metrics", "ratios"),
     "ttm_financial_statements": (
-        "key_metrics_ttm",
-        "ratios_ttm",
         "income_statement_ttm",
         "cash_flow_ttm",
         "balance_sheet_ttm",
@@ -101,6 +103,8 @@ REPRESENTATION_EMBEDDING_FAMILY_GROUPS: dict[str, tuple[str, ...]] = {
     "earnings_analyst_sentiment": ("earnings", "analyst_estimates", "ratings_historical", "grades_historical"),
     "insider_ownership": ("insider_trading",),
     "macro_rates": ("economic_indicators", "treasury_rates"),
+    "classification_performance": ("sector_performance", "industry_performance"),
+    "classification_valuation": ("sector_pe", "industry_pe"),
 }
 
 
@@ -140,8 +144,6 @@ def needed_sparse_sections(feature_flags: FeatureToggleSpec | dict[str, Any]) ->
     if toggles.include_ttm_financial_statements:
         sections.extend(
             [
-                "key_metrics_ttm",
-                "ratios_ttm",
                 "income_statement_ttm",
                 "cash_flow_ttm",
                 "balance_sheet_ttm",

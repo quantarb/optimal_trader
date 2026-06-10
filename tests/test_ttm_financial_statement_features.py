@@ -46,8 +46,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
         self.assertEqual(
             sections,
             [
-                "key_metrics_ttm",
-                "ratios_ttm",
                 "income_statement_ttm",
                 "cash_flow_ttm",
                 "balance_sheet_ttm",
@@ -58,8 +56,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
         builders = _fmp_endpoint_builders(filing_lag_days=45)
         self.assertTrue(
             {
-                "key_metrics_ttm",
-                "ratios_ttm",
                 "income_statement_ttm",
                 "cash_flow_ttm",
                 "balance_sheet_ttm",
@@ -79,14 +75,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
 
         with (
             patch(
-                "features.feature_builders.build_key_metrics_ttm_features",
-                return_value=self._built("km_ttm__marketcap", [1000.0, 1100.0]),
-            ),
-            patch(
-                "features.feature_builders.build_ratios_ttm_features",
-                return_value=self._built("rt_ttm__currentratio", [1.2, 1.2]),
-            ),
-            patch(
                 "features.feature_builders.build_income_statement_ttm_features",
                 return_value=self._built("is_ttm__weightedaverageshsoutdil", [10.0, 10.0]),
             ),
@@ -102,8 +90,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
         self.assertEqual(
             built.feature_cols,
             [
-                "km_ttm__marketcap",
-                "rt_ttm__currentratio",
                 "is_ttm__weightedaverageshsoutdil",
                 "cf_ttm__freecashflow",
                 "bs_ttm__totalassets",
@@ -129,8 +115,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
         built = BuiltFeatureSet(
             df=pd.DataFrame(
                 {
-                    "km_ttm__marketcap": [1000.0, 1100.0],
-                    "rt_ttm__currentratio": [1.2, 1.2],
                     "is_ttm__revenue": [400.0, 400.0],
                     "cf_ttm__freecashflow": [20.0, 20.0],
                     "bs_ttm__totalassets": [500.0, 500.0],
@@ -138,8 +122,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
                 index=self.target_index,
             ),
             feature_cols=[
-                "km_ttm__marketcap",
-                "rt_ttm__currentratio",
                 "is_ttm__revenue",
                 "cf_ttm__freecashflow",
                 "bs_ttm__totalassets",
@@ -156,8 +138,6 @@ class TtmFinancialStatementFeatureTests(SimpleTestCase):
                 representation_meta={"columns": []},
             )
 
-        self.assertEqual(result.grouped_feature_columns["key_metrics_ttm"], ["km_ttm__marketcap"])
-        self.assertEqual(result.grouped_feature_columns["ratios_ttm"], ["rt_ttm__currentratio"])
         self.assertEqual(result.grouped_feature_columns["income_statement_ttm"], ["is_ttm__revenue"])
         self.assertEqual(result.grouped_feature_columns["cash_flow_ttm"], ["cf_ttm__freecashflow"])
         self.assertEqual(result.grouped_feature_columns["balance_sheet_ttm"], ["bs_ttm__totalassets"])

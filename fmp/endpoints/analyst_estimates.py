@@ -23,4 +23,5 @@ def build(symbol_obj) -> EndpointDefinition:
                 },
             )
         ],
+        pagination="page",
     )

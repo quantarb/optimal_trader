@@ -63,7 +63,7 @@ def feature_display_name(name: str) -> str:
     if prefix is None:
         return _humanize_token(name)
 
-    if prefix in {"km", "rt", "is", "isg", "cf", "cfg", "bs", "bsg", "fg", "earn", "ae", "rating", "grade", "mcap", "float", "insider"}:
+    if prefix in {"km", "rt", "is", "isg", "cf", "cfg", "bs", "bsg", "fg", "earn", "ae", "rating", "grade", "mcap", "float", "insider", "ps"}:
         return _humanize_token(remainder)
 
     if prefix == "evt" and "_" in remainder:

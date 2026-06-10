@@ -12,4 +12,5 @@ def build(symbol_obj) -> EndpointDefinition:
         min_history_years=15,
         max_rows=24,
         candidates=[("/stable/earnings", {"symbol": symbol_obj.symbol})],
+        stability_mode="periodic",
     )

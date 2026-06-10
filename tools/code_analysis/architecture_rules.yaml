@@ -61,6 +61,16 @@
       "target": "fmp"
     },
     {
+      "reason": "External code should use the public fmp.refresh API (and fmp.sections) for planning/orchestration instead of reaching into private view helpers.",
+      "source": "trading",
+      "target": "fmp.views"
+    },
+    {
+      "reason": "FMP refresh planning and bulk orchestration belong in the fmp module (used by backtests + live + feature builds).",
+      "source": "fmp",
+      "target": "trading.live_trade"
+    },
+    {
       "reason": "Domain code should stay independent from CLI and management entrypoints.",
       "source": "domain",
       "target": "pipeline.management.commands"

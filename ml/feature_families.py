@@ -9,8 +9,6 @@ FEATURE_FAMILY_DEFINITIONS = (
     ("time_calendar", "Time Calendar", 27),
     ("key_metrics", "Key Metrics", 42),
     ("ratios", "Ratios", 59),
-    ("key_metrics_ttm", "Key Metrics TTM", 42),
-    ("ratios_ttm", "Ratios TTM", 59),
     ("income_statement_ttm", "Income Statement TTM", 31),
     ("cash_flow_ttm", "Cash Flow TTM", 39),
     ("balance_sheet_ttm", "Balance Sheet TTM", 53),
@@ -28,6 +26,10 @@ FEATURE_FAMILY_DEFINITIONS = (
     ("insider_trading", "Insider Trading", 5),
     ("economic_indicators", "Economic Indicators", 24),
     ("treasury_rates", "Treasury Rates", 12),
+    ("sector_performance", "Sector Performance", 6),
+    ("industry_performance", "Industry Performance", 6),
+    ("sector_pe", "Sector P/E", 6),
+    ("industry_pe", "Industry P/E", 6),
     ("representation_embedding", "Representation Embedding", 384),
 )
 

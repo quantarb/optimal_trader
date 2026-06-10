@@ -147,6 +147,7 @@
                 <div class="chip">Ratings Historical: {{ summary.source_counts.ratings_historical }}</div>
                 <div class="chip">Grades Historical: {{ summary.source_counts.grades_historical }}</div>
                 <div class="chip">Insider Trading: {{ summary.source_counts.insider_trading }}</div>
+                <div class="chip">Positions Summary: {{ summary.source_counts.positions_summary }}</div>
                 <div class="chip">Preview Rows: {{ summary.preview_rows }}</div>
               </div>
             {% endif %}
@@ -349,6 +350,10 @@
           "include_ownership_features",
           "include_economic_indicators",
           "include_treasury_rates",
+          "include_sector_performance",
+          "include_industry_performance",
+          "include_sector_pe",
+          "include_industry_pe",
           "preview_rows",
         ].forEach((key) => {
           if (cfg[key] != null) params.set(key, String(cfg[key]));

@@ -4,8 +4,6 @@ from typing import Sequence
 
 
 FUNDAMENTAL_PREFIXES = {
-    "key_metrics_ttm": ("km_ttm__",),
-    "ratios_ttm": ("rt_ttm__",),
     "key_metrics": ("km__",),
     "ratios": ("ratio__", "rt__"),
 }
@@ -73,8 +71,6 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         "time_calendar": [],
         "key_metrics": [],
         "ratios": [],
-        "key_metrics_ttm": [],
-        "ratios_ttm": [],
         "income_statement_ttm": [],
         "cash_flow_ttm": [],
         "balance_sheet_ttm": [],
@@ -92,6 +88,10 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
         "insider_trading": [],
         "economic_indicators": [],
         "treasury_rates": [],
+        "sector_performance": [],
+        "industry_performance": [],
+        "sector_pe": [],
+        "industry_pe": [],
         "representation_embedding": [],
     }
     for col in list(feature_cols):
@@ -132,6 +132,18 @@ def infer_feature_family_columns(feature_cols: Sequence[str]) -> dict[str, list[
             assigned = True
         if name.startswith(("tr__", "treasury__", "yield__", "rate__")):
             grouped["treasury_rates"].append(name)
+            assigned = True
+        if name.startswith("sector_perf__"):
+            grouped["sector_performance"].append(name)
+            assigned = True
+        if name.startswith("industry_perf__"):
+            grouped["industry_performance"].append(name)
+            assigned = True
+        if name.startswith("sector_pe__"):
+            grouped["sector_pe"].append(name)
+            assigned = True
+        if name.startswith("industry_pe__"):
+            grouped["industry_pe"].append(name)
             assigned = True
         if not assigned and "__" not in name:
             grouped["prices_div_adj"].append(name)

@@ -207,9 +207,7 @@ def _normalize_payload_timestamp(date_val: Any, *, record_date: Any, filing_lag_
 def section_prefix(section_key: str) -> str:
     return {
         "key_metrics": "km__",
-        "key_metrics_ttm": "km_ttm__",
         "ratios": "rt__",
-        "ratios_ttm": "rt_ttm__",
         "income_statement": "is__",
         "income_statement_ttm": "is_ttm__",
         "income_statement_growth": "isg__",
@@ -225,6 +223,7 @@ def section_prefix(section_key: str) -> str:
         "ratings_historical": "rating__",
         "grades_historical": "grade__",
         "insider_trading": "insider__",
+        "positions_summary": "ps__",
     }.get(section_key, f"{section_key}__")
 
 

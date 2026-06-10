@@ -16,8 +16,12 @@ from pipeline.models import PipelineRun
 from features.feature_builders import (
     build_event_features,
     build_fundamental_change_features,
+    build_industry_performance_features,
+    build_industry_pe_features,
     build_ownership_features,
     build_price_technical_features,
+    build_sector_performance_features,
+    build_sector_pe_features,
     build_statement_quality_features,
     build_ta_classic_technical_features,
     build_ttm_financial_statement_features,
@@ -92,6 +96,10 @@ def _default_feature_preview_data(symbol: str) -> dict[str, Any]:
         "include_ownership_features": True,
         "include_economic_indicators": True,
         "include_treasury_rates": True,
+        "include_sector_performance": False,
+        "include_industry_performance": False,
+        "include_sector_pe": False,
+        "include_industry_pe": False,
         "preview_rows": 100,
     }
 
@@ -108,6 +116,10 @@ def _default_feature_form_data() -> dict[str, Any]:
         "include_ownership_features": True,
         "include_economic_indicators": True,
         "include_treasury_rates": True,
+        "include_sector_performance": False,
+        "include_industry_performance": False,
+        "include_sector_pe": False,
+        "include_industry_pe": False,
         "preview_rows": 100,
     }
 
@@ -142,6 +154,14 @@ def _feature_form_toggle_data(source: dict[str, Any] | None = None) -> dict[str,
         "include_ownership_features": _as_bool(raw.get("include_ownership_features"), bool(defaults["include_ownership_features"])),
         "include_economic_indicators": _as_bool(raw.get("include_economic_indicators"), bool(defaults["include_economic_indicators"])),
         "include_treasury_rates": _as_bool(raw.get("include_treasury_rates"), bool(defaults["include_treasury_rates"])),
+        "include_sector_performance": _as_bool(
+            raw.get("include_sector_performance"), bool(defaults["include_sector_performance"])
+        ),
+        "include_industry_performance": _as_bool(
+            raw.get("include_industry_performance"), bool(defaults["include_industry_performance"])
+        ),
+        "include_sector_pe": _as_bool(raw.get("include_sector_pe"), bool(defaults["include_sector_pe"])),
+        "include_industry_pe": _as_bool(raw.get("include_industry_pe"), bool(defaults["include_industry_pe"])),
         "preview_rows": int(raw.get("preview_rows") or defaults["preview_rows"]),
     }
 
@@ -170,8 +190,6 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance",
         "key_metrics",
         "ratios",
-        "key_metrics_ttm",
-        "ratios_ttm",
         "income_statement_ttm",
         "cash_flow_ttm",
         "balance_sheet_ttm",
@@ -187,8 +205,13 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "ratings_historical",
         "grades_historical",
         "insider_trading",
+        "positions_summary",
         "economic_indicators",
         "treasury_rates",
+        "sector_performance",
+        "industry_performance",
+        "sector_pe",
+        "industry_pe",
     ]
     section_labels = {
         "prices_div_adj": "Prices Div Adj",
@@ -200,8 +223,6 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance": "Technical Performance",
         "key_metrics": "Key Metrics",
         "ratios": "Ratios",
-        "key_metrics_ttm": "Key Metrics TTM",
-        "ratios_ttm": "Ratios TTM",
         "income_statement_ttm": "Income Statement TTM",
         "cash_flow_ttm": "Cash Flow TTM",
         "balance_sheet_ttm": "Balance Sheet TTM",
@@ -217,8 +238,13 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "ratings_historical": "Ratings Historical",
         "grades_historical": "Grades Historical",
         "insider_trading": "Insider Trading",
+        "positions_summary": "Positions Summary",
         "economic_indicators": "Economic Indicators",
         "treasury_rates": "Treasury Rates",
+        "sector_performance": "Sector Performance",
+        "industry_performance": "Industry Performance",
+        "sector_pe": "Sector P/E",
+        "industry_pe": "Industry P/E",
     }
     return section_order, section_labels
 
@@ -268,8 +294,6 @@ def _section_toggle_name(section_key: str) -> str:
         "technical_performance": "include_ta_classic_technicals",
         "key_metrics": "include_fundamental_change",
         "ratios": "include_fundamental_change",
-        "key_metrics_ttm": "include_ttm_financial_statements",
-        "ratios_ttm": "include_ttm_financial_statements",
         "income_statement_ttm": "include_ttm_financial_statements",
         "cash_flow_ttm": "include_ttm_financial_statements",
         "balance_sheet_ttm": "include_ttm_financial_statements",
@@ -285,8 +309,13 @@ def _section_toggle_name(section_key: str) -> str:
         "ratings_historical": "include_event_features",
         "grades_historical": "include_event_features",
         "insider_trading": "include_ownership_features",
+        "positions_summary": "include_ownership_features",
         "economic_indicators": "include_economic_indicators",
         "treasury_rates": "include_treasury_rates",
+        "sector_performance": "include_sector_performance",
+        "industry_performance": "include_industry_performance",
+        "sector_pe": "include_sector_pe",
+        "industry_pe": "include_industry_pe",
     }
     return mapping.get(section_key, "")
 
@@ -536,8 +565,6 @@ def _build_feature_preview_result(
 
         if data.get("include_ttm_financial_statements"):
             ttm_sections = {
-                "key_metrics_ttm": "km_ttm__",
-                "ratios_ttm": "rt_ttm__",
                 "income_statement_ttm": "is_ttm__",
                 "cash_flow_ttm": "cf_ttm__",
                 "balance_sheet_ttm": "bs_ttm__",
@@ -565,13 +592,15 @@ def _build_feature_preview_result(
                     source_counts[key] = len(grouped_feature_columns[key])
 
         if data.get("include_ownership_features"):
-            selected_sections.add("insider_trading")
+            selected_sections.update({"insider_trading", "positions_summary"})
             built = build_ownership_features(symbol_obj, target_index)
             if not built.df.empty:
                 merged = merged.join(built.df[built.feature_cols], how="left")
                 feature_columns.extend(built.feature_cols)
                 grouped_feature_columns["insider_trading"] = [c for c in built.feature_cols if c.startswith("own__insider_")]
                 source_counts["insider_trading"] = len(grouped_feature_columns["insider_trading"])
+                grouped_feature_columns["positions_summary"] = [c for c in built.feature_cols if c.startswith("ps__")]
+                source_counts["positions_summary"] = len(grouped_feature_columns["positions_summary"])
 
         if data.get("include_economic_indicators"):
             economic_series_codes = tuple(str(code) for code in EconomicIndicatorSeries.objects.order_by("code").values_list("code", flat=True))
@@ -612,6 +641,36 @@ def _build_feature_preview_result(
                 feature_columns.extend(treasury_cols)
                 grouped_feature_columns["treasury_rates"] = treasury_cols
                 source_counts["treasury_rates"] = len(treasury_cols)
+
+        for family_key, enabled_key, builder in (
+            ("sector_performance", "include_sector_performance", build_sector_performance_features),
+            ("industry_performance", "include_industry_performance", build_industry_performance_features),
+        ):
+            if not data.get(enabled_key):
+                continue
+            selected_sections.add(family_key)
+            built = builder(symbol_obj, target_index, df_prices=df_prices)
+            if built.df.empty or not built.feature_cols:
+                continue
+            merged = merged.join(built.df[built.feature_cols], how="left")
+            feature_columns.extend(built.feature_cols)
+            grouped_feature_columns[family_key] = list(built.feature_cols)
+            source_counts[family_key] = len(built.feature_cols)
+
+        for family_key, enabled_key, builder in (
+            ("sector_pe", "include_sector_pe", build_sector_pe_features),
+            ("industry_pe", "include_industry_pe", build_industry_pe_features),
+        ):
+            if not data.get(enabled_key):
+                continue
+            selected_sections.add(family_key)
+            built = builder(symbol_obj, target_index)
+            if built.df.empty or not built.feature_cols:
+                continue
+            merged = merged.join(built.df[built.feature_cols], how="left")
+            feature_columns.extend(built.feature_cols)
+            grouped_feature_columns[family_key] = list(built.feature_cols)
+            source_counts[family_key] = len(built.feature_cols)
 
         feature_columns = list(dict.fromkeys(feature_columns))
         preview_df = merged.reset_index()
