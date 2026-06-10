@@ -46,6 +46,8 @@ def default_live_trade_config() -> dict[str, Any]:
             "data_end": pd.Timestamp.today().strftime("%Y-%m-%d"),
         },
         "universe": {
+            "source": "auto",
+            "symbols": [],
             "country": "US",
             "exchanges": ["NASDAQ", "NYSE", "AMEX"],
             "min_market_cap": 10_000_000_000.0,
@@ -71,6 +73,7 @@ def default_live_trade_config() -> dict[str, Any]:
             "enabled": True,
             "refresh_symbol_sections_before_build": True,
             "refresh_macro_before_build": True,
+            "repair_symbol_metadata_before_build": True,
             "mode": "scoring_ready",
             "skip_cached_inactive_symbols": True,
             "skip_recent_price_attempts": True,
@@ -108,7 +111,7 @@ def run_live_trade_leaderboard_build(
     from ml.raw_stack import save_raw_stack_artifacts, train_ae, train_rf_models
     from pipeline.api import build_fundamental_dataframe, build_label_dataframe, build_macro_dataframe
     from pipeline.symbol_filters import select_top_symbols_by_latest_market_cap
-    from pipeline.universe_selection import resolve_symbol_universe
+    from pipeline.notebook_universe import resolve_notebook_universe
     from trading.live_trade import (
         build_technical_dataframe_from_django,
         expected_latest_price_date_from_market_clock,
@@ -134,19 +137,13 @@ def run_live_trade_leaderboard_build(
     log(f"Resolving symbol universe from {START_DATE} to {END_DATE}")
 
     ctx = SimpleNamespace(api_key=resolve_fmp_api_key(required=False))
-    resolved_universe = tuple(
-        resolve_symbol_universe(
-            min_market_cap=float(cfg["universe"]["min_market_cap"]),
-            country=str(cfg["universe"]["country"]),
-            exchanges=list(cfg["universe"]["exchanges"]),
-            exclude_pooled_vehicles=bool(cfg["universe"]["exclude_pooled_vehicles"]),
-            limit=cfg["universe"]["size"],
-        )
+    resolved_universe = resolve_notebook_universe(
+        cfg["universe"],
+        api_key=str(ctx.api_key or ""),
+        progress_logger=log,
     )
-    universe_source = "local DB"
-    if not resolved_universe:
-        raise RuntimeError("No symbols resolved for the configured universe.")
-    universe = tuple(str(symbol).strip().upper() for symbol in resolved_universe if str(symbol).strip())
+    universe = resolved_universe.symbols
+    universe_source = resolved_universe.source
     if not universe:
         raise RuntimeError("No symbols remained after universe resolution.")
     log(f"Resolved {len(universe):,} symbols for the training universe from {universe_source}")
@@ -164,6 +161,9 @@ def run_live_trade_leaderboard_build(
                 target_end_date=END_DATE,
                 refresh_mode=str(fmp_refresh_cfg.get("mode") or "prices_only"),
                 refresh_symbol_sections_before_build=True,
+                repair_symbol_metadata_before_build=bool(
+                    fmp_refresh_cfg.get("repair_symbol_metadata_before_build", True)
+                ),
                 refresh_macro_before_build=bool(fmp_refresh_cfg.get("refresh_macro_before_build", False)),
                 skip_cached_inactive_symbols=bool(fmp_refresh_cfg.get("skip_cached_inactive_symbols", True)),
                 skip_recent_price_attempts=bool(fmp_refresh_cfg.get("skip_recent_price_attempts", True)),

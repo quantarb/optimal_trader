@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional
+import json
 import time
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
-import fmpsdk
 import pandas as pd
+
+try:
+    import fmpsdk
+except ImportError:  # pragma: no cover - exercised only in minimal runtime environments
+    fmpsdk = None
 
 
 @dataclass(frozen=True)
@@ -56,7 +63,13 @@ class FMPClient:
             if self.sleep_s > 0:
                 time.sleep(self.sleep_s)
             try:
-                data = fmpsdk.request(self.api_key, endpoint, **payload)
+                if fmpsdk is not None:
+                    data = fmpsdk.request(self.api_key, endpoint, **payload)
+                else:
+                    query = urlencode({**payload, "apikey": self.api_key})
+                    url = f"https://financialmodelingprep.com/stable/{endpoint}?{query}"
+                    with urlopen(url, timeout=self.timeout_s) as response:
+                        data = json.loads(response.read().decode("utf-8"))
             except Exception as exc:
                 last_err = repr(exc)
             else:

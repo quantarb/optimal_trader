@@ -6,6 +6,8 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from fmp.symbol_dates import payload_listing_date
+
 
 @dataclass(frozen=True)
 class TimeFeatureConfig:
@@ -117,17 +119,8 @@ def _section_event_frame(symbol_obj, section_key: str, target_index: pd.MultiInd
 
 
 def _payload_ipo_date(payload: Any) -> pd.Timestamp | None:
-    if not isinstance(payload, dict):
-        return None
-    normalized = {str(k).lower().replace("_", ""): v for k, v in payload.items()}
-    for key in ("ipodate", "ipo", "firsttradedate", "listingdate"):
-        value = normalized.get(key)
-        if value in (None, ""):
-            continue
-        ts = pd.to_datetime(value, errors="coerce")
-        if pd.notna(ts):
-            return pd.Timestamp(ts).normalize()
-    return None
+    value = payload_listing_date(payload)
+    return pd.Timestamp(value).normalize() if value is not None else None
 
 
 def _add_event_distance_columns(

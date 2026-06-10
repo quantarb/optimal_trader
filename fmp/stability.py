@@ -7,6 +7,7 @@ from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
 from fmp.models import Symbol, SymbolSectionHistorical, SymbolSectionState
+from fmp.symbol_dates import effective_symbol_history_start
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,12 @@ class HistoricalSectionStability:
     coverage_ratio: float
     density_ratio: float | None
     fetched_recently: bool
+
+
+def should_defer_historical_refetch(assessment: HistoricalSectionStability) -> bool:
+    """Honor the endpoint cooldown even when stored history is incomplete."""
+
+    return bool(assessment.fetched_recently)
 
 
 def _mode_for_endpoint(endpoint) -> str:
@@ -67,6 +74,7 @@ def assess_historical_section_stability(
     section_key = str(endpoint.key)
     mode = _mode_for_endpoint(endpoint)
     effective_start = _effective_target_start(endpoint, target_start, target_end)
+    effective_start = effective_symbol_history_start(symbol, effective_start)
     queryset = SymbolSectionHistorical.objects.filter(symbol=symbol, section_key=section_key)
     aggregate = queryset.aggregate(
         count=Count("id"),
@@ -89,9 +97,22 @@ def assess_historical_section_stability(
         and state.last_fetched_at >= now - timedelta(days=threshold_days)
     )
 
+    # Periodic fundamentals normally begin at the first reporting date after
+    # listing, not on the listing day itself. Do not classify that initial
+    # quarter as missing history.
+    if (
+        mode == "periodic"
+        and min_date is not None
+        and effective_start < min_date <= effective_start + timedelta(days=120)
+    ):
+        effective_start = min_date
+
     window_days = max(1, (target_end - effective_start).days + 1)
     covered_start = max(min_date, effective_start) if min_date else None
-    covered_end = min(max_date, target_end) if max_date else None
+    if mode == "periodic" and max_date is not None:
+        covered_end = min(max_date + timedelta(days=120), target_end)
+    else:
+        covered_end = min(max_date, target_end) if max_date else None
     covered_days = (
         (covered_end - covered_start).days + 1
         if covered_start is not None and covered_end is not None and covered_end >= covered_start
@@ -172,4 +193,8 @@ def assess_historical_section_stability(
     )
 
 
-__all__ = ["HistoricalSectionStability", "assess_historical_section_stability"]
+__all__ = [
+    "HistoricalSectionStability",
+    "assess_historical_section_stability",
+    "should_defer_historical_refetch",
+]

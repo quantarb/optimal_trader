@@ -15,6 +15,7 @@ from .refresh import (
     refresh_universe_symbol_sections_from_fmp,
     resolve_fmp_api_key,
 )
+from .symbol_metadata import incomplete_symbol_metadata, sync_symbol_metadata_from_fmp
 
 
 def run_scoring_data_refresh_from_fmp(
@@ -24,6 +25,7 @@ def run_scoring_data_refresh_from_fmp(
     target_end_date=None,
     refresh_mode: str = "scoring_ready",
     refresh_symbol_sections_before_build: bool = True,
+    repair_symbol_metadata_before_build: bool = True,
     refresh_macro_before_build: bool = False,
     skip_cached_inactive_symbols: bool = True,
     skip_recent_price_attempts: bool = True,
@@ -45,7 +47,22 @@ def run_scoring_data_refresh_from_fmp(
         "symbol_refresh_plan": pd.DataFrame(),
         "symbol_refresh_results": pd.DataFrame(),
         "macro_refresh_results": pd.DataFrame(),
+        "symbol_metadata_repair_results": pd.DataFrame(),
     }
+    if repair_symbol_metadata_before_build:
+        if log is not None:
+            log("Checking required symbol metadata before refresh planning")
+        metadata_results = sync_symbol_metadata_from_fmp(
+            symbols=symbols,
+            progress_logger=progress_logger,
+        )
+        results["symbol_metadata_repair_results"] = metadata_results
+    else:
+        incomplete = incomplete_symbol_metadata(symbols)
+        if incomplete:
+            preview = ", ".join(f"{symbol}({','.join(fields)})" for symbol, fields in list(incomplete.items())[:20])
+            raise RuntimeError(f"Required symbol metadata is incomplete: {preview}")
+
     if not refresh_symbol_sections_before_build and not refresh_macro_before_build:
         return results
 

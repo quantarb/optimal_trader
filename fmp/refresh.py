@@ -45,7 +45,7 @@ from .sections import (
     _UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
     _UNIVERSE_DOWNLOAD_TARGET_YEARS,
 )
-from .stability import assess_historical_section_stability
+from .stability import assess_historical_section_stability, should_defer_historical_refetch
 from .transport import (
     candidates_support_date_window,
     fetch_first_success,
@@ -239,12 +239,6 @@ def _historical_section_fetch_mode(
     max_date = assessment.max_date
     min_date = assessment.min_date
     is_recent_enough = bool(max_date and max_date >= (target_end - timedelta(days=threshold_days)))
-    state = SymbolSectionState.objects.filter(symbol=symbol_obj, section_key=section_key).first()
-    fetched_recently = bool(
-        state
-        and state.last_fetched_at
-        and state.last_fetched_at >= (timezone.now() - timedelta(days=threshold_days))
-    )
     fundamental_anchor_date = _latest_company_fundamental_anchor_date(symbol_obj)
 
     if (
@@ -256,6 +250,14 @@ def _historical_section_fetch_mode(
         return "skip", []
 
     if assessment.stable:
+        return "skip", []
+
+    # A recent completed fetch is also a negative-cache entry. Some symbols
+    # cannot satisfy the configured history target because they are newly
+    # listed, the endpoint returns a bounded number of rows, or FMP has no
+    # records. Retrying the same full request on every build cannot improve
+    # that coverage and repeatedly selects the same symbols.
+    if should_defer_historical_refetch(assessment):
         return "skip", []
 
     fetch_mode = "full"
@@ -639,7 +641,13 @@ def _refresh_all_symbol_sections(
             mark_section_fetched(symbol_obj, section_key, kind)
             stats["sections_fetched"] += 1
         except Exception as exc:
-            if "HTTP 404" not in str(exc):
+            if "HTTP 404" in str(exc):
+                # Treat a confirmed missing endpoint response as a completed
+                # attempt so it observes the same refresh cooldown as an empty
+                # successful response.
+                mark_section_fetched(symbol_obj, section_key, kind)
+                stats["sections_fetched"] += 1
+            else:
                 section_errors[section_key] = str(exc)
 
     if refreshed_historical:
