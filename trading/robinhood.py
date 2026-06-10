@@ -348,7 +348,9 @@ def _option_market_price_fields(market_row: Mapping[str, Any] | dict[str, Any]) 
 
 def _sell_option_limit_price(row: Mapping[str, Any] | pd.Series | dict[str, Any]) -> tuple[float | None, str]:
     data = row.to_dict() if isinstance(row, pd.Series) else dict(row or {})
-    for key in ("bid_price", "mark_price", "limit_order_price", "price", "average_price"):
+    # For sell orders (credit received), target the ask to maximize premium.
+    # Fall back to mark / existing price / bid.
+    for key in ("ask_price", "mark_price", "limit_order_price", "price", "average_price", "bid_price"):
         value = _positive_float(data.get(key))
         if value is not None:
             return _round_option_limit_price(float(value)), key
@@ -981,6 +983,23 @@ def build_robinhood_option_trade_plan(
     plan_log_lines.append(f"Robinhood option plan code version: {ROBINHOOD_OPTION_PLAN_CODE_VERSION}.")
     current_df = current_option_positions.copy() if current_option_positions is not None else pd.DataFrame()
     pending_df = pending_option_orders.copy() if pending_option_orders is not None else pd.DataFrame()
+
+    # Track contracts (symbol, expiry, strike, type) that already have a pending sell_to_close.
+    # This lets us skip generating duplicate sell orders for the same contract.
+    pending_sell_contracts: set[tuple[str, str, float, str]] = set()
+    if not pending_df.empty:
+        pcopy = pending_df.copy()
+        if "symbol" in pcopy.columns:
+            pcopy["symbol"] = pcopy["symbol"].astype(str).str.strip().str.upper()
+        if "action" in pcopy.columns:
+            sell_mask = pcopy["action"].astype(str).str.startswith("sell_to_close")
+            for _, prow in pcopy.loc[sell_mask].iterrows():
+                psym = str(prow.get("symbol") or "").strip().upper()
+                pexp = str(prow.get("expiry_date") or "").strip()
+                pstrike = pd.to_numeric(pd.Series([prow.get("strike_price")]), errors="coerce").iloc[0]
+                ptype = str(prow.get("option_type") or "").strip().lower()
+                if psym and pexp and pd.notna(pstrike) and ptype:
+                    pending_sell_contracts.add((psym, pexp, float(pstrike), ptype))
     work = latest_scored_df.copy()
     work.index = pd.Index([str(idx).strip().upper() for idx in work.index], name="symbol")
     held_symbols = {
@@ -1159,6 +1178,25 @@ def build_robinhood_option_trade_plan(
                 continue
             retained_side_by_symbol[symbol] = -1
 
+    # Remove any exit/sell orders for contracts that already have a pending sell order.
+    # This prevents submitting duplicate sell orders for the same option contract.
+    if pending_sell_contracts and exit_contract_rows:
+        kept_exits: list[dict[str, Any]] = []
+        for erow in exit_contract_rows:
+            ekey = (
+                str(erow.get("symbol") or "").strip().upper(),
+                str(erow.get("expiry_date") or "").strip(),
+                float(pd.to_numeric(pd.Series([erow.get("strike_price")]), errors="coerce").iloc[0] or 0.0),
+                str(erow.get("option_type") or "").strip().lower(),
+            )
+            if ekey in pending_sell_contracts:
+                plan_log_lines.append(
+                    f"Step 2 option skip duplicate sell: {ekey[0]} | {ekey[3]} {ekey[1]} strike={ekey[2]} | reason=pending_sell_order_already_exists."
+                )
+                continue
+            kept_exits.append(erow)
+        exit_contract_rows = kept_exits
+
     capacity = max(0, int(top_k))
     exiting_symbols = {str(row.get("symbol") or "").strip().upper() for row in exit_contract_rows if str(row.get("symbol") or "").strip()}
     pending_entry_symbols: set[str] = set()
@@ -1237,6 +1275,10 @@ def build_robinhood_option_trade_plan(
         }
         for pending_symbol in sorted(pending_entry_symbols):
             plan_log_lines.append(f"Step 3 pending option order: {pending_symbol} | counts against top_k capacity.")
+    if pending_sell_contracts:
+        plan_log_lines.append(
+            f"Step 3 pending option sell orders: {len(pending_sell_contracts)} sell_to_close contract(s) already pending (duplicates skipped to avoid resubmitting sells)."
+        )
     occupied_symbols = set(retained_side_by_symbol) | pending_entry_symbols
     slots_left = max(0, capacity - len(occupied_symbols))
     plan_log_lines.append(
@@ -1628,6 +1670,8 @@ def enrich_robinhood_option_prices(orders_df: pd.DataFrame) -> pd.DataFrame:
             enriched.at[idx, "previous_close_price"] = float(previous_close_price)
         if str(row.get("action") or "").startswith("sell_to_close"):
             pricing_row = row.to_dict()
+            if ask_price is not None:
+                pricing_row["ask_price"] = float(ask_price)
             if bid_price is not None:
                 pricing_row["bid_price"] = float(bid_price)
             if mark_price is not None:
@@ -1784,6 +1828,7 @@ def submit_robinhood_option_orders(
         }
 
     responses: list[dict[str, Any]] = []
+    seen_sell_contracts: set[tuple[str, str, float, str]] = set()
     for _, row in orders_df.iterrows():
         symbol = str(row.get("symbol") or "").strip().upper()
         action = str(row.get("action") or "").strip().lower()
@@ -1792,6 +1837,12 @@ def submit_robinhood_option_orders(
         expiry_date = str(row.get("expiry_date") or "").strip()
         strike_price = pd.to_numeric(pd.Series([row.get("strike_price")]), errors="coerce").iloc[0]
         quantity = pd.to_numeric(pd.Series([row.get("quantity")]), errors="coerce").iloc[0]
+        if action in ("sell_to_close_call", "sell_to_close_put"):
+            skey = (symbol, expiry_date, float(strike_price) if pd.notna(strike_price) else 0.0, option_type)
+            if skey in seen_sell_contracts:
+                responses.append(_result_row(symbol, action, {"skipped": "duplicate_sell_order"}, skipped="duplicate_sell_order"))
+                continue
+            seen_sell_contracts.add(skey)
         if action == "cancel_buy_to_open_call" or action == "cancel_buy_to_open_put":
             order_id = str(row.get("order_id") or "").strip()
             if not order_id:
@@ -1805,10 +1856,12 @@ def submit_robinhood_option_orders(
         elif action == "buy_to_open_call" or action == "buy_to_open_put":
             limit_price, _limit_price_source = _buy_option_limit_price(row)
         elif action == "sell_to_close_call" or action == "sell_to_close_put":
+            # Use ask for sell orders to target a higher credit (better for the seller).
             limit_price = (
-                _positive_float(row.get("bid_price"))
+                _positive_float(row.get("ask_price"))
                 or _positive_float(row.get("limit_order_price"))
                 or _positive_float(row.get("price"))
+                or _positive_float(row.get("bid_price"))
             )
         else:
             limit_price = _positive_float(row.get("price"))

@@ -230,7 +230,7 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         self.assertEqual(float(enriched.loc[0, bid_limit_column]), 0.06)
         self.assertEqual(enriched.loc[0, "limit_price_source"], robinhood._buy_option_bid_limit_source())
 
-    def test_enrich_sell_to_close_sets_limit_order_price_from_bid(self) -> None:
+    def test_enrich_sell_to_close_sets_limit_order_price_from_ask(self) -> None:
         class FakeRobinhood:
             @staticmethod
             def get_option_market_data(symbol, expiry, strike, option_type):
@@ -260,11 +260,12 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         with patch.object(robinhood, "_require_robin_stocks", return_value=FakeRobinhood):
             enriched = robinhood.enrich_robinhood_option_prices(orders)
 
-        self.assertEqual(float(enriched.loc[0, "price"]), 1.20)
-        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 1.20)
-        self.assertEqual(enriched.loc[0, "limit_price_source"], "bid_price")
+        # Sell orders should target the ask to maximize credit received.
+        self.assertEqual(float(enriched.loc[0, "price"]), 1.35)
+        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 1.35)
+        self.assertEqual(enriched.loc[0, "limit_price_source"], "ask_price")
 
-    def test_enrich_sell_to_close_falls_back_to_existing_bid_when_quote_missing(self) -> None:
+    def test_enrich_sell_to_close_falls_back_to_existing_price_when_quote_missing(self) -> None:
         class FakeRobinhood:
             @staticmethod
             def get_option_market_data(symbol, expiry, strike, option_type):
@@ -293,6 +294,8 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         with patch.object(robinhood, "_require_robin_stocks", return_value=FakeRobinhood):
             enriched = robinhood.enrich_robinhood_option_prices(orders)
 
+        # When live quote is unavailable we fall back to whatever price is already on the row
+        # (ask/mark/price/bid in that order of preference inside _sell_option_limit_price).
         self.assertEqual(float(enriched.loc[0, "price"]), 1.15)
         self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 1.15)
         self.assertEqual(enriched.loc[0, "limit_price_source"], "bid_price")
