@@ -1767,18 +1767,13 @@ def macro_series_detail(request: HttpRequest, code: str):
 
 
 def symbol_chart(request: HttpRequest, symbol: str):
+    from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
+
     symbol_obj = get_object_or_404(Symbol, symbol__iexact=symbol)
     mode = str(request.GET.get("price_mode") or "adjusted").strip().lower()
     if mode not in {"adjusted", "unadjusted"}:
         mode = "adjusted"
-    section_key = "prices_div_adj" if mode == "adjusted" else "prices_unadjusted"
     mode_label = "Adjusted" if mode == "adjusted" else "Unadjusted"
-
-    price_qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
-        .order_by("record_date", "updated_at")
-        .only("record_date", "payload")
-    )
 
     labels: list[str] = []
     opens: list[float | None] = []
@@ -1787,33 +1782,39 @@ def symbol_chart(request: HttpRequest, symbol: str):
     closes: list[float | None] = []
     volumes: list[float | None] = []
 
-    for row in price_qs.iterator():
-        payload = row.payload if isinstance(row.payload, dict) else {}
-        date_str = str(payload.get("date") or row.record_date or "").strip()[:10]
-        if not date_str:
-            continue
+    price_frame = load_warehouse_price_frame(symbol_obj.symbol, is_etf=_symbol_is_etf(symbol_obj))
+    if price_frame is not None and not price_frame.empty:
+        price_frame = price_frame.copy()
+        price_frame.index = pd.to_datetime(price_frame.index, errors="coerce")
+        price_frame = price_frame[~price_frame.index.isna()].sort_index()
 
+    price_rows = price_frame.iterrows() if price_frame is not None and not price_frame.empty else []
+    for idx, row in price_rows:
+        date_str = pd.Timestamp(idx).strftime("%Y-%m-%d")
         if mode == "adjusted":
-            open_v = _safe_float(payload.get("adjOpen"))
-            high_v = _safe_float(payload.get("adjHigh"))
-            low_v = _safe_float(payload.get("adjLow"))
-            close_v = _safe_float(payload.get("adjClose"))
+            open_v = _safe_float(row.get("adj_open"))
+            high_v = _safe_float(row.get("adj_high"))
+            low_v = _safe_float(row.get("adj_low"))
+            close_v = _safe_float(row.get("adj_close"))
         else:
-            open_v = _safe_float(payload.get("open"))
-            high_v = _safe_float(payload.get("high"))
-            low_v = _safe_float(payload.get("low"))
-            close_v = _safe_float(payload.get("close"))
-        volume_v = _safe_float(payload.get("volume"))
+            open_v = _safe_float(row.get("open"))
+            high_v = _safe_float(row.get("high"))
+            low_v = _safe_float(row.get("low"))
+            close_v = _safe_float(row.get("close"))
+        volume_v = _safe_float(row.get("volume"))
+
+        if close_v is None:
+            continue
 
         # Cross-mode fallback if keys differ in payload.
         if open_v is None:
-            open_v = _safe_float(payload.get("adjOpen")) or _safe_float(payload.get("open"))
+            open_v = _safe_float(row.get("adj_open")) or _safe_float(row.get("open"))
         if high_v is None:
-            high_v = _safe_float(payload.get("adjHigh")) or _safe_float(payload.get("high"))
+            high_v = _safe_float(row.get("adj_high")) or _safe_float(row.get("high"))
         if low_v is None:
-            low_v = _safe_float(payload.get("adjLow")) or _safe_float(payload.get("low"))
+            low_v = _safe_float(row.get("adj_low")) or _safe_float(row.get("low"))
         if close_v is None:
-            close_v = _safe_float(payload.get("adjClose")) or _safe_float(payload.get("close"))
+            close_v = _safe_float(row.get("adj_close")) or _safe_float(row.get("close"))
 
         labels.append(date_str)
         opens.append(open_v)
@@ -1952,7 +1953,7 @@ def symbol_detail(request: HttpRequest, symbol: str):
     ratios_rows: list[list] = []
     extra_sections: list[dict] = []
     data_error: str | None = None
-    price_source_label = "FMP stable historical-price-eod/dividend-adjusted (chunked by date range)"
+    price_source_label = "quant-warehouse adjusted price history"
     historical_ranges = dict(symbol_obj.historical_date_ranges or {})
 
     api_key = os.getenv("FMP_API_KEY")
@@ -2069,13 +2070,46 @@ def symbol_detail(request: HttpRequest, symbol: str):
             _, header_labels, rows = _records_to_table(records, max_rows=min(int(section.max_rows), 10))
             snapshot_items = []
 
-        if section_key == "prices_div_adj":
-            price_header_labels, price_rows = header_labels, rows
-            price_error = error_msg
-            continue
-        if section_key == "prices_unadjusted":
-            price_unadj_header_labels, price_unadj_rows = header_labels, rows
-            price_unadj_error = error_msg
+        if section_key in {"prices_div_adj", "prices_unadjusted"}:
+            from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
+
+            price_frame = load_warehouse_price_frame(symbol_obj.symbol, is_etf=_symbol_is_etf(symbol_obj))
+            if price_frame is not None and not price_frame.empty:
+                frame = price_frame.copy()
+                frame.index = pd.to_datetime(frame.index, errors="coerce")
+                frame = frame[~frame.index.isna()].sort_index()
+                records = []
+                for idx, row in frame.iterrows():
+                    date_value = pd.Timestamp(idx).strftime("%Y-%m-%d")
+                    if section_key == "prices_div_adj":
+                        records.append(
+                            {
+                                "date": date_value,
+                                "adj_open": row.get("adj_open"),
+                                "adj_high": row.get("adj_high"),
+                                "adj_low": row.get("adj_low"),
+                                "adj_close": row.get("adj_close"),
+                                "volume": row.get("volume"),
+                            }
+                        )
+                    else:
+                        records.append(
+                            {
+                                "date": date_value,
+                                "open": row.get("open"),
+                                "high": row.get("high"),
+                                "low": row.get("low"),
+                                "close": row.get("close"),
+                                "volume": row.get("volume"),
+                            }
+                        )
+                _, header_labels, rows = _records_to_table(records, max_rows=min(int(section.max_rows), 10))
+            if section_key == "prices_div_adj":
+                price_header_labels, price_rows = header_labels, rows
+                price_error = error_msg
+            else:
+                price_unadj_header_labels, price_unadj_rows = header_labels, rows
+                price_unadj_error = error_msg
             continue
         if section_key == "key_metrics":
             metrics_header_labels, metrics_rows = header_labels, rows

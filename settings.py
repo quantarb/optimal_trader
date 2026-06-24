@@ -97,3 +97,29 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_ALWAYS_EAGER = str(os.getenv("CELERY_TASK_ALWAYS_EAGER", "0")).strip().lower() in {"1", "true", "yes", "on"}
 CELERY_TASK_EAGER_PROPAGATES = str(os.getenv("CELERY_TASK_EAGER_PROPAGATES", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Quant Warehouse — ArcticDB store (code per env, data at QW_HOME).
+QW_HOME = os.getenv("QW_HOME", str(Path.home() / ".quant-warehouse"))
+QW_PRICE_PROVIDER = os.getenv("QW_PRICE_PROVIDER", "fmp")
+QW_FUNDAMENTAL_PROVIDER = os.getenv("QW_FUNDAMENTAL_PROVIDER", "fmp")
+QW_READ_PRICES = os.getenv("QW_READ_PRICES", "1")
+QW_READ_FUNDAMENTALS = os.getenv("QW_READ_FUNDAMENTALS", "1")
+QW_REFRESH_ENABLED = os.getenv("QW_REFRESH_ENABLED", "1")
+QW_PROFILE_PROVIDER = os.getenv("QW_PROFILE_PROVIDER", "yfinance")
+QW_READ_MACRO = os.getenv("QW_READ_MACRO", "1")
+QW_MACRO_PROVIDER = os.getenv("QW_MACRO_PROVIDER", "fmp")
+QW_SCREENER_ENABLED = os.getenv("QW_SCREENER_ENABLED", "1")
+QW_SCREENER_PROVIDER = os.getenv("QW_SCREENER_PROVIDER", "fmp")
+
+os.environ.setdefault("QW_HOME", QW_HOME)
+os.environ.setdefault("QW_PRICE_PROVIDER", QW_PRICE_PROVIDER)
+os.environ.setdefault("QW_FUNDAMENTAL_PROVIDER", QW_FUNDAMENTAL_PROVIDER)
+os.environ.setdefault("QW_READ_PRICES", QW_READ_PRICES)
+os.environ.setdefault("QW_READ_FUNDAMENTALS", QW_READ_FUNDAMENTALS)
+os.environ.setdefault("QW_REFRESH_ENABLED", QW_REFRESH_ENABLED)
+os.environ.setdefault("QW_PROFILE_PROVIDER", QW_PROFILE_PROVIDER)
+os.environ.setdefault("QW_READ_MACRO", QW_READ_MACRO)
+os.environ.setdefault("QW_MACRO_PROVIDER", QW_MACRO_PROVIDER)
+os.environ.setdefault("QW_SCREENER_ENABLED", QW_SCREENER_ENABLED)
+os.environ.setdefault("QW_SCREENER_PROVIDER", QW_SCREENER_PROVIDER)

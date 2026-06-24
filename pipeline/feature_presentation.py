@@ -152,11 +152,8 @@ def _infer_format(name: str, family: str) -> tuple[str, int]:
         return "ratio", 2
     if family in {
         "income_statement",
-        "income_statement_ttm",
         "cash_flow",
-        "cash_flow_ttm",
         "balance_sheet",
-        "balance_sheet_ttm",
         "financial_growth",
         "key_metrics",
     } and not any(token in lowered for token in ("ratio", "margin", "yield", "growth", "eps")):

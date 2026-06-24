@@ -7,9 +7,10 @@ from typing import Any, Sequence
 
 import pandas as pd
 
+from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
 from pipeline.feature_presentation import format_feature_value, get_feature_definition
 
-from fmp.models import Symbol, SymbolSectionHistorical
+from fmp.models import Symbol
 
 from pipeline.contracts import normalize_prediction_row
 from pipeline.models import Artifact
@@ -107,35 +108,13 @@ def load_price_frame(symbol: str) -> pd.DataFrame:
     symbol_obj = Symbol.objects.filter(symbol__iexact=str(symbol or "").strip()).first()
     if symbol_obj is None:
         return pd.DataFrame()
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key="prices_div_adj")
-        .order_by("record_date", "updated_at")
-        .only("record_date", "payload")
-    )
-    rows: list[dict[str, Any]] = []
-    for item in qs.iterator():
-        payload = item.payload if isinstance(item.payload, dict) else {}
-        date_value = payload.get("date") or (item.record_date.isoformat() if item.record_date else None)
-        if not date_value:
-            continue
-        rows.append(
-            {
-                "date": str(date_value)[:10],
-                "open": payload.get("adjOpen"),
-                "high": payload.get("adjHigh"),
-                "low": payload.get("adjLow"),
-                "close": payload.get("adjClose"),
-                "volume": payload.get("volume"),
-            }
-        )
-    if not rows:
+    df = load_warehouse_price_frame(symbol_obj.symbol, is_etf=_symbol_is_etf(symbol_obj))
+    if df is None or df.empty:
         return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    return df[~df.index.duplicated(keep="last")]
+    out = df.copy()
+    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = out[~out.index.isna()].sort_index()
+    return out[~out.index.duplicated(keep="last")]
 
 
 def build_price_chart_context(symbol: str) -> dict[str, Any]:

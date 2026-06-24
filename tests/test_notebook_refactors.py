@@ -21,6 +21,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _SYNTHETIC_BACKTEST = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_SYNTHETIC_BACKTEST)
 run_top_k_long_only_score_rule = _SYNTHETIC_BACKTEST.run_top_k_long_only_score_rule
+prepare_capacity_rule_inputs = _SYNTHETIC_BACKTEST.prepare_capacity_rule_inputs
 summarize_curve = _SYNTHETIC_BACKTEST.summarize_curve
 
 
@@ -65,6 +66,27 @@ def test_long_only_score_rule_respects_capacity_and_lagged_signals():
     assert int(positions.iloc[0].sum()) == 0
     assert positions.loc[pd.Timestamp("2024-01-02"), "AAPL"] == 1
     assert int(positions.iloc[1].sum()) == 1
+
+
+def test_prepare_capacity_rule_inputs_is_public_and_lags_scores():
+    index = pd.MultiIndex.from_product(
+        [pd.date_range("2024-01-01", periods=2), ["AAPL", "MSFT"]],
+        names=["date", "symbol"],
+    )
+    panel = pd.DataFrame(
+        {
+            "prob_buy": [0.8, 0.6, 0.7, 0.5],
+            "prob_short": [0.2, 0.4, 0.3, 0.5],
+            "close": [100.0, 200.0, 101.0, 201.0],
+        },
+        index=index,
+    )
+
+    inputs = prepare_capacity_rule_inputs(panel, "prob_buy", ["prob_buy"], "close")
+
+    assert inputs["symbols"] == ["AAPL", "MSFT"]
+    assert inputs["score"].iloc[0].isna().all()
+    assert inputs["score"].iloc[1].tolist() == [0.8, 0.6]
 
 
 def test_trading_notebook_helpers_build_config_summary_and_query(tmp_path: Path):

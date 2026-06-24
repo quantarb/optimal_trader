@@ -23,7 +23,6 @@ class FeatureToggleSpec:
     include_time_calendar_features: bool = True
     include_fundamental_change: bool = True
     include_statement_quality: bool = True
-    include_ttm_financial_statements: bool = False
     include_event_features: bool = True
     include_ownership_features: bool = True
     include_economic_indicators: bool = True
@@ -50,10 +49,6 @@ class FeatureToggleSpec:
             ),
             include_fundamental_change=_as_bool(raw.get("include_fundamental_change"), defaults.include_fundamental_change),
             include_statement_quality=_as_bool(raw.get("include_statement_quality"), defaults.include_statement_quality),
-            include_ttm_financial_statements=_as_bool(
-                raw.get("include_ttm_financial_statements"),
-                defaults.include_ttm_financial_statements,
-            ),
             include_event_features=_as_bool(raw.get("include_event_features"), defaults.include_event_features),
             include_ownership_features=_as_bool(raw.get("include_ownership_features"), defaults.include_ownership_features),
             include_economic_indicators=_as_bool(raw.get("include_economic_indicators"), defaults.include_economic_indicators),
@@ -79,7 +74,6 @@ class FeatureToggleSpec:
             "include_time_calendar_features": bool(self.include_time_calendar_features),
             "include_fundamental_change": bool(self.include_fundamental_change),
             "include_statement_quality": bool(self.include_statement_quality),
-            "include_ttm_financial_statements": bool(self.include_ttm_financial_statements),
             "include_event_features": bool(self.include_event_features),
             "include_ownership_features": bool(self.include_ownership_features),
             "include_economic_indicators": bool(self.include_economic_indicators),

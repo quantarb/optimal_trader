@@ -73,7 +73,7 @@ def default_live_trade_config() -> dict[str, Any]:
             "enabled": True,
             "refresh_symbol_sections_before_build": True,
             "refresh_macro_before_build": True,
-            "repair_symbol_metadata_before_build": True,
+            "repair_symbol_metadata_before_build": False,
             "mode": "scoring_ready",
             "skip_cached_inactive_symbols": True,
             "skip_recent_price_attempts": True,
@@ -101,7 +101,7 @@ def run_live_trade_leaderboard_build(
     progress_logger: Any | None = None,
 ) -> LiveTradeLeaderboardArtifacts:
     log = _coerce_progress_logger(progress_logger)
-    log("Bootstrapping Django and importing live-trade pipeline modules")
+    log("Bootstrapping app modules and importing live-trade pipeline modules")
     bootstrap_django()
     from backtest.latest import make_autoencoder_familiarity_predictor, run_latest_prediction_custom
     from backtest.raw_stack import ProbabilityColumnConfig, enrich_scored_panel
@@ -152,9 +152,15 @@ def run_live_trade_leaderboard_build(
     macro_feature_config = MacroFeatureConfig()
     auto_refresh_enabled = bool(fmp_refresh_cfg.get("enabled", False))
     has_fmp_api_key = bool(str(ctx.api_key or "").strip())
+    try:
+        from data.warehouse_refresh import use_warehouse_refresh
+
+        refresh_backend_ready = bool(use_warehouse_refresh() or has_fmp_api_key)
+    except Exception:
+        refresh_backend_ready = has_fmp_api_key
 
     if auto_refresh_enabled and bool(fmp_refresh_cfg.get("refresh_symbol_sections_before_build", False)):
-        if has_fmp_api_key:
+        if refresh_backend_ready:
             run_scoring_data_refresh_from_fmp(
                 symbols=universe,
                 target_start_date=START_DATE,
@@ -162,7 +168,7 @@ def run_live_trade_leaderboard_build(
                 refresh_mode=str(fmp_refresh_cfg.get("mode") or "prices_only"),
                 refresh_symbol_sections_before_build=True,
                 repair_symbol_metadata_before_build=bool(
-                    fmp_refresh_cfg.get("repair_symbol_metadata_before_build", True)
+                    fmp_refresh_cfg.get("repair_symbol_metadata_before_build", False)
                 ),
                 refresh_macro_before_build=bool(fmp_refresh_cfg.get("refresh_macro_before_build", False)),
                 skip_cached_inactive_symbols=bool(fmp_refresh_cfg.get("skip_cached_inactive_symbols", True)),
@@ -176,9 +182,9 @@ def run_live_trade_leaderboard_build(
                 progress_logger=log,
             )
         else:
-            log("Skipping FMP symbol refresh because FMP_API_KEY is not configured")
+            log("Skipping warehouse symbol refresh because quant-warehouse/OpenBB credentials are not configured")
 
-    log("Building technical feature panel from Django price history")
+    log("Building technical feature panel from quant-warehouse price history")
     technical_df, _technical_cols = build_technical_dataframe_from_django(
         symbols=universe,
         start_date=START_DATE,
@@ -376,12 +382,14 @@ def run_live_trade_leaderboard_build(
     scoring_panel, scoring_panel_stats = build_latest_scoring_panel(
         feature_df=final_df,
         scoring_date=scoring_date,
+        allow_carry_forward=False,
     )
+    inactive_symbol_count = max(int(len(universe)) - int(len(scoring_panel)), 0)
     log(
         "Latest scoring panel ready with "
         f"{len(scoring_panel):,} symbols"
         f" | exact-date rows {int(scoring_panel_stats['exact_date_count']):,}"
-        f" | carry-forward rows {int(scoring_panel_stats['carry_forward_count']):,}"
+        f" | inactive symbols {inactive_symbol_count:,}"
     )
     log("Scoring the latest cross-section with the trained models")
     latest_date, latest_scored = run_latest_prediction_custom(
@@ -433,6 +441,7 @@ def run_live_trade_leaderboard_build(
         config=cfg,
         vector_metadata=vector_metadata,
         universe_size=len(universe),
+        inactive_symbol_count=inactive_symbol_count,
     )
     log("Leaderboard artifacts saved")
     return LiveTradeLeaderboardArtifacts(
@@ -451,7 +460,7 @@ def build_latest_scoring_panel(
     *,
     feature_df: pd.DataFrame,
     scoring_date: pd.Timestamp,
-    allow_carry_forward: bool = True,
+    allow_carry_forward: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if feature_df.empty:
         raise RuntimeError("Feature panel is empty; cannot build latest scoring panel.")
@@ -470,18 +479,8 @@ def build_latest_scoring_panel(
     latest_rows = work.groupby("symbol", as_index=False, sort=False).tail(1).copy()
     latest_rows["feature_as_of_date"] = latest_rows["date"]
     exact_date_mask = latest_rows["feature_as_of_date"].eq(scoring_ts)
+    inactive_count = int((~exact_date_mask).sum())
     if not allow_carry_forward:
-        missing_date_symbols = latest_rows.loc[~exact_date_mask, ["symbol", "feature_as_of_date"]].copy()
-        if not missing_date_symbols.empty:
-            missing_sample = ", ".join(
-                f"{row.symbol}:{pd.Timestamp(row.feature_as_of_date).date().isoformat()}"
-                for row in missing_date_symbols.head(20).itertuples(index=False)
-            )
-            raise RuntimeError(
-                f"Expected all symbols to have feature rows exactly on the scoring date "
-                f"{scoring_ts.date().isoformat()}, but {len(missing_date_symbols):,} symbol(s) did not. "
-                f"First stale symbols: {missing_sample}"
-            )
         latest_rows = latest_rows.loc[exact_date_mask].copy()
         exact_date_mask = pd.Series(True, index=latest_rows.index, dtype=bool)
         if latest_rows.empty:
@@ -495,6 +494,7 @@ def build_latest_scoring_panel(
         "symbol_count": int(len(latest_rows)),
         "exact_date_count": int(exact_date_mask.sum()),
         "carry_forward_count": int((~exact_date_mask).sum()),
+        "inactive_count": inactive_count,
     }
     return scoring_panel, stats
 
@@ -797,6 +797,7 @@ def save_leaderboard_artifacts(
     config: Mapping[str, Any],
     vector_metadata: Mapping[str, Any],
     universe_size: int | None = None,
+    inactive_symbol_count: int | None = None,
 ) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     leaderboard.to_pickle(artifact_dir / LEADERBOARD_FRAME_FILENAME)
@@ -811,6 +812,11 @@ def save_leaderboard_artifacts(
         "rows": int(len(leaderboard)),
         "universe_size": None if universe_size is None else int(universe_size),
         "scored_symbol_count": int(len(leaderboard)),
+        "inactive_symbol_count": (
+            max(int(universe_size) - int(len(leaderboard)), 0)
+            if inactive_symbol_count is None and universe_size is not None
+            else int(inactive_symbol_count or 0)
+        ),
         "leaderboard_scope": "all_scored",
         "config": dict(config),
         "vector_metadata": dict(vector_metadata),

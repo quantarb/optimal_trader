@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-import hashlib
 import re
-from datetime import timedelta
 from urllib.parse import urlencode
 import pandas as pd
 
@@ -22,7 +20,6 @@ from fmp.models import Symbol
 from fmp.models import SymbolSectionHistorical
 from fmp.models import WorkflowState
 from labels.strategy_solver import solve_joint_trades_by_frequency
-from data import FMPClient
 from domain.labels.specs import LabelBuildSpec
 from domain.trades.operations import apply_trade_deduplication, trade_return_pct
 from utils.workflow import workflow_symbols_from_request
@@ -72,51 +69,6 @@ def _parse_k_list(raw: str | None) -> list[int]:
     return out
 
 
-def _stable_record_key(record: dict) -> str:
-    blob = json.dumps(record, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def _download_and_store_adjusted_prices(symbol_obj: Symbol, api_key: str) -> int:
-    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2)
-    section_key = "prices_div_adj"
-    start = timezone.datetime(1999, 1, 22).date()
-    end = timezone.now().date()
-    cur = start
-    saved = 0
-    while cur <= end:
-        nxt = min(end, cur + timedelta(days=365 * 10))
-        raw = client.get_json(
-            "/stable/historical-price-eod/dividend-adjusted",
-            params={
-                "symbol": symbol_obj.symbol,
-                "from": cur.isoformat(),
-                "to": nxt.isoformat(),
-            },
-        )
-        rows = raw if isinstance(raw, list) else []
-        for rec in rows:
-            if not isinstance(rec, dict):
-                continue
-            date_raw = str(rec.get("date") or "")[:10]
-            try:
-                record_date = pd.to_datetime(date_raw).date() if date_raw else None
-            except Exception:
-                record_date = None
-            SymbolSectionHistorical.objects.update_or_create(
-                symbol=symbol_obj,
-                section_key=section_key,
-                record_key=_stable_record_key(rec),
-                defaults={
-                    "record_date": record_date,
-                    "payload": rec,
-                },
-            )
-            saved += 1
-        cur = nxt + timedelta(days=1)
-    return saved
-
-
 def _load_adjusted_daily(
     symbol_obj: Symbol,
     *,
@@ -128,41 +80,31 @@ def _load_adjusted_daily(
         cached = price_frames.get(str(symbol_obj.symbol).strip().upper())
         if cached is not None:
             return cached.copy()
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key="prices_div_adj")
-        .order_by("record_date", "updated_at")
-        .only("payload", "record_date")
-    )
-    if start_date:
-        qs = qs.filter(record_date__gte=pd.to_datetime(start_date).date())
-    if end_date:
-        qs = qs.filter(record_date__lte=pd.to_datetime(end_date).date())
-    rows = []
-    for item in qs.iterator():
-        payload = item.payload if isinstance(item.payload, dict) else {}
-        dt = payload.get("date") or (item.record_date.isoformat() if item.record_date else None)
-        if not dt:
-            continue
-        rows.append(
-            {
-                "date": str(dt)[:10],
-                "adj_open": payload.get("adjOpen"),
-                "adj_high": payload.get("adjHigh"),
-                "adj_low": payload.get("adjLow"),
-                "adj_close": payload.get("adjClose"),
-                "volume": payload.get("volume"),
-            }
-        )
-    if not rows:
+
+    frame = load_adjusted_price_frames(
+        [str(symbol_obj.symbol).strip().upper()],
+        start_date=start_date,
+        end_date=end_date,
+    ).get(str(symbol_obj.symbol).strip().upper(), pd.DataFrame())
+    if frame is None or frame.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = frame.copy()
+    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[~df.index.isna()].sort_index()
+    for source, target in (
+        ("open", "adj_open"),
+        ("high", "adj_high"),
+        ("low", "adj_low"),
+        ("close", "adj_close"),
+    ):
+        if target not in df.columns and source in df.columns:
+            df[target] = df[source]
     for col in ("adj_open", "adj_high", "adj_low", "adj_close", "volume"):
+        if col not in df.columns:
+            df[col] = pd.NA
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-    return df
+    return df[["adj_open", "adj_high", "adj_low", "adj_close", "volume"]]
 
 
 def _ret_pct(side: str, entry_px: float, exit_px: float) -> float:

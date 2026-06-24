@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+import pandas as pd
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
+from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
 from fmp.models import Symbol, SymbolSectionHistorical, SymbolSectionState
 from fmp.symbol_dates import effective_symbol_history_start
 
@@ -75,6 +77,66 @@ def assess_historical_section_stability(
     mode = _mode_for_endpoint(endpoint)
     effective_start = _effective_target_start(endpoint, target_start, target_end)
     effective_start = effective_symbol_history_start(symbol, effective_start)
+    threshold_days = max(1, int(getattr(endpoint, "threshold_days", 1) or 1))
+
+    if section_key == "prices_div_adj":
+        frame = load_warehouse_price_frame(
+            symbol.symbol,
+            start_date=effective_start.isoformat(),
+            end_date=target_end.isoformat(),
+            is_etf=_symbol_is_etf(symbol),
+        )
+        if frame is None or frame.empty:
+            return HistoricalSectionStability(
+                False, "insufficient_observations", mode, 0.0, 0, 0, None, None, 0.0, 0.0, False,
+            )
+        indexed = frame.copy()
+        indexed.index = pd.to_datetime(indexed.index, errors="coerce")
+        indexed = indexed[~indexed.index.isna()].sort_index()
+        if indexed.empty:
+            return HistoricalSectionStability(
+                False, "insufficient_observations", mode, 0.0, 0, 0, None, None, 0.0, 0.0, False,
+            )
+        min_date = indexed.index.min().date()
+        max_date = indexed.index.max().date()
+        count = int(len(indexed))
+        distinct_dates = count
+        window_days = max(1, (target_end - effective_start).days + 1)
+        covered_start = max(min_date, effective_start)
+        covered_end = min(max_date, target_end)
+        covered_days = (covered_end - covered_start).days + 1 if covered_end >= covered_start else 0
+        coverage_ratio = min(1.0, max(0.0, covered_days / window_days))
+        expected = max(1, _business_days(effective_start, min(target_end, max_date)))
+        density_ratio = min(1.0, count / expected)
+        recent_cutoff = target_end - timedelta(days=threshold_days)
+        recent_enough = max_date >= recent_cutoff
+        valid_dates = True
+        coverage_ok = coverage_ratio >= 0.90
+        density_ok = density_ratio >= 0.90
+        stable = recent_enough and coverage_ok and density_ok and valid_dates
+        if not coverage_ok:
+            reason = "insufficient_date_coverage"
+        elif not density_ok:
+            reason = "sparse_observation_density"
+        elif not recent_enough:
+            reason = "latest_observation_is_stale"
+        else:
+            reason = "stable_historical_section"
+        score = 0.25 * coverage_ratio + 0.25 * density_ratio + 0.25 * float(recent_enough) + 0.25
+        return HistoricalSectionStability(
+            stable,
+            reason,
+            mode,
+            round(score, 3),
+            count,
+            distinct_dates,
+            min_date,
+            max_date,
+            coverage_ratio,
+            density_ratio,
+            recent_enough,
+        )
+
     queryset = SymbolSectionHistorical.objects.filter(symbol=symbol, section_key=section_key)
     aggregate = queryset.aggregate(
         count=Count("id"),
@@ -90,7 +152,6 @@ def assess_historical_section_stability(
     max_date = aggregate["max_date"]
 
     state = SymbolSectionState.objects.filter(symbol=symbol, section_key=section_key).first()
-    threshold_days = max(1, int(endpoint.threshold_days))
     fetched_recently = bool(
         state
         and state.last_fetched_at

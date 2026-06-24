@@ -5,12 +5,10 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
-from labels.events import build_label_panel, deduplicate_labels
-from labels.ranking import add_rank_regression_labels
-from labels.strategy_solver import (
-    solve_joint_trades_by_frequency,
-    solve_longs_by_frequency,
-    solve_shorts_by_frequency,
+from quant_warehouse.target_engineering import (
+    add_rank_regression_labels,
+    build_label_panel,
+    deduplicate_labels,
 )
 
 
@@ -94,9 +92,6 @@ def build_label_dataframe(
 
     df_raw = build_label_panel(
         daily_by_symbol=daily_by_symbol,
-        solve_longs_by_frequency_fn=solve_longs_by_frequency,
-        solve_shorts_by_frequency_fn=solve_shorts_by_frequency,
-        solve_joint_by_frequency_fn=solve_joint_trades_by_frequency,
         k_params=k_params,
         execution_params=execution_params,
         weighting=weighting,

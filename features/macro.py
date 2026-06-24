@@ -5,17 +5,12 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from fmp.models import (
-    EconomicIndicatorObservation,
-    EconomicIndicatorSeries,
-    TreasuryRateObservation,
-    TreasuryRateSeries,
-)
+from quant_warehouse.warehouse.sections import DEFAULT_ECONOMIC_SERIES
 
 
 @dataclass(frozen=True)
 class EconomicDataConfig:
-    economic_indicator_series: Tuple[str, ...] = ("GDP", "CPI", "unemploymentRate", "inflationRate", "federalFunds")
+    economic_indicator_series: Tuple[str, ...] = DEFAULT_ECONOMIC_SERIES
     include_treasury_rates: bool = True
     winsorize_p: Optional[float] = None
     fill_method: str = "none"
@@ -35,8 +30,10 @@ ECON_NAME_CANDIDATES: Dict[str, List[str]] = {
 
 
 def _resolve_requested_series_codes(cfg: EconomicDataConfig) -> list[str]:
-    economic_available = set(EconomicIndicatorSeries.objects.values_list("code", flat=True))
-    treasury_available = [str(code) for code in TreasuryRateSeries.objects.order_by("code").values_list("code", flat=True)]
+    from data.warehouse import list_warehouse_treasury_series_codes
+
+    economic_available = {str(code).strip() for code in cfg.economic_indicator_series if str(code).strip()}
+    treasury_available = list(list_warehouse_treasury_series_codes())
     treasury_available_set = set(treasury_available)
     requested: list[str] = []
     for raw in cfg.economic_indicator_series:
@@ -68,50 +65,27 @@ def fetch_economic_data_series(
     verbose: bool = False,
     lookback_days: int = 0,
 ) -> pd.DataFrame:
-    """
-    Compatibility entrypoint.
-    Loads sparse economic indicator and treasury-rate series from the Django DB.
-    """
+    """Load sparse economic indicator and treasury-rate series from quant-warehouse."""
+
     del api_key, verbose, lookback_days
     cfg = config or EconomicDataConfig()
     series_codes = _resolve_requested_series_codes(cfg)
     if not series_codes:
         return pd.DataFrame()
 
-    rows: dict[str, dict[str, float]] = {}
-    economic_codes = [code for code in series_codes if not str(code).startswith("macro__ust_")]
-    treasury_codes = [code for code in series_codes if str(code).startswith("macro__ust_")]
+    from data.warehouse import load_warehouse_macro_panel
 
-    economic_obs_qs = (
-        EconomicIndicatorObservation.objects.filter(
-            series__code__in=economic_codes,
-            observation_date__gte=pd.to_datetime(start_date).date(),
-            observation_date__lte=pd.to_datetime(end_date).date(),
-        )
-        .select_related("series")
-        .order_by("observation_date")
+    panel = load_warehouse_macro_panel(
+        series_codes,
+        start_date=start_date,
+        end_date=end_date,
     )
-    for obs in economic_obs_qs.iterator():
-        row = rows.setdefault(obs.observation_date.isoformat(), {})
-        row[obs.series.code] = float(obs.value)
-
-    treasury_obs_qs = (
-        TreasuryRateObservation.objects.filter(
-            series__code__in=treasury_codes,
-            observation_date__gte=pd.to_datetime(start_date).date(),
-            observation_date__lte=pd.to_datetime(end_date).date(),
-        )
-        .select_related("series")
-        .order_by("observation_date")
-    )
-    for obs in treasury_obs_qs.iterator():
-        row = rows.setdefault(obs.observation_date.isoformat(), {})
-        row[obs.series.code] = float(obs.value)
-    if not rows:
+    if panel.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame.from_dict(rows, orient="index").sort_index()
-    df.index = pd.to_datetime(df.index)
+    df = panel.copy().sort_index()
+    df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[df.index.notna()].sort_index()
     for code in series_codes:
         if code not in df.columns:
             df[code] = pd.NA

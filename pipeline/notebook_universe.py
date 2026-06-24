@@ -101,14 +101,21 @@ def resolve_notebook_universe(
     explicit = normalize_symbols(cfg.get("symbols"))
     source = str(cfg.get("source") or "auto").strip().lower()
     def finalize(symbols, source: str) -> ResolvedNotebookUniverse:
-        from fmp.symbol_metadata import sync_symbol_metadata_from_fmp
+        from fmp.symbol_metadata import symbols_missing_optional_metadata
 
         normalized = ensure_symbol_records(symbols)
-        sync_symbol_metadata_from_fmp(
-            symbols=normalized,
-            client=metadata_client,
-            progress_logger=progress_logger,
-        )
+        skipped = symbols_missing_optional_metadata(normalized)
+        if skipped:
+            skipped_set = set(skipped)
+            if callable(progress_logger):
+                preview = ", ".join(skipped[:20])
+                hidden = max(0, len(skipped) - 20)
+                suffix = f" and {hidden} more" if hidden else ""
+                progress_logger(
+                    f"Skipping {len(skipped):,} symbols without IPO/listing date: "
+                    f"{preview}{suffix}"
+                )
+            normalized = tuple(symbol for symbol in normalized if symbol not in skipped_set)
         return ResolvedNotebookUniverse(normalized, source)
 
     if explicit:
@@ -120,6 +127,29 @@ def resolve_notebook_universe(
     if use_screener:
         if not str(api_key or "").strip():
             raise ValueError("FMP_API_KEY is required when universe.source='screener'.")
+        try:
+            from data.warehouse_universe import (
+                screen_universe_from_warehouse,
+                sync_warehouse_catalog_profiles_to_django_symbols,
+                use_warehouse_screener,
+            )
+
+            if use_warehouse_screener():
+                if callable(progress_logger):
+                    progress_logger("Screening universe via quant-warehouse OpenBB/FMP screener")
+                symbols, screener_source = screen_universe_from_warehouse(
+                    cfg,
+                    progress_logger=progress_logger,
+                )
+                normalized = ensure_symbol_records(symbols)
+                sync_warehouse_catalog_profiles_to_django_symbols(normalized)
+                return finalize(normalized, f"warehouse screener ({screener_source})")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            if callable(progress_logger):
+                progress_logger(f"Warehouse screener unavailable; falling back to direct FMP screener ({exc})")
+
         symbols, records = screen_companies_fmp(
             api_key=str(api_key),
             marketCapMoreThan=cfg.get("min_market_cap"),
@@ -136,6 +166,20 @@ def resolve_notebook_universe(
         if not normalized:
             raise RuntimeError("The configured FMP screener returned no symbols.")
         return finalize(normalized, "FMP screener")
+
+    try:
+        from data.warehouse_universe import resolve_local_universe_from_warehouse, use_warehouse_screener
+
+        if use_warehouse_screener():
+            try:
+                symbols = resolve_local_universe_from_warehouse(cfg)
+            except RuntimeError:
+                symbols = ()
+            if symbols:
+                normalized = ensure_symbol_records(symbols)
+                return finalize(normalized, "warehouse catalog")
+    except Exception:
+        pass
 
     symbols = resolve_symbol_universe(
         min_market_cap=cfg.get("min_market_cap"),

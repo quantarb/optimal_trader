@@ -1025,6 +1025,7 @@ def _load_trade_event_details(symbol: str, entry_date: str, exit_date: str) -> t
     from fmp.models import Symbol, SymbolSectionHistorical
     from trading.live_trade import resolve_fmp_api_key
     from data import FMPClient
+    from data.historical_prices import load_adjusted_price_frames
 
     symbol_upper = str(symbol).strip().upper()
     date_pairs = [
@@ -1043,19 +1044,24 @@ def _load_trade_event_details(symbol: str, entry_date: str, exit_date: str) -> t
     price_rows: list[dict[str, Any]] = []
     news_rows: list[dict[str, Any]] = []
 
-    price_qs = SymbolSectionHistorical.objects.filter(
-        symbol=symbol_obj,
-        section_key="prices_div_adj",
-        record_date__in=sorted(wanted_dates),
-    ).only("record_date", "payload")
-    price_by_date = {
-        row.record_date: row.payload if isinstance(row.payload, dict) else {}
-        for row in price_qs
-        if row.record_date is not None
-    }
-    for event_label, target_ts in date_pairs:
-        payload = price_by_date.get(target_ts.date())
-        if payload:
+    start_date = min(wanted_dates).isoformat()
+    end_date = max(wanted_dates).isoformat()
+    price_frame = load_adjusted_price_frames([symbol_upper], start_date=start_date, end_date=end_date).get(symbol_upper)
+    if price_frame is not None and not price_frame.empty:
+        price_frame = price_frame.copy()
+        price_frame.index = pd.to_datetime(price_frame.index, errors="coerce").normalize()
+        for event_label, target_ts in date_pairs:
+            matches = price_frame.loc[price_frame.index == target_ts.normalize()]
+            if matches.empty:
+                continue
+            row = matches.iloc[-1]
+            payload = {
+                "open": row.get("open", row.get("adj_open")),
+                "high": row.get("high", row.get("adj_high")),
+                "low": row.get("low", row.get("adj_low")),
+                "close": row.get("close", row.get("adj_close")),
+                "volume": row.get("volume"),
+            }
             price_rows.append(_price_payload_to_row(symbol_upper, event_label, target_ts, payload))
 
     news_qs = SymbolSectionHistorical.objects.filter(

@@ -21,7 +21,6 @@ class FeaturePreviewForm(forms.Form):
     include_ta_classic_technicals = forms.BooleanField(required=False, initial=False)
     include_fundamental_change = forms.BooleanField(required=False, initial=True)
     include_statement_quality = forms.BooleanField(required=False, initial=True)
-    include_ttm_financial_statements = forms.BooleanField(required=False, initial=False)
     include_event_features = forms.BooleanField(required=False, initial=True)
     include_ownership_features = forms.BooleanField(required=False, initial=True)
     include_economic_indicators = forms.BooleanField(required=False, initial=True)

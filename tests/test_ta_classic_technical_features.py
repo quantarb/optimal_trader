@@ -81,3 +81,50 @@ def test_short_price_histories_skip_long_window_indicators_without_warnings(capl
 
     assert any(built.feature_cols for built in built_by_family.values())
     assert "indicator requires at least" not in caplog.text
+
+
+def test_ta_classic_features_do_not_change_when_future_rows_are_appended():
+    dates = pd.date_range("2020-01-02", periods=180, freq="B")
+    rng = np.random.default_rng(1337)
+    close = pd.Series(100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.015, len(dates)))), index=dates)
+    open_ = close * (1.0 + rng.normal(0.0, 0.003, len(dates)))
+    spread = pd.Series(rng.uniform(0.002, 0.02, len(dates)), index=dates)
+    prices = pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close) * (1.0 + spread),
+            "low": np.minimum(open_, close) * (1.0 - spread),
+            "close": close,
+            "volume": rng.lognormal(14.0, 0.5, len(dates)),
+        },
+        index=dates,
+    )
+    cutoff = 140
+
+    full = build_price_ta_classic_feature_families("TEST", prices)
+    prefix = build_price_ta_classic_feature_families("TEST", prices.iloc[:cutoff])
+
+    for family_name in TA_CLASSIC_FAMILY_PREFIXES:
+        full_frame = full[family_name].df.droplevel("symbol")
+        prefix_frame = prefix[family_name].df.droplevel("symbol")
+        common_cols = sorted(set(full_frame.columns) & set(prefix_frame.columns))
+        pd.testing.assert_frame_equal(
+            full_frame.loc[prefix_frame.index, common_cols],
+            prefix_frame.loc[:, common_cols],
+            check_exact=False,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+
+def test_one_row_history_does_not_emit_vwap_order_warning(caplog):
+    prices = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [1_000_000.0]},
+        index=pd.to_datetime(["2026-06-11"]),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        build_price_ta_classic_feature_families("NEW", prices)
+
+    assert "VWAP volume series is not datetime ordered" not in caplog.text
+    assert "VWAP price series is not datetime ordered" not in caplog.text

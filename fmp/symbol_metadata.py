@@ -3,13 +3,15 @@ from __future__ import annotations
 import os
 import math
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+from django.db import connection
 from django.utils import timezone
 
-from fmp.models import Symbol, SymbolSectionState
+from fmp.models import Symbol, SymbolSectionSnapshot, SymbolSectionState
 from fmp.section_store import json_safe, mark_section_fetched, save_snapshot_section
 from fmp.symbol_dates import payload_listing_date
 
@@ -17,6 +19,7 @@ from fmp.symbol_dates import payload_listing_date
 PROFILE_SECTION_KEY = "profile"
 PROFILE_REFRESH_DAYS = 30
 _REPO_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+NON_BLOCKING_SYMBOL_METADATA_FIELDS = frozenset({"ipo_date"})
 PROFILE_FIELD_ALIASES = {
     "company_name": ("companyName", "name"),
     "exchange": ("exchangeShortName", "exchange"),
@@ -30,6 +33,15 @@ PROFILE_FIELD_ALIASES = {
     "dividend": ("lastDividend", "dividend"),
     "dividend_yield": ("dividendYield",),
 }
+
+
+@lru_cache(maxsize=1)
+def legacy_profile_tables_exist() -> bool:
+    tables = set(connection.introspection.table_names())
+    return (
+        SymbolSectionSnapshot._meta.db_table in tables
+        and SymbolSectionState._meta.db_table in tables
+    )
 
 
 def _first_value(record: dict[str, Any], keys: Iterable[str]) -> Any:
@@ -69,18 +81,43 @@ def symbol_metadata_missing(symbol: Symbol) -> list[str]:
     ]
     if payload_listing_date(symbol.payload) is None:
         missing.append("ipo_date")
-    if not symbol.section_snapshots.filter(section_key=PROFILE_SECTION_KEY).exists():
+    if legacy_profile_tables_exist() and not symbol.section_snapshots.filter(section_key=PROFILE_SECTION_KEY).exists():
         missing.append("profile_snapshot")
     return missing
 
 
-def incomplete_symbol_metadata(symbols: Iterable[str]) -> dict[str, list[str]]:
+def blocking_symbol_metadata_missing(symbol: Symbol) -> list[str]:
+    return [
+        field
+        for field in symbol_metadata_missing(symbol)
+        if field not in NON_BLOCKING_SYMBOL_METADATA_FIELDS
+    ]
+
+
+def symbols_missing_optional_metadata(symbols: Iterable[str]) -> tuple[str, ...]:
+    incomplete = incomplete_symbol_metadata(symbols, blocking_only=False)
+    found = {symbol.symbol: symbol for symbol in Symbol.objects.filter(symbol__in=incomplete)}
+    skipped = tuple(
+        symbol
+        for symbol, fields in incomplete.items()
+        if set(fields).issubset(NON_BLOCKING_SYMBOL_METADATA_FIELDS)
+        and not blocking_symbol_metadata_missing(found[symbol])
+    )
+    return skipped
+
+
+def incomplete_symbol_metadata(
+    symbols: Iterable[str],
+    *,
+    blocking_only: bool = False,
+) -> dict[str, list[str]]:
     normalized = [str(value).strip().upper() for value in symbols if str(value).strip()]
     found = {symbol.symbol: symbol for symbol in Symbol.objects.filter(symbol__in=normalized)}
+    missing_fields = blocking_symbol_metadata_missing if blocking_only else symbol_metadata_missing
     return {
-        code: (["symbol_record"] if code not in found else symbol_metadata_missing(found[code]))
+        code: (["symbol_record"] if code not in found else list(missing_fields(found[code])))
         for code in normalized
-        if code not in found or symbol_metadata_missing(found[code])
+        if code not in found or missing_fields(found[code])
     }
 
 
@@ -98,7 +135,7 @@ def sync_symbol_metadata_from_fmp(
         force=force,
         progress_logger=progress_logger,
     )
-    incomplete = incomplete_symbol_metadata(normalized)
+    incomplete = incomplete_symbol_metadata(normalized, blocking_only=True)
     if incomplete:
         preview = ", ".join(
             f"{symbol}({','.join(fields)})"
@@ -114,6 +151,8 @@ def sync_symbol_metadata_from_fmp(
 
 
 def profile_fetch_is_recent(symbol: Symbol, *, now=None, threshold_days: int = PROFILE_REFRESH_DAYS) -> bool:
+    if not legacy_profile_tables_exist():
+        return False
     now = now or timezone.now()
     state = SymbolSectionState.objects.filter(symbol=symbol, section_key=PROFILE_SECTION_KEY).first()
     return bool(
@@ -224,8 +263,9 @@ def refresh_symbol_metadata_from_fmp(
             payload = client.get_json("/stable/profile", params={"symbol": symbol.symbol})
             record = profile_record(payload)
             updated_fields = apply_profile_metadata(symbol, record)
-            save_snapshot_section(symbol, PROFILE_SECTION_KEY, payload)
-            mark_section_fetched(symbol, PROFILE_SECTION_KEY, "snapshot")
+            if legacy_profile_tables_exist():
+                save_snapshot_section(symbol, PROFILE_SECTION_KEY, payload)
+                mark_section_fetched(symbol, PROFILE_SECTION_KEY, "snapshot")
             symbol.refresh_from_db()
             missing_after = symbol_metadata_missing(symbol)
             status = "updated" if updated_fields else ("empty_profile" if not record else "unchanged")
@@ -252,10 +292,12 @@ def refresh_symbol_metadata_from_fmp(
 
 __all__ = [
     "apply_profile_metadata",
+    "blocking_symbol_metadata_missing",
     "sync_symbol_metadata_from_fmp",
     "incomplete_symbol_metadata",
     "profile_fetch_is_recent",
     "profile_record",
     "refresh_symbol_metadata_from_fmp",
     "symbol_metadata_missing",
+    "symbols_missing_optional_metadata",
 ]

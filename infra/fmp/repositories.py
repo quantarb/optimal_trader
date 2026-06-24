@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+import pandas as pd
+
+from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
 from fmp.models import EconomicIndicatorSeries, Symbol, SymbolSectionHistorical, TreasuryRateSeries
 
 
@@ -27,16 +30,19 @@ class DjangoSectionHistoryRepository:
     """Django adapter for historical section payloads."""
 
     def price_history(self, symbol: Symbol, *, start_date=None, end_date=None):
-        qs = (
-            SymbolSectionHistorical.objects.filter(symbol=symbol, section_key="prices_div_adj")
-            .order_by("record_date", "updated_at")
-            .only("payload", "record_date")
-        )
-        if start_date:
-            qs = qs.filter(record_date__gte=start_date)
-        if end_date:
-            qs = qs.filter(record_date__lte=end_date)
-        return qs.iterator()
+        df = load_warehouse_price_frame(symbol.symbol, start_date=start_date, end_date=end_date, is_etf=_symbol_is_etf(symbol))
+        if df is None or df.empty:
+            return iter(())
+        records = []
+        for idx, row in df.sort_index().iterrows():
+            records.append(
+                {
+                    "symbol": str(symbol.symbol).strip().upper(),
+                    "record_date": pd.Timestamp(idx).date() if pd.notna(idx) else None,
+                    "payload": row.to_dict(),
+                }
+            )
+        return iter(records)
 
     def sparse_sections(self, symbol_ids: Sequence[int], section_keys: Sequence[str]):
         return (
@@ -65,4 +71,3 @@ class DjangoMacroSeriesRepository:
 
     def treasury_rate_codes(self) -> tuple[str, ...]:
         return tuple(str(code) for code in TreasuryRateSeries.objects.order_by("code").values_list("code", flat=True))
-

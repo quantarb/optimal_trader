@@ -11,7 +11,8 @@ from typing import Any
 import pandas as pd
 from django.utils import timezone
 
-from fmp.models import Symbol, SymbolSectionHistorical
+from data.historical_prices import load_adjusted_price_frames
+from fmp.models import Symbol
 from settings import BASE_DIR
 
 ARTIFACT_DIR = Path(BASE_DIR) / "data" / "pipeline_artifacts"
@@ -270,33 +271,29 @@ def load_universe_symbols(universe_artifact) -> list[str]:
 
 
 def load_adjusted_close_rows(symbols: list[str]) -> dict[str, list[tuple[str, float]]]:
-    rows_by_symbol: dict[str, dict[str, float]] = {symbol: {} for symbol in symbols}
-    if not symbols:
-        return {symbol: [] for symbol in symbols}
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol__symbol__in=symbols, section_key="prices_div_adj")
-        .select_related("symbol")
-        .only("symbol__symbol", "record_date", "payload")
-        .order_by("symbol__symbol", "record_date", "updated_at")
-    )
-    for row in qs.iterator():
-        symbol = str(row.symbol.symbol or "").strip().upper()
-        payload = row.payload if isinstance(row.payload, dict) else {}
-        date_value = str(payload.get("date") or (row.record_date.isoformat() if row.record_date else ""))[:10]
-        if not date_value:
+    normalized = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    rows_by_symbol: dict[str, list[tuple[str, float]]] = {symbol: [] for symbol in normalized}
+    if not normalized:
+        return rows_by_symbol
+
+    frames = load_adjusted_price_frames(normalized)
+    for symbol in normalized:
+        frame = frames.get(symbol)
+        if frame is None or frame.empty:
             continue
-        close_value = payload.get("adjClose")
-        if close_value is None:
-            close_value = payload.get("close")
-        try:
-            close_num = float(close_value)
-        except Exception:
+        close_col = "adj_close" if "adj_close" in frame.columns else "close"
+        if close_col not in frame.columns:
             continue
-        rows_by_symbol.setdefault(symbol, {})[date_value] = close_num
-    return {
-        symbol: sorted(list(date_map.items()), key=lambda item: item[0])
-        for symbol, date_map in rows_by_symbol.items()
-    }
+        working = frame[[close_col]].copy()
+        working.index = pd.to_datetime(working.index, errors="coerce")
+        working[close_col] = pd.to_numeric(working[close_col], errors="coerce")
+        working = working.dropna(subset=[close_col])
+        working = working[~working.index.isna()].sort_index()
+        rows_by_symbol[symbol] = [
+            (pd.Timestamp(index).strftime("%Y-%m-%d"), float(value))
+            for index, value in working[close_col].items()
+        ]
+    return rows_by_symbol
 
 
 __all__ = [

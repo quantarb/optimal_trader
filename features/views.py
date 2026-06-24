@@ -11,20 +11,15 @@ from django.shortcuts import get_object_or_404
 from django.template import engines
 from django.views.decorators.clickjacking import xframe_options_exempt
 
-from fmp.models import EconomicIndicatorSeries, Symbol, SymbolSectionHistorical, TreasuryRateSeries
+from fmp.models import Symbol
 from pipeline.models import PipelineRun
 from features.feature_builders import (
     build_event_features,
     build_fundamental_change_features,
-    build_industry_performance_features,
-    build_industry_pe_features,
     build_ownership_features,
     build_price_technical_features,
-    build_sector_performance_features,
-    build_sector_pe_features,
     build_statement_quality_features,
     build_ta_classic_technical_features,
-    build_ttm_financial_statement_features,
 )
 from features.macro import EconomicDataConfig, broadcast_series_to_daily, fetch_economic_data_series
 from features.naming import feature_display_name
@@ -42,38 +37,19 @@ from .forms import FeaturePreviewForm
 
 
 def _load_adjusted_prices(symbol_obj: Symbol, start_date, end_date) -> pd.DataFrame:
-    qs = SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key="prices_div_adj")
-    if start_date is not None:
-        qs = qs.filter(record_date__gte=start_date)
-    if end_date is not None:
-        qs = qs.filter(record_date__lte=end_date)
-    qs = qs.order_by("record_date", "updated_at").only("record_date", "payload")
-    rows: list[dict[str, Any]] = []
-    for item in qs.iterator():
-        payload = item.payload if isinstance(item.payload, dict) else {}
-        date_val = payload.get("date") or (item.record_date.isoformat() if item.record_date else None)
-        if not date_val:
-            continue
-        rows.append(
-            {
-                "date": str(date_val)[:10],
-                "open": payload.get("adjOpen"),
-                "high": payload.get("adjHigh"),
-                "low": payload.get("adjLow"),
-                "close": payload.get("adjClose"),
-                "volume": payload.get("volume"),
-            }
-        )
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for col in ("open", "high", "low", "close", "volume"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    if df.index.has_duplicates:
-        df = df[~df.index.duplicated(keep="last")]
-    return df
+    from data.warehouse import (
+        _symbol_is_etf,
+        load_warehouse_price_frame,
+    )
+
+    start_text = str(start_date)[:10] if start_date is not None else None
+    end_text = str(end_date)[:10] if end_date is not None else None
+    return load_warehouse_price_frame(
+        symbol_obj.symbol,
+        start_date=start_text,
+        end_date=end_text,
+        is_etf=_symbol_is_etf(symbol_obj),
+    )
 
 
 def _render_feature_template(request, context: dict[str, Any]) -> HttpResponse:
@@ -91,7 +67,6 @@ def _default_feature_preview_data(symbol: str) -> dict[str, Any]:
         "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
-        "include_ttm_financial_statements": False,
         "include_event_features": True,
         "include_ownership_features": True,
         "include_economic_indicators": True,
@@ -111,7 +86,6 @@ def _default_feature_form_data() -> dict[str, Any]:
         "include_ta_classic_technicals": False,
         "include_fundamental_change": True,
         "include_statement_quality": True,
-        "include_ttm_financial_statements": False,
         "include_event_features": True,
         "include_ownership_features": True,
         "include_economic_indicators": True,
@@ -146,10 +120,6 @@ def _feature_form_toggle_data(source: dict[str, Any] | None = None) -> dict[str,
         ),
         "include_fundamental_change": _as_bool(raw.get("include_fundamental_change"), bool(defaults["include_fundamental_change"])),
         "include_statement_quality": _as_bool(raw.get("include_statement_quality"), bool(defaults["include_statement_quality"])),
-        "include_ttm_financial_statements": _as_bool(
-            raw.get("include_ttm_financial_statements"),
-            bool(defaults["include_ttm_financial_statements"]),
-        ),
         "include_event_features": _as_bool(raw.get("include_event_features"), bool(defaults["include_event_features"])),
         "include_ownership_features": _as_bool(raw.get("include_ownership_features"), bool(defaults["include_ownership_features"])),
         "include_economic_indicators": _as_bool(raw.get("include_economic_indicators"), bool(defaults["include_economic_indicators"])),
@@ -190,9 +160,6 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance",
         "key_metrics",
         "ratios",
-        "income_statement_ttm",
-        "cash_flow_ttm",
-        "balance_sheet_ttm",
         "income_statement",
         "income_statement_growth",
         "cash_flow",
@@ -223,9 +190,6 @@ def _feature_section_metadata() -> tuple[list[str], dict[str, str]]:
         "technical_performance": "Technical Performance",
         "key_metrics": "Key Metrics",
         "ratios": "Ratios",
-        "income_statement_ttm": "Income Statement TTM",
-        "cash_flow_ttm": "Cash Flow TTM",
-        "balance_sheet_ttm": "Balance Sheet TTM",
         "income_statement": "Income Statement",
         "income_statement_growth": "Income Statement Growth",
         "cash_flow": "Cash Flow",
@@ -294,9 +258,6 @@ def _section_toggle_name(section_key: str) -> str:
         "technical_performance": "include_ta_classic_technicals",
         "key_metrics": "include_fundamental_change",
         "ratios": "include_fundamental_change",
-        "income_statement_ttm": "include_ttm_financial_statements",
-        "cash_flow_ttm": "include_ttm_financial_statements",
-        "balance_sheet_ttm": "include_ttm_financial_statements",
         "income_statement": "include_statement_quality",
         "income_statement_growth": "include_statement_quality",
         "cash_flow": "include_statement_quality",
@@ -563,21 +524,6 @@ def _build_feature_preview_result(
                 ):
                     source_counts[key] = len(grouped_feature_columns[key])
 
-        if data.get("include_ttm_financial_statements"):
-            ttm_sections = {
-                "income_statement_ttm": "is_ttm__",
-                "cash_flow_ttm": "cf_ttm__",
-                "balance_sheet_ttm": "bs_ttm__",
-            }
-            selected_sections.update(ttm_sections)
-            built = build_ttm_financial_statement_features(symbol_obj, target_index, df_prices=df_prices)
-            if not built.df.empty:
-                merged = merged.join(built.df[built.feature_cols], how="left")
-                feature_columns.extend(built.feature_cols)
-                for key, prefix in ttm_sections.items():
-                    grouped_feature_columns[key] = [col for col in built.feature_cols if col.startswith(prefix)]
-                    source_counts[key] = len(grouped_feature_columns[key])
-
         if data.get("include_event_features"):
             selected_sections.update({"earnings", "analyst_estimates", "ratings_historical", "grades_historical"})
             built = build_event_features(symbol_obj, target_index)
@@ -603,7 +549,7 @@ def _build_feature_preview_result(
                 source_counts["positions_summary"] = len(grouped_feature_columns["positions_summary"])
 
         if data.get("include_economic_indicators"):
-            economic_series_codes = tuple(str(code) for code in EconomicIndicatorSeries.objects.order_by("code").values_list("code", flat=True))
+            economic_series_codes = tuple(str(code) for code in EconomicDataConfig().economic_indicator_series)
             economic_df = fetch_economic_data_series(
                 api_key="",
                 start_date=effective_start.isoformat(),
@@ -623,7 +569,9 @@ def _build_feature_preview_result(
                 source_counts["economic_indicators"] = len(economic_cols)
 
         if data.get("include_treasury_rates"):
-            treasury_series_codes = tuple(str(code) for code in TreasuryRateSeries.objects.order_by("code").values_list("code", flat=True))
+            from data.warehouse import list_warehouse_treasury_series_codes
+
+            treasury_series_codes = tuple(str(code) for code in list_warehouse_treasury_series_codes())
             treasury_df = fetch_economic_data_series(
                 api_key="",
                 start_date=effective_start.isoformat(),
@@ -641,36 +589,6 @@ def _build_feature_preview_result(
                 feature_columns.extend(treasury_cols)
                 grouped_feature_columns["treasury_rates"] = treasury_cols
                 source_counts["treasury_rates"] = len(treasury_cols)
-
-        for family_key, enabled_key, builder in (
-            ("sector_performance", "include_sector_performance", build_sector_performance_features),
-            ("industry_performance", "include_industry_performance", build_industry_performance_features),
-        ):
-            if not data.get(enabled_key):
-                continue
-            selected_sections.add(family_key)
-            built = builder(symbol_obj, target_index, df_prices=df_prices)
-            if built.df.empty or not built.feature_cols:
-                continue
-            merged = merged.join(built.df[built.feature_cols], how="left")
-            feature_columns.extend(built.feature_cols)
-            grouped_feature_columns[family_key] = list(built.feature_cols)
-            source_counts[family_key] = len(built.feature_cols)
-
-        for family_key, enabled_key, builder in (
-            ("sector_pe", "include_sector_pe", build_sector_pe_features),
-            ("industry_pe", "include_industry_pe", build_industry_pe_features),
-        ):
-            if not data.get(enabled_key):
-                continue
-            selected_sections.add(family_key)
-            built = builder(symbol_obj, target_index)
-            if built.df.empty or not built.feature_cols:
-                continue
-            merged = merged.join(built.df[built.feature_cols], how="left")
-            feature_columns.extend(built.feature_cols)
-            grouped_feature_columns[family_key] = list(built.feature_cols)
-            source_counts[family_key] = len(built.feature_cols)
 
         feature_columns = list(dict.fromkeys(feature_columns))
         preview_df = merged.reset_index()

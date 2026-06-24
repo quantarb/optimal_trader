@@ -15,7 +15,6 @@ except Exception:  # pragma: no cover - optional dependency
     load_dotenv = None
 
 from data import FMPClient
-from fmp.models import Symbol
 from fmp.refresh import (
     expected_latest_price_date_from_market_clock,
     refresh_symbol_price_history,
@@ -35,9 +34,9 @@ from fmp.sections import (
     REQUIRED_FUNDAMENTAL_SECTION_KEYS,
     REQUIRED_SCORING_HISTORICAL_SECTIONS,
 )
-from features.feature_builders import build_price_technical_features
+from quant_warehouse.feature_engineering import build_price_technical_features
 from features.macro import MacroFeatureConfig
-from features.views import _load_adjusted_prices
+from data.warehouse import load_warehouse_price_frames
 
 # Note: REQUIRED_*, resolve_fmp_api_key, the plan_* , refresh_universe_* , symbol_needs_*,
 # historical_symbol_refresh_needed, refresh_macro etc. are implemented in fmp.refresh
@@ -51,26 +50,22 @@ def build_technical_dataframe_from_django(
     start_date=None,
     end_date=None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    start_ts = pd.Timestamp(start_date) if start_date is not None else None
-    end_ts = pd.Timestamp(end_date) if end_date is not None else None
+    normalized_symbols = [str(sym).strip().upper() for sym in list(symbols or []) if str(sym).strip()]
+    if not normalized_symbols:
+        empty_index = pd.MultiIndex(levels=[[], []], codes=[[], []], names=["date", "symbol"])
+        return pd.DataFrame(index=empty_index), []
+
+    price_frames = load_warehouse_price_frames(
+        normalized_symbols,
+        start_date=str(start_date)[:10] if start_date is not None else None,
+        end_date=str(end_date)[:10] if end_date is not None else None,
+    )
     frames: list[pd.DataFrame] = []
     feature_cols: list[str] = []
 
-    for sym in symbols:
-        code = str(sym).strip().upper()
-        if not code:
-            continue
-
-        symbol_obj = Symbol.objects.filter(symbol__iexact=code).only("id", "symbol").first()
-        if symbol_obj is None:
-            continue
-
-        df_prices = _load_adjusted_prices(
-            symbol_obj,
-            start_ts.date() if start_ts is not None else None,
-            end_ts.date() if end_ts is not None else None,
-        )
-        if df_prices.empty:
+    for code in normalized_symbols:
+        df_prices = price_frames.get(code)
+        if df_prices is None or df_prices.empty:
             continue
 
         built = build_price_technical_features(code, df_prices)

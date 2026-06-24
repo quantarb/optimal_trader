@@ -10,6 +10,7 @@ LISTING_DATE_KEYS = (
     "firsttradedate",
     "listingdate",
     "listeddate",
+    "firststockpricedate",
 )
 
 

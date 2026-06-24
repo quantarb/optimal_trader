@@ -1,0 +1,10 @@
+# Quant Warehouse — ArcticDB-backed shared data store.
+#
+# pip install pulls arcticdb automatically on Linux x86_64 / macOS / Windows.
+# Linux arm64 (this machine): conda must provide arcticdb first — PyPI has no wheel.
+#
+#   conda activate <your-env>
+#   conda install -c conda-forge arcticdb
+#   pip install -r requirements-quant-warehouse.txt
+#
+-e ../quant-warehouse[openbb]

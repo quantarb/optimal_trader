@@ -25,7 +25,7 @@ def run_scoring_data_refresh_from_fmp(
     target_end_date=None,
     refresh_mode: str = "scoring_ready",
     refresh_symbol_sections_before_build: bool = True,
-    repair_symbol_metadata_before_build: bool = True,
+    repair_symbol_metadata_before_build: bool = False,
     refresh_macro_before_build: bool = False,
     skip_cached_inactive_symbols: bool = True,
     skip_recent_price_attempts: bool = True,
@@ -36,6 +36,32 @@ def run_scoring_data_refresh_from_fmp(
     verbose: bool = False,
     progress_logger=None,
 ) -> dict[str, Any]:
+    try:
+        from data.warehouse_refresh import run_scoring_data_refresh_from_warehouse, use_warehouse_refresh
+
+        if use_warehouse_refresh():
+            return run_scoring_data_refresh_from_warehouse(
+                symbols=symbols,
+                target_start_date=target_start_date,
+                target_end_date=target_end_date,
+                refresh_mode=refresh_mode,
+                refresh_symbol_sections_before_build=refresh_symbol_sections_before_build,
+                repair_symbol_metadata_before_build=repair_symbol_metadata_before_build,
+                refresh_macro_before_build=refresh_macro_before_build,
+                skip_cached_inactive_symbols=skip_cached_inactive_symbols,
+                skip_recent_price_attempts=skip_recent_price_attempts,
+                max_symbols=max_symbols,
+                existing_historical_sections_only=existing_historical_sections_only,
+                required_historical_sections=required_historical_sections,
+                macro_config=macro_config,
+                verbose=verbose,
+                progress_logger=progress_logger,
+            )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
     refresh_mode = str(refresh_mode or "scoring_ready").strip().lower()
     log = progress_logger if callable(progress_logger) else None
     results: dict[str, Any] = {
@@ -58,7 +84,7 @@ def run_scoring_data_refresh_from_fmp(
         )
         results["symbol_metadata_repair_results"] = metadata_results
     else:
-        incomplete = incomplete_symbol_metadata(symbols)
+        incomplete = incomplete_symbol_metadata(symbols, blocking_only=True)
         if incomplete:
             preview = ", ".join(f"{symbol}({','.join(fields)})" for symbol, fields in list(incomplete.items())[:20])
             raise RuntimeError(f"Required symbol metadata is incomplete: {preview}")

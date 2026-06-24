@@ -4,9 +4,14 @@ from typing import Any, List, Sequence
 
 import numpy as np
 import pandas as pd
+from quant_warehouse.feature_engineering.fundamentals import (
+    broadcast_fundamentals_to_daily as _broadcast_quant_warehouse_fundamentals_to_daily,
+    fetch_fundamentals_data as _fetch_quant_warehouse_fundamentals_data,
+)
 
 from fmp.models import Symbol, SymbolSectionHistorical
-from data import asof_join_pit, broadcast_asof_to_target_index
+from data import asof_join_pit
+from features.section_utils import legacy_symbol_section_table_exists
 
 
 def fetch_fundamentals_data(
@@ -20,8 +25,21 @@ def fetch_fundamentals_data(
 ) -> pd.DataFrame:
     """
     Compatibility entrypoint.
-    Loads sparse fundamentals from the Django DB instead of calling FMP directly.
+    Loads sparse fundamentals from quant-warehouse, falling back to Django only
+    when warehouse data is absent.
     """
+    warehouse_df = _fetch_quant_warehouse_fundamentals_data(
+        symbols=symbols,
+        api_key=api_key,
+        period=period,
+        limit=limit,
+        verbose=False,
+        use_filing_lag=use_filing_lag,
+        filing_lag_days=filing_lag_days,
+    )
+    if not warehouse_df.empty:
+        return warehouse_df
+
     del api_key, period, limit
     dfs_per_symbol: List[pd.DataFrame] = []
     for sym in symbols:
@@ -62,12 +80,7 @@ def broadcast_fundamentals_to_daily(
     fund_df: pd.DataFrame,
     target_daily_index: pd.Index,
 ) -> pd.DataFrame:
-    return broadcast_asof_to_target_index(
-        sparse_df=fund_df,
-        target_index=target_daily_index,
-        on="date",
-        by=("symbol",),
-    )
+    return _broadcast_quant_warehouse_fundamentals_to_daily(fund_df, target_daily_index)
 
 
 def _load_section(
@@ -77,6 +90,24 @@ def _load_section(
     use_filing_lag: bool,
     filing_lag_days: int,
 ) -> pd.DataFrame:
+    from data.warehouse import (
+        read_fundamentals_from_warehouse,
+        warehouse_section_for_django,
+        warehouse_section_to_payload_rows,
+    )
+
+    if read_fundamentals_from_warehouse() and warehouse_section_for_django(section_key) is not None:
+        rows = warehouse_section_to_payload_rows(
+            symbol_obj.symbol,
+            section_key,
+            prefix=prefix,
+            filing_lag_days=filing_lag_days if use_filing_lag else 0,
+        )
+        if rows:
+            return pd.DataFrame(rows)
+    if not legacy_symbol_section_table_exists():
+        return pd.DataFrame()
+
     qs = (
         SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
         .order_by("record_date", "updated_at")

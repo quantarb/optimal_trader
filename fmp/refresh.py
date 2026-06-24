@@ -15,7 +15,6 @@ from data import FMPClient
 from features.macro import MacroFeatureConfig
 
 from .endpoints import get_symbol_endpoint_definitions
-from .endpoints.prices_div_adj import build as build_prices_div_adj_endpoint
 from .market_clock import expected_latest_price_date_from_market_clock
 from .models import (
     EconomicIndicatorObservation,
@@ -108,13 +107,10 @@ def _symbol_is_explicitly_inactive(symbol_obj: Symbol) -> bool:
 
 
 def _symbol_has_price_history(symbol_obj: Symbol) -> bool:
-    ranges = dict(symbol_obj.historical_date_ranges or {})
-    price_range = ranges.get("prices_div_adj") if isinstance(ranges, dict) else None
-    if not isinstance(price_range, dict):
-        return False
-    if int(price_range.get("count") or 0) > 0:
+    price_max_date = _historical_section_max_date(symbol_obj, "prices_div_adj")
+    if price_max_date is not None:
         return True
-    return bool(price_range.get("min_date")) and bool(price_range.get("max_date"))
+    return False
 
 
 def _symbol_recent_price_refresh_attempt(symbol_obj: Symbol, *, threshold_days: int = 1) -> bool:
@@ -125,6 +121,20 @@ def _symbol_recent_price_refresh_attempt(symbol_obj: Symbol, *, threshold_days: 
 
 
 def _historical_section_max_date(symbol_obj: Symbol, section_key: str):
+    if section_key == "prices_div_adj":
+        from data.warehouse import _symbol_is_etf, load_warehouse_price_frame
+
+        frame = load_warehouse_price_frame(symbol_obj.symbol, is_etf=_symbol_is_etf(symbol_obj))
+        if frame is None or frame.empty:
+            return None
+        try:
+            index = pd.to_datetime(frame.index, errors="coerce")
+            index = index[~index.isna()]
+            if len(index) == 0:
+                return None
+            return index.max().date()
+        except Exception:
+            return None
     ranges = dict(symbol_obj.historical_date_ranges or {})
     payload = ranges.get(section_key) if isinstance(ranges, dict) else None
     raw_value = payload.get("max_date") if isinstance(payload, dict) else None
@@ -384,8 +394,7 @@ def symbol_needs_required_refresh(symbol_obj: Symbol, *, target_start_date=None,
     symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
     ranges = dict(symbol_obj.historical_date_ranges or {})
 
-    price_range = dict(ranges.get("prices_div_adj") or {})
-    price_max_date = pd.Timestamp(price_range.get("max_date")).date() if price_range.get("max_date") else None
+    price_max_date = _historical_section_max_date(symbol_obj, "prices_div_adj")
     expected_price_date = (
         pd.Timestamp(target_end_date).date()
         if target_end_date is not None
@@ -536,6 +545,21 @@ def _refresh_all_symbol_sections(
 
         try:
             if kind == "historical":
+                if section_key in {"prices_div_adj", "prices_unadjusted"}:
+                    from data.warehouse import _symbol_is_etf, get_warehouse, price_providers_for_refresh
+                    from data.warehouse_refresh import refresh_universe_prices
+
+                    refresh_universe_prices(
+                        get_warehouse(),
+                        [str(symbol_obj.symbol).strip().upper()],
+                        providers=list(price_providers_for_refresh()),
+                        target_end_date=target_end,
+                        etf_symbols={str(symbol_obj.symbol).strip().upper()} if _symbol_is_etf(symbol_obj) else set(),
+                    )
+                    mark_section_fetched(symbol_obj, section_key, kind)
+                    stats["sections_fetched"] += 1
+                    continue
+
                 fetch_mode, fetch_ranges = _historical_section_fetch_mode(
                     symbol_obj,
                     section,
@@ -933,102 +957,33 @@ def refresh_universe_price_history_from_fmp(
     verbose: bool = True,
     progress_logger=None,
 ) -> pd.DataFrame:
-    api_key = resolve_fmp_api_key(required=True)
-    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2)
-    selected = list(symbols or [])
+    del target_start_date, skip_cached_inactive_symbols, skip_recent_price_attempts, verbose
+    from data.warehouse import get_warehouse, price_providers_for_refresh
+    from data.warehouse_refresh import _etf_symbol_set, refresh_universe_prices
+
+    if refresh_universe_prices is None:
+        raise RuntimeError("quant-warehouse refresh support is unavailable.")
+
+    selected = [str(symbol).strip().upper() for symbol in list(symbols or []) if str(symbol).strip()]
     if max_symbols is not None:
         selected = selected[: max(0, int(max_symbols))]
+    if not selected:
+        return pd.DataFrame()
 
-    rows: list[dict[str, Any]] = []
-    total = len(selected)
-    refreshed_count = 0
-    for idx, sym in enumerate(selected, start=1):
-        code = str(sym).strip().upper()
-        if not code:
-            continue
-        if callable(progress_logger):
-            progress_logger(f"FMP price refresh start [{idx:,}/{total:,}] {code}")
-        symbol_obj = Symbol.objects.filter(symbol__iexact=code).only("id", "symbol", "historical_date_ranges", "payload", "company_name").first()
-        if symbol_obj is None:
-            symbol_obj = Symbol.objects.create(symbol=code)
-        elif skip_cached_inactive_symbols and _symbol_is_explicitly_inactive(symbol_obj) and _symbol_has_price_history(symbol_obj):
-            if callable(progress_logger):
-                progress_logger(
-                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=skipped_inactive | reason=inactive_symbol_cached"
-                )
-            rows.append(
-                {
-                    "symbol": code,
-                    "status": "skipped_inactive",
-                    "fetch_mode": "skip",
-                    "records_fetched": 0,
-                    "retries_used": 0,
-                    "range_after": {},
-                }
-            )
-            continue
-        elif skip_recent_price_attempts and _symbol_recent_price_refresh_attempt(symbol_obj):
-            if callable(progress_logger):
-                progress_logger(
-                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=skipped_recent_attempt | reason=recent_price_attempt"
-                )
-            rows.append(
-                {
-                    "symbol": code,
-                    "status": "skipped_recent_attempt",
-                    "fetch_mode": "skip",
-                    "records_fetched": 0,
-                    "retries_used": 0,
-                    "range_after": {},
-                }
-            )
-            continue
-        try:
-            result = refresh_symbol_price_history(
-                symbol_obj,
-                client,
-                target_start_date=pd.Timestamp(target_start_date).date() if target_start_date else None,
-                target_end_date=pd.Timestamp(target_end_date).date() if target_end_date else None,
-            )
-            fetch_mode = str(result.get("fetch_mode") or "skip")
-            if fetch_mode != "skip":
-                refreshed_count += 1
-            if callable(progress_logger):
-                progress_logger(
-                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | "
-                    f"status=ok | mode={fetch_mode} | records={int(result.get('records_fetched') or 0)} | "
-                    f"retries={int(result.get('retries_used') or 0)}"
-                )
-            rows.append(
-                {
-                    "symbol": code,
-                    "status": "ok",
-                    "fetch_mode": fetch_mode,
-                    "records_fetched": int(result.get("records_fetched") or 0),
-                    "retries_used": int(result.get("retries_used") or 0),
-                    "range_after": result.get("range_after") or {},
-                }
-            )
-        except Exception as exc:
-            if callable(progress_logger):
-                progress_logger(
-                    f"FMP price refresh done  [{idx:,}/{total:,}] {code} | status=error | error={exc}"
-                )
-            rows.append(
-                {
-                    "symbol": code,
-                    "status": "error",
-                    "fetch_mode": "error",
-                    "records_fetched": 0,
-                    "retries_used": 0,
-                    "range_after": {},
-                    "error": str(exc),
-                }
-            )
-        if callable(progress_logger) and (idx == 1 or idx % 25 == 0 or idx == total):
-            progress_logger(f"FMP price refresh progress: {idx:,}/{total:,} symbols processed | {refreshed_count:,} refreshed so far")
-        if verbose and (idx % 25 == 0 or idx == total):
-            print(f"FMP price refresh progress: processed {idx}/{total} | refreshed {refreshed_count}")
+    if callable(progress_logger):
+        progress_logger(
+            "Refreshing warehouse prices"
+            f" | symbols={len(selected):,}"
+            f" | providers={','.join(price_providers_for_refresh())}"
+        )
+    rows = refresh_universe_prices(
+        get_warehouse(),
+        selected,
+        providers=list(price_providers_for_refresh()),
+        target_end_date=pd.Timestamp(target_end_date).date() if target_end_date is not None else None,
+        etf_symbols=_etf_symbol_set(selected),
+        progress_logger=progress_logger,
+    )
     return pd.DataFrame(rows)
 
 
@@ -1135,111 +1090,38 @@ def refresh_symbol_price_history(
     target_start_date=None,
     target_end_date=None,
 ) -> dict[str, Any]:
-    section = build_prices_div_adj_endpoint(symbol_obj)
-    section_key = str(section.key)
+    from data.warehouse import _symbol_is_etf, get_warehouse, price_providers_for_refresh
+    from data.warehouse_refresh import refresh_universe_prices
+
+    del client
     today = timezone.now().date()
     requested_end = min(target_end_date or today, today)
     requested_start = target_start_date
     if requested_start is None:
-        history_years = int(section.min_history_years or 10)
-        requested_start = requested_end - timedelta(days=365 * history_years)
+        requested_start = requested_end - timedelta(days=365 * 10)
 
-    sync_symbol_historical_ranges(symbol_obj, [section_key])
-    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
-
-    section_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
-    min_date = parse_date(section_range.get("min_date"))
-    max_date = parse_date(section_range.get("max_date"))
-    has_date_window = candidates_support_date_window(section.candidates, endpoint=section)
-    assessment = assess_historical_section_stability(
-        symbol_obj,
-        section,
-        target_start=requested_start,
-        target_end=requested_end,
+    refresh_universe_prices(
+        get_warehouse(),
+        [str(symbol_obj.symbol).strip().upper()],
+        providers=list(price_providers_for_refresh()),
+        target_end_date=requested_end,
+        etf_symbols={str(symbol_obj.symbol).strip().upper()} if _symbol_is_etf(symbol_obj) else set(),
     )
-
-    fetch_ranges: list[tuple[Any, Any]] = []
-    fetch_mode = "skip"
-    if assessment.stable:
-        fetch_mode = "skip"
-    elif min_date is None or max_date is None:
-        fetch_mode = "full"
-    elif not has_date_window:
-        if min_date > requested_start or max_date < requested_end:
-            fetch_mode = "full"
-    else:
-        if min_date > requested_start:
-            fetch_ranges.append((requested_start, min_date - timedelta(days=1)))
-        if max_date < requested_end:
-            fetch_ranges.append((max_date + timedelta(days=1), requested_end))
-        if fetch_ranges:
-            fetch_mode = "partial"
-        elif assessment.reason in {
-            "insufficient_date_coverage",
-            "sparse_observation_density",
-            "too_many_missing_record_dates",
-        }:
-            fetch_mode = "full"
-        else:
-            verification_days = max(14, int(section.threshold_days) * 3)
-            fetch_mode = "partial"
-            fetch_ranges.append((max(requested_start, requested_end - timedelta(days=verification_days)), requested_end))
-
-    fetched_records: list[dict[str, Any]] = []
-    retries_used = 0
-    if fetch_mode == "full":
-        fetched, retries_used = run_with_retries(
-            lambda: fetch_historical_records(client, section),
-            max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
-            base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
-        )
-        fetched_records = list(fetched or [])
-    elif fetch_mode == "partial":
-        for from_date, to_date in fetch_ranges:
-            if to_date < from_date:
-                continue
-            partial_candidates = with_date_window(
-                section.candidates,
-                from_date=from_date,
-                to_date=to_date,
-                endpoint=section,
-            )
-            partial_endpoint = replace(section, candidates=partial_candidates)
-            fetched, retries = run_with_retries(
-                lambda endpoint=partial_endpoint: fetch_historical_records(client, endpoint),
-                max_attempts=_UNIVERSE_DOWNLOAD_RETRY_MAX_ATTEMPTS,
-                base_delay_s=_UNIVERSE_DOWNLOAD_RETRY_BASE_DELAY_S,
-            )
-            retries_used += retries
-            fetched_records.extend(list(fetched or []))
-
-    records = dedupe_historical_records(fetched_records, by_date=bool(section.dedupe_by_date))
-    if records:
-        save_historical_section(symbol_obj, section_key, records, dedupe_by_date=bool(section.dedupe_by_date))
-        if section_key == "positions_summary":
-            save_positions_summary_records(symbol_obj, records)
-        update_symbol_historical_range(symbol_obj, section_key)
-        sync_symbol_historical_ranges(symbol_obj, [section_key])
-    mark_section_fetched(symbol_obj, section_key, section.kind)
-    symbol_obj.refresh_from_db(fields=["historical_date_ranges"])
-
-    final_range = dict(symbol_obj.historical_date_ranges or {}).get(section_key) or {}
+    final_range = {
+        "min_date": requested_start.isoformat() if hasattr(requested_start, "isoformat") else requested_start,
+        "max_date": requested_end.isoformat() if hasattr(requested_end, "isoformat") else requested_end,
+    }
     return {
         "symbol": str(symbol_obj.symbol).strip().upper(),
-        "section_key": section_key,
-        "fetch_mode": fetch_mode,
+        "section_key": "prices_div_adj",
+        "fetch_mode": "warehouse",
         "requested_start_date": requested_start.isoformat() if requested_start else None,
         "requested_end_date": requested_end.isoformat() if requested_end else None,
-        "records_fetched": int(len(records)),
-        "retries_used": int(retries_used),
-        "stability_before": {
-            "stable": assessment.stable,
-            "reason": assessment.reason,
-            "score": assessment.score,
-            "coverage_ratio": round(assessment.coverage_ratio, 4),
-            "density_ratio": round(assessment.density_ratio, 4) if assessment.density_ratio is not None else None,
-        },
+        "records_fetched": 0,
+        "retries_used": 0,
+        "stability_before": {},
         "range_after": final_range,
+        "storage": "quant-warehouse",
     }
 
 
@@ -1250,16 +1132,29 @@ def ensure_symbol_price_history(
     target_start_date=None,
     target_end_date=None,
 ) -> dict[str, Any]:
-    resolved_api_key = str(api_key or os.getenv("FMP_API_KEY") or "").strip()
-    if not resolved_api_key:
-        raise ValueError("Missing FMP_API_KEY in environment/.env.")
-    client = FMPClient(api_key=resolved_api_key, timeout_s=30.0, max_retries=2)
-    return refresh_symbol_price_history(
-        symbol_obj,
-        client,
-        target_start_date=target_start_date,
+    from data.warehouse import _symbol_is_etf, get_warehouse, price_providers_for_refresh
+    from data.warehouse_refresh import refresh_universe_prices
+
+    if refresh_universe_prices is None:
+        raise RuntimeError("quant-warehouse refresh support is unavailable.")
+
+    if api_key:
+        os.environ.setdefault("FMP_API_KEY", str(api_key).strip())
+
+    rows = refresh_universe_prices(
+        get_warehouse(),
+        [str(symbol_obj.symbol).strip().upper()],
+        providers=list(price_providers_for_refresh()),
         target_end_date=target_end_date,
+        etf_symbols={str(symbol_obj.symbol).strip().upper()} if _symbol_is_etf(symbol_obj) else set(),
     )
+    return {
+        "section_key": "prices_div_adj",
+        "storage": "quant-warehouse",
+        "requested_start_date": target_start_date.isoformat() if hasattr(target_start_date, "isoformat") else target_start_date,
+        "requested_end_date": target_end_date.isoformat() if hasattr(target_end_date, "isoformat") else target_end_date,
+        "rows": rows,
+    }
 
 
 __all__ = [

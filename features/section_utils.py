@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+from django.db import connection
 
 from fmp.models import Symbol, SymbolSectionHistorical
 from data import broadcast_asof_to_target_index
@@ -45,7 +47,19 @@ _EXCLUDED_PAYLOAD_FIELDS = {
 }
 
 
+@lru_cache(maxsize=1)
+def legacy_symbol_section_table_exists() -> bool:
+    return SymbolSectionHistorical._meta.db_table in connection.introspection.table_names()
+
+
 def prime_section_record_cache(symbols: Sequence[Symbol], section_keys: Sequence[str]) -> None:
+    from data.warehouse import read_fundamentals_from_warehouse
+
+    if read_fundamentals_from_warehouse():
+        return
+    if not legacy_symbol_section_table_exists():
+        return
+
     symbol_rows = [symbol for symbol in list(symbols or []) if getattr(symbol, "id", None)]
     normalized_section_keys = [str(section_key).strip() for section_key in list(section_keys or []) if str(section_key).strip()]
     if not symbol_rows or not normalized_section_keys:
@@ -87,10 +101,29 @@ def load_section_payload(
     keep_fields: Iterable[str] | None = None,
     filing_lag_days: int = 0,
 ) -> pd.DataFrame:
+    from data.warehouse import (
+        read_fundamentals_from_warehouse,
+        warehouse_section_for_django,
+        warehouse_section_to_indexed_frame,
+    )
+
+    if read_fundamentals_from_warehouse() and warehouse_section_for_django(section_key) is not None:
+        frame = warehouse_section_to_indexed_frame(
+            symbol_obj.symbol,
+            section_key,
+            prefix=prefix,
+            keep_fields=keep_fields,
+            filing_lag_days=filing_lag_days,
+        )
+        if not frame.empty:
+            return frame
+
     keep = {str(v).lower().strip() for v in keep_fields or []}
     rows: list[dict[str, Any]] = []
     cached_rows = _SECTION_RECORD_CACHE.get((int(symbol_obj.id), str(section_key)))
     if cached_rows is None:
+        if not legacy_symbol_section_table_exists():
+            return pd.DataFrame()
         qs = (
             SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key=section_key)
             .order_by("record_date", "updated_at")
@@ -209,13 +242,10 @@ def section_prefix(section_key: str) -> str:
         "key_metrics": "km__",
         "ratios": "rt__",
         "income_statement": "is__",
-        "income_statement_ttm": "is_ttm__",
         "income_statement_growth": "isg__",
         "cash_flow": "cf__",
-        "cash_flow_ttm": "cf_ttm__",
         "cash_flow_growth": "cfg__",
         "balance_sheet": "bs__",
-        "balance_sheet_ttm": "bs_ttm__",
         "balance_sheet_growth": "bsg__",
         "financial_growth": "fg__",
         "earnings": "earn__",

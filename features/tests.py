@@ -138,7 +138,7 @@ class RepresentationEmbeddingBuilderTests(TestCase):
         self.assertEqual(grouped["prices_div_adj"], ["close"])
         self.assertEqual(grouped["representation_embedding"], ["embedding_0", "embedding_1"])
 
-    def test_infer_feature_family_columns_keeps_ttm_families_separate(self):
+    def test_infer_feature_family_columns_ignores_ttm_families(self):
         grouped = infer_feature_family_columns(
             [
                 "is_ttm__revenue",
@@ -146,9 +146,9 @@ class RepresentationEmbeddingBuilderTests(TestCase):
                 "bs_ttm__totalassets",
             ]
         )
-        self.assertEqual(grouped["income_statement_ttm"], ["is_ttm__revenue"])
-        self.assertEqual(grouped["cash_flow_ttm"], ["cf_ttm__freecashflow"])
-        self.assertEqual(grouped["balance_sheet_ttm"], ["bs_ttm__totalassets"])
+        self.assertNotIn("income_statement_ttm", grouped)
+        self.assertNotIn("cash_flow_ttm", grouped)
+        self.assertNotIn("balance_sheet_ttm", grouped)
 
 
 @skipUnless(pd is not None, "pandas is required for positions summary feature tests in this environment")

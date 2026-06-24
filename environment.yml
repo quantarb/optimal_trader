@@ -310,6 +310,7 @@ dependencies:
   - zlib=1.3.2
   - zlib-ng=2.3.3
   - zstd=1.5.7
+  - arcticdb>=6.18
   - pip:
       - accelerate==1.12.0
       - aiohappyeyeballs==2.6.2
@@ -339,6 +340,7 @@ dependencies:
       - dill==0.4.0
       - django==6.0.5
       - docstring-parser==0.18.0
+      - faiss-cpu>=1.8
       - filelock==3.29.0
       - fmpsdk==20250102.1
       - frozenlist==1.8.0
@@ -432,4 +434,5 @@ dependencies:
       - widgetsnbextension==4.0.15
       - xxhash==3.7.0
       - yarl==1.24.2
+      - -r requirements-quant-warehouse.txt
 prefix: /home/jlee153232/miniconda3/envs/optimal_trader

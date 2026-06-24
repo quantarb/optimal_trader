@@ -1,14 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
-import hashlib
-import json
-import os
 from typing import Any
 
 import pandas as pd
-from django.utils import timezone
 
 from data.historical_prices import load_adjusted_price_frames
 from domain.labels.specs import LabelBuildSpec
@@ -20,8 +15,7 @@ from domain.trades import (
     solve_joint_trades_by_frequency,
     trade_return_pct,
 )
-from fmp.models import Symbol, SymbolSectionHistorical
-from infra.fmp import FMPClient
+from fmp.models import Symbol
 
 
 @dataclass(frozen=True)
@@ -42,7 +36,6 @@ def build_trade_results(
 ) -> TradeGenerationResult:
     """Build raw oracle trade candidates for a symbol set."""
 
-    api_key = os.getenv("FMP_API_KEY") or ""
     trade_rows: list[dict[str, Any]] = []
     completed_trades: list[dict[str, Any]] = []
     normalized_symbols = [str(sym).strip().upper() for sym in list(symbols or []) if str(sym).strip()]
@@ -69,13 +62,9 @@ def build_trade_results(
             end_date=spec.end_date,
         )
         if daily_prices.empty:
-            if api_key and spec.download_missing_prices:
-                _download_and_store_adjusted_prices(symbol_obj, api_key)
-                daily_prices = _load_adjusted_daily(symbol_obj, start_date=spec.start_date, end_date=spec.end_date)
-            if daily_prices.empty:
-                if callable(progress_callback):
-                    progress_callback(completed=idx, total=total_symbols, current_symbol=symbol_code)
-                continue
+            if callable(progress_callback):
+                progress_callback(completed=idx, total=total_symbols, current_symbol=symbol_code)
+            continue
 
         for freq, ks in spec.k_params.items():
             for k in ks:
@@ -148,45 +137,6 @@ def build_oracle_labels(
         completed_trades=completed,
     )
 
-
-def _stable_record_key(record: dict[str, Any]) -> str:
-    blob = json.dumps(record, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def _download_and_store_adjusted_prices(symbol_obj: Symbol, api_key: str) -> int:
-    client = FMPClient(api_key=api_key, timeout_s=30.0, max_retries=2)
-    section_key = "prices_div_adj"
-    start = timezone.datetime(1999, 1, 22).date()
-    end = timezone.now().date()
-    cur = start
-    saved = 0
-    while cur <= end:
-        nxt = min(end, cur + timedelta(days=365 * 10))
-        raw = client.get_json(
-            "/stable/historical-price-eod/dividend-adjusted",
-            params={"symbol": symbol_obj.symbol, "from": cur.isoformat(), "to": nxt.isoformat()},
-        )
-        rows = raw if isinstance(raw, list) else []
-        for rec in rows:
-            if not isinstance(rec, dict):
-                continue
-            date_raw = str(rec.get("date") or "")[:10]
-            try:
-                record_date = pd.to_datetime(date_raw).date() if date_raw else None
-            except Exception:
-                record_date = None
-            SymbolSectionHistorical.objects.update_or_create(
-                symbol=symbol_obj,
-                section_key=section_key,
-                record_key=_stable_record_key(rec),
-                defaults={"record_date": record_date, "payload": rec},
-            )
-            saved += 1
-        cur = nxt + timedelta(days=1)
-    return saved
-
-
 def _load_adjusted_daily(
     symbol_obj: Symbol,
     *,
@@ -194,40 +144,16 @@ def _load_adjusted_daily(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
+    symbol_code = str(symbol_obj.symbol).strip().upper()
     if price_frames is not None:
-        cached = price_frames.get(str(symbol_obj.symbol).strip().upper())
+        cached = price_frames.get(symbol_code)
         if cached is not None:
             return cached
-    qs = (
-        SymbolSectionHistorical.objects.filter(symbol=symbol_obj, section_key="prices_div_adj")
-        .order_by("record_date", "updated_at")
-        .values_list("payload", "record_date")
-    )
-    if start_date:
-        qs = qs.filter(record_date__gte=pd.to_datetime(start_date).date())
-    if end_date:
-        qs = qs.filter(record_date__lte=pd.to_datetime(end_date).date())
-    rows = []
-    for payload_value, record_date in qs.iterator(chunk_size=5000):
-        payload = payload_value if isinstance(payload_value, dict) else {}
-        dt = payload.get("date") or (record_date.isoformat() if record_date else None)
-        if not dt:
-            continue
-        rows.append(
-            {
-                "date": str(dt)[:10],
-                "adj_open": payload.get("adjOpen"),
-                "adj_high": payload.get("adjHigh"),
-                "adj_low": payload.get("adjLow"),
-                "adj_close": payload.get("adjClose"),
-                "volume": payload.get("volume"),
-            }
-        )
-    if not rows:
+    frames = load_adjusted_price_frames([symbol_code], start_date=start_date, end_date=end_date)
+    frame = frames.get(symbol_code)
+    if frame is None or frame.empty:
         return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for col in ("adj_open", "adj_high", "adj_low", "adj_close", "volume"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    return df[~df.index.duplicated(keep="last")]
+    out = frame.copy()
+    out.index = pd.to_datetime(out.index, errors="coerce")
+    out = out[~out.index.isna()].sort_index()
+    return out[~out.index.duplicated(keep="last")]
