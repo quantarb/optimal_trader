@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from app.live_trade_leaderboard import default_live_trade_config, load_saved_leaderboard
+from app.live_app_shared import inspect_saved_artifacts
 from app.optimal_trade_lookup import OptimalTradeQuery
 from pipeline.notebook_universe import normalize_symbols
 REQUIRED_SIMILARITY_ARTIFACTS = (
@@ -84,7 +85,7 @@ def make_live_trade_notebook_config(
             "enabled": bool(refresh_fmp_data),
             "refresh_symbol_sections_before_build": bool(refresh_fmp_data),
             "refresh_macro_before_build": bool(refresh_macro_data),
-            "repair_symbol_metadata_before_build": True,
+            "repair_symbol_metadata_before_build": False,
             "skip_cached_inactive_symbols": bool(skip_cached_inactive_symbols),
             "verbose": False,
         }
@@ -124,18 +125,17 @@ def load_recent_similarity_build(
 
     artifact_dir = Path(str(cfg["runtime"]["artifact_dir"])).expanduser().resolve()
     required_paths = [artifact_dir / name for name in REQUIRED_SIMILARITY_ARTIFACTS]
-    missing = [path.name for path in required_paths if not path.exists()]
-    if missing:
-        return None, {"artifact_dir": str(artifact_dir), "age": pd.NaT, "reason": f"missing_files={','.join(missing)}"}
-
-    latest_mtime = max(path.stat().st_mtime for path in required_paths)
-    artifact_age = pd.Timestamp.now(tz="UTC") - pd.Timestamp(latest_mtime, unit="s", tz="UTC")
-    if artifact_age > pd.Timedelta(max_age):
-        return None, {"artifact_dir": str(artifact_dir), "age": artifact_age, "reason": f"older_than_{pd.Timedelta(max_age)}"}
+    preliminary_status = inspect_saved_artifacts(
+        required_paths=required_paths,
+        artifact_dir=artifact_dir,
+        max_age=max_age,
+    )
+    if not preliminary_status["reusable"]:
+        return None, preliminary_status
 
     saved = load_saved_leaderboard(artifact_dir=str(artifact_dir))
     if saved is None:
-        return None, {"artifact_dir": str(artifact_dir), "age": artifact_age, "reason": "missing_saved_leaderboard"}
+        return None, {**preliminary_status, "reason": "missing_saved_leaderboard", "reusable": False}
 
     leaderboard, meta = saved
     meta = dict(meta or {})
@@ -145,16 +145,34 @@ def load_recent_similarity_build(
         requested_end_date,
         pd.Timestamp(expected_latest_price_date_from_market_clock()).normalize(),
     )
-    if latest_date < expected_score_date:
-        return None, {
-            "artifact_dir": str(artifact_dir),
-            "age": artifact_age,
-            "reason": f"saved_latest_date_{latest_date.date().isoformat()}_lt_expected_{expected_score_date.date().isoformat()}",
-            "saved_latest_date": latest_date.date().isoformat(),
-            "expected_score_date": expected_score_date.date().isoformat(),
-        }
+    artifact_status = inspect_saved_artifacts(
+        required_paths=required_paths,
+        artifact_dir=artifact_dir,
+        max_age=max_age,
+        saved_score_date=latest_date,
+        expected_score_date=expected_score_date,
+    )
+    if not artifact_status["reusable"]:
+        return None, artifact_status
 
     universe_size = int(pd.to_numeric(pd.Series([meta.get("universe_size")]), errors="coerce").fillna(0).iloc[0])
+    scored_symbol_count = int(
+        pd.to_numeric(pd.Series([meta.get("scored_symbol_count")]), errors="coerce").fillna(0).iloc[0]
+    )
+    if scored_symbol_count <= 0:
+        scored_symbol_count = int(len(leaderboard))
+    if universe_size > 0:
+        coverage_ratio = float(scored_symbol_count) / float(universe_size)
+        if coverage_ratio < 0.5:
+            return None, {
+                **artifact_status,
+                "reusable": False,
+                "reason": (
+                    "partial_leaderboard_coverage"
+                    f" | scored {scored_symbol_count:,}/{universe_size:,}"
+                    f" ({coverage_ratio:.1%})"
+                ),
+            }
     vector_metadata = dict(meta.get("vector_metadata") or {})
     reference_trade_count = int(
         pd.to_numeric(pd.Series([vector_metadata.get("row_count")]), errors="coerce").fillna(0).iloc[0]
@@ -167,7 +185,7 @@ def load_recent_similarity_build(
         reference_trade_count=reference_trade_count,
         vector_metadata=vector_metadata,
         source="artifacts",
-    ), {"artifact_dir": str(artifact_dir), "age": artifact_age, "reason": "fresh_saved_build"}
+    ), artifact_status
 
 
 def make_similarity_query(

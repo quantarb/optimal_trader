@@ -376,6 +376,7 @@ def _buy_option_limit_price(row: Mapping[str, Any] | pd.Series | dict[str, Any])
 
 def resolve_short_score_col(score_col: str) -> str:
     mapping = {
+        "prob_buy": "prob_short",
         "buy_score_mean_raw3": "short_score_mean_raw3",
         "buy_score_mean_raw_pct6": "short_score_mean_raw_pct6",
         "buy_score_pct_mean": "short_score_pct_mean",
@@ -393,6 +394,7 @@ def resolve_short_score_col(score_col: str) -> str:
 
 def resolve_component_cols(score_col: str) -> list[str]:
     mapping = {
+        "prob_buy": ["prob_buy"],
         "buy_score_mean_raw3": ["prob_buy", "pred_rf_reg", "ae_familiarity"],
         "buy_score_mean_raw_pct6": [
             "prob_buy",
@@ -419,6 +421,7 @@ def resolve_component_cols(score_col: str) -> list[str]:
         "short_score_pct_product": ["prob_short_pct", "pred_rf_reg_pct", "ae_familiarity_pct"],
         "short_score_raw": ["prob_short", "pred_rf_reg", "ae_familiarity"],
         "short_score": ["prob_short", "pred_rf_reg", "ae_familiarity"],
+        "prob_short": ["prob_short"],
     }
     if str(score_col) not in mapping:
         raise KeyError(f"No component mapping configured for: {score_col}")

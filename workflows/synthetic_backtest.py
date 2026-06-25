@@ -46,7 +46,7 @@ def _pivot_rule_panel(panel, col, *, symbols=None):
         .sort_index()
     )
 
-def _prepare_capacity_rule_inputs(panel, score_col, component_cols, price_col):
+def prepare_capacity_rule_inputs(panel, score_col, component_cols, price_col):
     if panel.index.has_duplicates:
         panel = panel[~panel.index.duplicated(keep="last")]
     symbols = sorted(panel.index.get_level_values("symbol").unique())
@@ -74,6 +74,10 @@ def _prepare_capacity_rule_inputs(panel, score_col, component_cols, price_col):
         "component_frames": component_frames,
     }
 
+
+# Backward compatibility for callers that imported the original private helper.
+_prepare_capacity_rule_inputs = prepare_capacity_rule_inputs
+
 def _build_entry_ok_matrix(inputs, component_threshold):
     score = inputs["score"]
     close = inputs["close"]
@@ -85,7 +89,7 @@ def _build_entry_ok_matrix(inputs, component_threshold):
     return entry_ok
 
 def _run_capacity_limited_long_only_rule(*, panel, score_col, component_cols, component_threshold, price_col, top_k=None):
-    inputs = _prepare_capacity_rule_inputs(panel, score_col, component_cols, price_col)
+    inputs = prepare_capacity_rule_inputs(panel, score_col, component_cols, price_col)
     symbols = inputs["symbols"]
     common_dates = inputs["common_dates"]
     score = inputs["score"]
@@ -159,8 +163,8 @@ def _run_capacity_limited_long_short_rule(
     price_col,
     top_k=None,
 ):
-    long_inputs = _prepare_capacity_rule_inputs(panel, long_score_col, long_component_cols, price_col)
-    short_inputs = _prepare_capacity_rule_inputs(panel, short_score_col, short_component_cols, price_col)
+    long_inputs = prepare_capacity_rule_inputs(panel, long_score_col, long_component_cols, price_col)
+    short_inputs = prepare_capacity_rule_inputs(panel, short_score_col, short_component_cols, price_col)
     symbols = long_inputs["symbols"]
     common_dates = long_inputs["common_dates"]
     close = long_inputs["close"]
@@ -363,4 +367,4 @@ def resolve_short_score_col(score_col):
         return "short_" + key[len("buy_"):]
     raise KeyError(f"No short-score mapping configured for: {score_col}")
 
-__all__ = ['summarize_curve', 'run_top_k_long_only_score_rule', 'run_top_k_long_short_score_rule', 'run_top_k_momentum_baseline', 'resolve_component_cols', 'resolve_short_score_col']
+__all__ = ['summarize_curve', 'prepare_capacity_rule_inputs', 'run_top_k_long_only_score_rule', 'run_top_k_long_short_score_rule', 'run_top_k_momentum_baseline', 'resolve_component_cols', 'resolve_short_score_col']

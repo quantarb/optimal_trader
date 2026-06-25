@@ -32,11 +32,6 @@ except Exception:  # pragma: no cover - quant-warehouse optional at import time
     refresh_universe_profiles = None  # type: ignore[assignment]
     refresh_universe_macro = None  # type: ignore[assignment]
 
-try:
-    from quant_warehouse.warehouse.sections import DJANGO_ONLY_FUNDAMENTAL_SECTIONS
-except Exception:  # pragma: no cover - older quant-warehouse versions do not expose this
-    DJANGO_ONLY_FUNDAMENTAL_SECTIONS = frozenset()  # type: ignore[assignment]
-
 PROFILE_PROVIDER_DEFAULT = "yfinance"
 FUNDAMENTAL_PERIOD_DEFAULT = "quarter"
 
@@ -288,14 +283,14 @@ def run_scoring_data_refresh_from_warehouse(
         for section in (required_historical_sections or REQUIRED_SCORING_HISTORICAL_SECTIONS)
         if str(section).strip()
     )
-    django_only = django_only_sections_for_refresh(scoring_sections)
-    results["django_only_sections_skipped"] = django_only
-    if django_only and log is not None:
-        preview = ", ".join(django_only[:12])
-        hidden = max(0, len(django_only) - 12)
+    unsupported_legacy = django_only_sections_for_refresh(scoring_sections)
+    results["unsupported_legacy_sections_skipped"] = unsupported_legacy
+    if unsupported_legacy and log is not None:
+        preview = ", ".join(unsupported_legacy[:12])
+        hidden = max(0, len(unsupported_legacy) - 12)
         suffix = f" and {hidden} more" if hidden else ""
         log(
-            "Warehouse refresh skips Django-only FMP sections with no OpenBB route: "
+            "Warehouse refresh skips unsupported legacy FMP sections with no OpenBB route: "
             f"{preview}{suffix}"
         )
 

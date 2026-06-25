@@ -6,7 +6,6 @@ from typing import List, Optional, Sequence, Tuple, Union
 import pandas as pd
 
 from labels.trades import labels_panel_to_trades_df
-from ml.frameworks.transformers.seq2seq import prepare_entry2exit_dataset as _prepare_entry2exit_dataset
 
 
 @dataclass(frozen=True)
@@ -75,6 +74,8 @@ def prepare_entry2exit_dataset(
     """
     Build canonical Entry->Exit text pairs from features + optimal trades.
     """
+    from ml.frameworks.transformers.seq2seq import prepare_entry2exit_dataset as _prepare_entry2exit_dataset
+
     if (labels_df is None) == (trades_df is None):
         raise ValueError("Provide exactly one of labels_df or trades_df.")
 

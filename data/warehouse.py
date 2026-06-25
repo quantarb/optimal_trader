@@ -11,9 +11,9 @@ if TYPE_CHECKING:
 
 try:
     from quant_warehouse.feature_engineering.fundamentals import (
-        django_only_sections_for_refresh as _qw_django_only_sections_for_refresh,
-        warehouse_section_for_django as _qw_warehouse_section_for_django,
-        warehouse_sections_for_django_keys as _qw_warehouse_sections_for_django_keys,
+        unsupported_legacy_sections_for_refresh as _qw_django_only_sections_for_refresh,
+        warehouse_section_for_legacy_key as _qw_warehouse_section_for_django,
+        warehouse_sections_for_legacy_keys as _qw_warehouse_sections_for_django_keys,
         warehouse_sections_for_refresh as _qw_warehouse_sections_for_refresh,
         warehouse_section_to_indexed_frame as _qw_warehouse_section_to_indexed_frame,
         warehouse_section_to_payload_rows as _qw_warehouse_section_to_payload_rows,

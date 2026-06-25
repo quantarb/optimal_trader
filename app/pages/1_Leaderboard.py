@@ -22,6 +22,12 @@ from app.live_trade_leaderboard import (
     load_saved_latest_scored,
     run_live_trade_leaderboard_build,
 )
+from app.leaderboard_ui import (
+    LEADERBOARD_CSS,
+    render_leaderboard_pager,
+    render_leaderboard_ribbon,
+    render_leaderboard_table,
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -99,57 +105,6 @@ def _style_leaderboard_rows(frame: pd.DataFrame):
         return styles
 
     return display.style.apply(_row_style, axis=1)
-
-
-def _format_leaderboard_cell(column: str, value: object) -> str:
-    if value is None or pd.isna(value):
-        return ""
-    if column in {"Classifier Score", "Regressor Score", "Autoencoder Score", "Combined Score"}:
-        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-        return "" if pd.isna(numeric) else f"{float(numeric):.4f}"
-    if column == "Eligible":
-        return "Yes" if bool(value) else "No"
-    return str(value)
-
-
-def _render_leaderboard_html_table(frame: pd.DataFrame) -> str:
-    if frame.empty:
-        return '<div class="leaderboard-empty">No leaderboard rows available.</div>'
-
-    hidden_columns = {"Eligible", "Status"}
-    columns = [
-        str(column)
-        for column in frame.columns
-        if str(column) not in hidden_columns and not str(column).startswith("__")
-    ]
-    header_html = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
-    row_html_parts: list[str] = []
-    for _, row in frame.iterrows():
-        is_eligible = bool(row.get("Eligible"))
-        row_class = "eligible-row" if is_eligible else "ineligible-row"
-        cell_html: list[str] = []
-        for column in columns:
-            value = row.get(column)
-            if column == "Similar Trades":
-                href = str(value or "").strip()
-                cell_html.append(
-                    f'<td><a class="trade-link" href="{html.escape(href)}" target="_self">Open</a></td>'
-                )
-                continue
-            formatted = _format_leaderboard_cell(column, value)
-            cell_html.append(f"<td>{html.escape(formatted)}</td>")
-        row_html_parts.append(f'<tr class="{row_class}">{"".join(cell_html)}</tr>')
-
-    return f"""
-    <div class="leaderboard-table-wrap">
-      <table class="leaderboard-table">
-        <thead><tr>{header_html}</tr></thead>
-        <tbody>
-          {''.join(row_html_parts)}
-        </tbody>
-      </table>
-    </div>
-    """
 
 
 def _format_display_object(value: object, *, max_length: int = 240) -> str:
@@ -437,6 +392,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+st.markdown(LEADERBOARD_CSS, unsafe_allow_html=True)
 
 st.markdown(
     """
@@ -605,7 +561,6 @@ else:
     )
     page_size = 50
     total_rows = int(len(leaderboard))
-    total_pages = max((total_rows - 1) // page_size + 1, 1)
     eligible_count = int(pd.Series(leaderboard.get("Eligible"), dtype="boolean").fillna(False).sum()) if "Eligible" in leaderboard.columns else 0
     ineligible_count = max(total_rows - eligible_count, 0)
     universe_size_value = pd.to_numeric(pd.Series([meta.get("universe_size")]), errors="coerce").iloc[0]
@@ -619,17 +574,26 @@ else:
     scored_symbol_count = pd.to_numeric(pd.Series([meta.get("scored_symbol_count")]), errors="coerce").iloc[0]
     if pd.isna(scored_symbol_count):
         scored_symbol_count = float(total_rows)
+    inactive_symbol_count = pd.to_numeric(
+        pd.Series([meta.get("inactive_symbol_count")]), errors="coerce"
+    ).iloc[0]
+    if pd.isna(inactive_symbol_count):
+        inactive_symbol_count = (
+            max(float(universe_size_value) - float(scored_symbol_count), 0.0)
+            if pd.notna(universe_size_value) and pd.notna(scored_symbol_count)
+            else 0.0
+        )
     session_page_key = "leaderboard_current_page"
-    if session_page_key not in st.session_state:
-        st.session_state[session_page_key] = 1
-    st.session_state[session_page_key] = max(1, min(int(st.session_state[session_page_key]), total_pages))
 
-    ribbon_cols = st.columns(5)
-    ribbon_cols[0].metric("As Of Date", str(meta.get("latest_date") or ""))
-    ribbon_cols[1].metric("Universe Size", f"{int(universe_size_value) if pd.notna(universe_size_value) else 0:,}")
-    ribbon_cols[2].metric("Scored Symbols", f"{int(scored_symbol_count) if pd.notna(scored_symbol_count) else total_rows:,}")
-    ribbon_cols[3].metric("Eligible", f"{eligible_count:,}")
-    ribbon_cols[4].metric("Not Eligible", f"{ineligible_count:,}")
+    render_leaderboard_ribbon(
+        st,
+        as_of_date=meta.get("latest_date"),
+        universe_size=int(universe_size_value) if pd.notna(universe_size_value) else 0,
+        scored_symbols=int(scored_symbol_count) if pd.notna(scored_symbol_count) else total_rows,
+        inactive=int(inactive_symbol_count),
+        eligible=eligible_count,
+        not_eligible=ineligible_count,
+    )
 
     if legacy_capped_artifact:
         st.warning(
@@ -1089,37 +1053,13 @@ else:
                 st.markdown("**Robinhood Order Results**")
                 st.dataframe(order_results, use_container_width=True, hide_index=True)
 
-    with st.container():
-        st.markdown(
-            """
-            <div class="section-card">
-              <div class="table-title">Page Controls</div>
-              <div class="table-copy">Move through the ranked list without losing your place.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        pager_cols = st.columns([1, 1, 2.2, 1.8])
-        if pager_cols[0].button("Previous", use_container_width=True, disabled=st.session_state[session_page_key] <= 1, type="secondary"):
-            st.session_state[session_page_key] -= 1
-        if pager_cols[1].button("Next", use_container_width=True, disabled=st.session_state[session_page_key] >= total_pages, type="secondary"):
-            st.session_state[session_page_key] += 1
-        selected_page = pager_cols[2].selectbox(
-            "Page",
-            options=list(range(1, total_pages + 1)),
-            index=st.session_state[session_page_key] - 1,
-            key="leaderboard_page_select",
-            label_visibility="collapsed",
-        )
-        st.session_state[session_page_key] = int(selected_page)
-        pager_cols[3].markdown(
-            f'<div class="pager-summary"><strong>Page {st.session_state[session_page_key]} of {total_pages}</strong><br>50 names per page</div>',
-            unsafe_allow_html=True,
-        )
-
-    current_page = int(st.session_state[session_page_key])
-    page_start = (int(current_page) - 1) * page_size
-    page_end = min(page_start + page_size, total_rows)
+    current_page, page_start, page_end, total_pages = render_leaderboard_pager(
+        st,
+        total_rows=total_rows,
+        session_page_key=session_page_key,
+        selectbox_key="leaderboard_page_select",
+        page_size=page_size,
+    )
     leaderboard_page = leaderboard.iloc[page_start:page_end].copy()
 
     st.markdown(
@@ -1143,7 +1083,7 @@ else:
     if "Status" not in leaderboard_display.columns and "Eligible" in leaderboard_display.columns:
         insert_at = 1 if "Rank" in leaderboard_display.columns else 0
         leaderboard_display.insert(insert_at, "Status", leaderboard_display["Eligible"].map(lambda value: "Eligible" if bool(value) else "Not Eligible"))
-    st.markdown(_render_leaderboard_html_table(leaderboard_display), unsafe_allow_html=True)
+    st.markdown(render_leaderboard_table(leaderboard_display), unsafe_allow_html=True)
 
     with st.expander("Saved Artifacts", expanded=False):
         st.json(meta)

@@ -133,9 +133,10 @@ class StreamlitProcess:
             f"({py}).\n\n"
             "To fix, run one of the following in your terminal (with the same conda env active):\n\n"
             f"    {py} -m pip install -r app/requirements_streamlit.txt\n\n"
-            "Or (conda):\n\n"
-            "    conda install -c conda-forge streamlit faiss-cpu\n\n"
-            "Then re-run the cell that calls streamlit_process.start(...)."
+            "Or (preferred for the optimal_trader conda env):\n\n"
+            "    conda install -c conda-forge faiss-cpu streamlit\n\n"
+            "faiss-cpu is also required for optimal_trade_lookup (trade vector search) and some code analysis tools."
+            "\nThen re-run the cell that calls streamlit_process.start(...)."
         )
 
     def start(
@@ -209,4 +210,19 @@ class StreamlitProcess:
         raise RuntimeError(f"Streamlit did not respond at {root_url}.")
 
 
-__all__ = ["NotebookProgress", "StreamlitProcess", "url_responds"]
+def create_live_app_runtime(*, repo_root: Path, app_path: Path):
+    progress = NotebookProgress()
+    streamlit_process = StreamlitProcess(
+        repo_root=repo_root,
+        app_path=app_path,
+        logger=progress.log,
+    )
+    return progress, streamlit_process
+
+
+__all__ = [
+    "NotebookProgress",
+    "StreamlitProcess",
+    "create_live_app_runtime",
+    "url_responds",
+]

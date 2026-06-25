@@ -77,9 +77,13 @@ def _import_pandas_ta_classic():
 
 @contextlib.contextmanager
 def _suppress_pandas_ta_classic_row_warnings():
-    logger = logging.getLogger("pandas_ta_classic.utils._core")
-    previous_level = logger.level
-    logger.setLevel(logging.ERROR)
+    loggers = [
+        logging.getLogger("pandas_ta_classic.utils._core"),
+        logging.getLogger("pandas_ta_classic.overlap.vwap"),
+    ]
+    previous_levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.ERROR)
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*VWAP volume series is not datetime ordered.*")
@@ -91,7 +95,8 @@ def _suppress_pandas_ta_classic_row_warnings():
             warnings.filterwarnings("ignore", message=".*invalid value encountered in divide.*")
             yield
     finally:
-        logger.setLevel(previous_level)
+        for logger, previous_level in zip(loggers, previous_levels):
+            logger.setLevel(previous_level)
 
 
 def _empty_family_sets() -> dict[str, BuiltFeatureSet]:
@@ -210,6 +215,21 @@ def _compute_special_indicator(ta, prices: pd.DataFrame, fn_name: str) -> pd.Dat
         raw = ta.xsignals(signal=rsi_14, xa=70, xb=30, above=True, long=True, asbool=False)
     elif fn_name == "cpr":
         raw = ta.cpr(open=open_, high=high, low=low, close=close)
+    elif fn_name == "tos_stdevall":
+        length = 20
+        x = np.arange(length, dtype=float)
+        centered_x = x - x.mean()
+        denominator = float(np.dot(centered_x, centered_x))
+        slope = close.rolling(length, min_periods=length).apply(
+            lambda values: float(np.dot(centered_x, values) / denominator),
+            raw=True,
+        )
+        regression = close.rolling(length, min_periods=length).mean() + slope * centered_x[-1]
+        stdev = close.rolling(length, min_periods=length).std(ddof=1)
+        raw = pd.DataFrame({"TOS_STDEVALL_20_LR": regression}, index=prices.index)
+        for multiple in (1, 2, 3):
+            raw[f"TOS_STDEVALL_20_L_{multiple}"] = regression - multiple * stdev
+            raw[f"TOS_STDEVALL_20_U_{multiple}"] = regression + multiple * stdev
     else:
         return None
 
@@ -242,7 +262,7 @@ def _usable_feature_cols(frame: pd.DataFrame) -> list[str]:
         if not pd.api.types.is_numeric_dtype(series):
             continue
         if series.notna().any():
-            cleaned = pd.to_numeric(series.ffill().bfill().fillna(0.0), errors="coerce").replace([np.inf, -np.inf], np.nan)
+            cleaned = pd.to_numeric(series.ffill().fillna(0.0), errors="coerce").replace([np.inf, -np.inf], np.nan)
             cleaned = cleaned.clip(lower=-float32_max, upper=float32_max).fillna(0.0)
             frame[column] = cleaned.astype(np.float32)
             cols.append(column)
@@ -307,7 +327,7 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
             TaIndicatorSpec("mfi_14", "mfi", ("high", "low", "close", "volume"), {"length": 14}, min_rows=14),
             TaIndicatorSpec("obv", "obv", ("close", "volume")),
             TaIndicatorSpec("adosc", "adosc", ("high", "low", "close", "volume"), min_rows=10),
-            TaIndicatorSpec("dpo_20", "dpo", ("close",), {"length": 20}, min_rows=20),
+            TaIndicatorSpec("dpo_20", "dpo", ("close",), {"length": 20, "lookahead": False}, min_rows=20),
             TaIndicatorSpec("kst", "kst", ("close",), min_rows=30),
             TaIndicatorSpec("stc", "stc", ("close",), min_rows=50),
             TaIndicatorSpec("tsi", "tsi", ("close",), min_rows=25),
@@ -333,7 +353,7 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
             TaIndicatorSpec("kama_20", "kama", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("alma_20", "alma", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("vwma_20", "vwma", ("close", "volume"), {"length": 20}, min_rows=20),
-            TaIndicatorSpec("vwap", "vwap", ("high", "low", "close", "volume")),
+            TaIndicatorSpec("vwap", "vwap", ("high", "low", "close", "volume"), min_rows=2),
             TaIndicatorSpec("bbands_20", "bbands", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("kc_20", "kc", ("high", "low", "close"), {"length": 20}, min_rows=20),
             TaIndicatorSpec("donchian_20", "donchian", ("high", "low"), {"lower_length": 20, "upper_length": 20}, min_rows=20),
@@ -414,6 +434,13 @@ def _auto_indicator_spec(ta, fn_name: str) -> TaIndicatorSpec | None:
         "tsignals": TaIndicatorSpec("tsignals", "tsignals", ("close",), min_rows=26),
         "xsignals": TaIndicatorSpec("xsignals", "xsignals", ("close",), min_rows=26),
         "cpr": TaIndicatorSpec("cpr", "cpr", ("open", "high", "low", "close")),
+        "ichimoku": TaIndicatorSpec(
+            "ichimoku",
+            "ichimoku",
+            ("high", "low", "close"),
+            {"lookahead": False, "include_chikou": False},
+            min_rows=52,
+        ),
     }
     if fn_name in special_specs:
         return special_specs[fn_name]
