@@ -7,4 +7,4 @@
 #   conda install -c conda-forge arcticdb
 #   pip install -r requirements-quant-warehouse.txt
 #
--e ../quant-warehouse[openbb]
+quant-warehouse[openbb] @ git+https://github.com/quantarb/quant-warehouse.git@main
