@@ -8,3 +8,4 @@
 #   pip install -r requirements-quant-warehouse.txt
 #
 quant-warehouse[openbb] @ git+https://github.com/quantarb/quant-warehouse.git@main
+quant-orchestrator @ git+https://github.com/quantarb/quant-orchestrator.git@main
