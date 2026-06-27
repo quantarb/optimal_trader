@@ -16,3 +16,8 @@
 - `optimal_trader` is the custom frontend/runtime that may submit orders to brokers.
 - Research workflows, model training, and backtests should be delegated to `quant-orchestrator`.
 - Market data, features, labels, and refresh behavior should come through `quant-warehouse`; do not add direct OpenBB or vendor API calls for research data here.
+
+## Migration Policy
+
+- This repo is a live-money monolith. Preserve current behavior unless the user explicitly asks for a migration change.
+- New research or data code should move toward `quant-warehouse` and `quant-orchestrator`, but do not break existing live trading paths as part of cleanup work.
