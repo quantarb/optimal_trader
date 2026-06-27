@@ -21,3 +21,9 @@
 
 - This repo is a live-money monolith. Preserve current behavior unless the user explicitly asks for a migration change.
 - New research or data code should move toward `quant-warehouse` and `quant-orchestrator`, but do not break existing live trading paths as part of cleanup work.
+
+## Build Vs Buy Policy
+
+- Prefer widely used, actively maintained third-party packages or small forks of proven projects over custom implementations.
+- For trading UI, broker adapters, scheduling, serialization, analytics, model loading, and strategy/reporting utilities, use battle-tested libraries when they fit the live-app boundary.
+- Build from scratch only when no reliable package fits the requirement or the live app needs a thin custom wrapper around a proven dependency; document that reason in the change.
