@@ -7,6 +7,7 @@ from workflows.options_pricing import (
     build_constant_maturity_call_price_panel,
     build_constant_maturity_put_price_panel,
     build_realized_vol_panel,
+    build_synthetic_option_return_panels,
 )
 from workflows.modeling import (
     build_model_scoring_spec,
@@ -29,6 +30,7 @@ __all__ = [
     "build_constant_maturity_call_price_panel",
     "build_constant_maturity_put_price_panel",
     "build_realized_vol_panel",
+    "build_synthetic_option_return_panels",
     "build_model_scoring_spec",
     "build_model_training_spec",
     "build_oracle_labels",

@@ -142,3 +142,79 @@ def build_constant_maturity_put_price_panel(close_df, realized_vol_df, *, strike
         premium_floor=premium_floor,
         option_type="put",
     )
+
+
+def build_synthetic_option_return_panels(
+    close_df,
+    *,
+    option_buckets,
+    realized_vol_df=None,
+    realized_vol_window=21,
+    vol_floor=0.15,
+    vol_cap=0.80,
+    tenor_days=30,
+    rate=0.0,
+    iv_multiplier=1.0,
+    premium_floor=0.25,
+):
+    close = close_df.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
+    if realized_vol_df is None:
+        realized_vol_df = build_realized_vol_panel(
+            close,
+            window=realized_vol_window,
+            vol_floor=vol_floor,
+            vol_cap=vol_cap,
+        )
+
+    equity_returns = (
+        close.pct_change(fill_method=None)
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+    return_panels = {
+        "equity": {
+            "long": equity_returns,
+            "short": -equity_returns,
+        },
+    }
+    price_panels = {}
+    for name, bucket in dict(option_buckets).items():
+        long_strike_multiplier = float(bucket["long_strike_multiplier"])
+        short_strike_multiplier = float(bucket["short_strike_multiplier"])
+        call_prices = build_constant_maturity_call_price_panel(
+            close,
+            realized_vol_df,
+            strike_multiplier=long_strike_multiplier,
+            tenor_days=tenor_days,
+            rate=rate,
+            iv_multiplier=iv_multiplier,
+            premium_floor=premium_floor,
+        )
+        put_prices = build_constant_maturity_put_price_panel(
+            close,
+            realized_vol_df,
+            strike_multiplier=short_strike_multiplier,
+            tenor_days=tenor_days,
+            rate=rate,
+            iv_multiplier=iv_multiplier,
+            premium_floor=premium_floor,
+        )
+        price_panels[str(name)] = {
+            "call": call_prices,
+            "put": put_prices,
+            "long_strike_multiplier": long_strike_multiplier,
+            "short_strike_multiplier": short_strike_multiplier,
+        }
+        return_panels[str(name)] = {
+            "long": (
+                call_prices.pct_change(fill_method=None)
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            ),
+            "short": (
+                put_prices.pct_change(fill_method=None)
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            ),
+        }
+    return return_panels, price_panels
