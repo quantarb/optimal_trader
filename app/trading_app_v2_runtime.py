@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from app.quant_warehouse_storage import ensure_quant_warehouse_storage
+from platforms.brokers.option_pricing import normalize_option_limit_price
 
 
 DEFAULT_STRATEGY_SOURCES = (
@@ -204,6 +205,7 @@ def build_alpaca_equity_orders(
 
     client = alpaca_client_from_env(account_prefix)
     account = client.get_account()
+    open_orders = client.get_open_orders()
     positions = {
         str(row.get("symbol") or "").strip().upper(): float(row.get("qty") or 0.0)
         for row in client.get_positions()
@@ -219,7 +221,38 @@ def build_alpaca_equity_orders(
         gross_exposure=float(gross_exposure),
         liquidate_unselected=bool(liquidate_unselected),
     )
-    return pd.DataFrame(orders)
+    cancel_orders = _build_open_order_cancel_rows(open_orders, asset_classes={"", "us_equity", "equity"})
+    return pd.DataFrame([*cancel_orders, *orders])
+
+
+def _build_open_order_cancel_rows(
+    open_orders: Sequence[Mapping[str, Any]],
+    *,
+    asset_classes: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in open_orders or []:
+        order = dict(raw)
+        asset_class = str(order.get("asset_class") or "").strip().lower()
+        if asset_class not in asset_classes:
+            continue
+        order_id = str(order.get("id") or order.get("order_id") or "").strip()
+        symbol = str(order.get("symbol") or "").strip().upper()
+        if not order_id:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "action": "cancel_open_order",
+                "side": "cancel",
+                "qty": 0,
+                "order_id": order_id,
+                "order_type": "cancel",
+                "time_in_force": str(order.get("time_in_force") or ""),
+                "reason": "Cancel existing open order before creating the refreshed trading_app_v2 plan.",
+            }
+        )
+    return rows
 
 
 def build_alpaca_option_orders(
@@ -255,11 +288,14 @@ def build_alpaca_option_orders(
         )
         if contract:
             selected_contract_symbols.append(str(contract.get("symbol") or ""))
-    option_snapshots = client.get_option_snapshots(selected_contract_symbols)
+    current_positions = _enrich_alpaca_option_records(client, client.get_positions())
+    open_orders = _enrich_alpaca_option_records(client, client.get_open_orders())
+    position_contract_symbols = [str(row.get("symbol") or "").strip().upper() for row in current_positions if str(row.get("symbol") or "").strip()]
+    option_snapshots = client.get_option_snapshots([*selected_contract_symbols, *position_contract_symbols])
     plan = build_alpaca_option_trade_plan(
         ranked_scores=ranked,
-        current_option_positions=_enrich_alpaca_option_records(client, client.get_positions()),
-        open_orders=_enrich_alpaca_option_records(client, client.get_open_orders()),
+        current_option_positions=current_positions,
+        open_orders=open_orders,
         option_contracts=option_contracts,
         option_snapshots=option_snapshots,
         strategy_allocation=float(strategy_allocation),
@@ -350,6 +386,7 @@ def build_alpaca_option_trade_plan(
         if option_type in {"", "call"}:
             held_underlyings.add(underlying)
         if underlying not in target_symbols or option_type == "put":
+            bid, ask, mark = _option_quote(option_snapshots.get(symbol, {}))
             contracts_to_close += qty
             action_rows.append(
                 {
@@ -359,18 +396,23 @@ def build_alpaca_option_trade_plan(
                     "side": "sell",
                     "qty": qty,
                     "quantity": qty,
-                    "order_type": "market",
+                    "order_type": "limit",
                     "time_in_force": "day",
+                    "bid_price": bid,
+                    "ask_price": ask,
+                    "mark_price": mark,
                     "reason": "Underlying is no longer selected by trading_app_v2.",
                 }
             )
 
     pending_buy_underlyings: set[str] = set()
+    pending_cancel_rows: list[dict[str, Any]] = []
     normalized_orders: list[dict[str, Any]] = []
     for raw_order in open_orders:
         order = dict(raw_order)
         underlying = str(order.get("underlying_symbol") or "").strip().upper()
         side = str(order.get("side") or "").strip().lower()
+        option_type = str(order.get("option_type") or order.get("type") or "").strip().lower()
         qty = _number(order.get("qty", order.get("quantity")))
         filled_qty = _number(order.get("filled_qty", order.get("filled_quantity")))
         remaining = max(qty - filled_qty, 0.0)
@@ -379,18 +421,34 @@ def build_alpaca_option_trade_plan(
             "symbol": str(order.get("symbol") or "").strip().upper(),
             "underlying_symbol": underlying,
             "side": side,
+            "option_type": option_type,
             "remaining_qty": remaining,
             "status": str(order.get("status") or ""),
         }
         normalized_orders.append(normalized)
         if side == "buy" and remaining > 0 and underlying:
-            pending_buy_underlyings.add(underlying)
+            if underlying not in target_symbols or option_type == "put":
+                pending_cancel_rows.append(
+                    {
+                        "symbol": normalized["symbol"],
+                        "underlying_symbol": underlying,
+                        "action": "cancel_buy_to_open_put" if option_type == "put" else "cancel_buy_to_open_call",
+                        "side": "cancel",
+                        "qty": remaining,
+                        "quantity": remaining,
+                        "order_id": normalized["order_id"],
+                        "order_type": "cancel",
+                        "time_in_force": "day",
+                        "reason": "Open option order is no longer selected by trading_app_v2.",
+                    }
+                )
+            else:
+                pending_buy_underlyings.add(underlying)
 
+    target_contract_rows: list[dict[str, Any]] = []
     desired_rows: list[dict[str, Any]] = []
     skipped_rows: list[dict[str, Any]] = []
     for underlying in selected.index.astype(str):
-        if underlying in held_underlyings or underlying in pending_buy_underlyings:
-            continue
         contract = select_alpaca_option_contract(
             option_contracts.get(underlying, []),
             underlying_price=float(selected.loc[underlying, "close"]),
@@ -423,6 +481,9 @@ def build_alpaca_option_trade_plan(
             "quantity": quantity,
             "combined_score": float(selected.loc[underlying, "prob_buy"]),
         }
+        target_contract_rows.append(desired)
+        if underlying in held_underlyings or underlying in pending_buy_underlyings:
+            continue
         desired_rows.append(desired)
         if quantity <= 0:
             skipped_rows.append({**desired, "reason": "One contract exceeds the per-position option budget."})
@@ -441,13 +502,14 @@ def build_alpaca_option_trade_plan(
             }
         )
 
-    actions = pd.DataFrame(action_rows)
+    actions = apply_option_limit_policy(pd.DataFrame([*pending_cancel_rows, *action_rows]))
     summary = pd.DataFrame(
         [
             {
                 "target_positions": len(target_symbols),
                 "calls_to_open": int(actions.get("action", pd.Series(dtype=str)).eq("buy_to_open_call").sum()),
                 "contracts_to_close": contracts_to_close,
+                "orders_to_cancel": int(actions.get("action", pd.Series(dtype=str)).astype(str).str.startswith("cancel_").sum()),
                 "strategy_allocation": float(strategy_allocation),
                 "occupied_slots": len(held_underlyings & target_symbols),
                 "pending_buy_underlyings": len(pending_buy_underlyings & target_symbols),
@@ -456,6 +518,7 @@ def build_alpaca_option_trade_plan(
     )
     return {
         "summary": summary,
+        "target_contracts": pd.DataFrame(target_contract_rows),
         "desired_contracts": pd.DataFrame(desired_rows),
         "current_option_positions": pd.DataFrame(position_rows),
         "pending_option_orders": pd.DataFrame(normalized_orders),
@@ -463,6 +526,239 @@ def build_alpaca_option_trade_plan(
         "actionable_orders": actions.copy(),
         "skipped_symbols": pd.DataFrame(skipped_rows),
     }
+
+
+def build_robinhood_option_orders(
+    *,
+    target_contracts: pd.DataFrame,
+    gate_discount_pct: float,
+    account_number: str | None = None,
+    current_option_positions: pd.DataFrame | None = None,
+    pending_option_orders: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Reconcile Robinhood option account state before creating new live orders."""
+
+    from platforms.brokers import robinhood
+
+    current = (
+        current_option_positions.copy()
+        if current_option_positions is not None
+        else robinhood.load_robinhood_option_positions(account_number=account_number)
+    )
+    pending = (
+        pending_option_orders.copy()
+        if pending_option_orders is not None
+        else robinhood.load_robinhood_open_option_orders(account_number=account_number)
+    )
+    targets = _normalize_robinhood_target_contracts(target_contracts)
+    target_by_symbol = {
+        str(row["symbol"]).strip().upper(): row
+        for _, row in targets.iterrows()
+        if str(row.get("symbol") or "").strip()
+    }
+    target_symbols = set(target_by_symbol)
+
+    action_rows: list[dict[str, Any]] = []
+    held_target_symbols: set[str] = set()
+    pending_buy_symbols: set[str] = set()
+    pending_sell_contracts: set[tuple[str, str, float, str]] = set()
+
+    if current is not None and not current.empty:
+        for _, raw_position in current.iterrows():
+            position = raw_position.to_dict()
+            symbol = str(position.get("symbol") or position.get("underlying_symbol") or "").strip().upper()
+            quantity = int(abs(round(_number(position.get("quantity", position.get("qty"))))))
+            if not symbol or quantity <= 0:
+                continue
+            target = target_by_symbol.get(symbol)
+            if target is not None and _same_option_contract(position, target) and str(position.get("option_type") or "").lower() == "call":
+                held_target_symbols.add(symbol)
+                continue
+            sell_row = {
+                "symbol": symbol,
+                "action": "sell_to_close_put" if str(position.get("option_type") or "").lower() == "put" else "sell_to_close_call",
+                "reason": "Existing Robinhood option position is no longer the target contract.",
+                "quantity": quantity,
+                "expiry_date": str(position.get("expiry_date") or ""),
+                "strike_price": _number(position.get("strike_price")),
+                "option_type": str(position.get("option_type") or "call").strip().lower(),
+                "order_type": "limit",
+                "time_in_force": "gtc",
+                "bid_price": position.get("bid_price"),
+                "ask_price": position.get("ask_price"),
+                "mark_price": position.get("mark_price"),
+                "average_price": position.get("average_price"),
+            }
+            priced_sell = apply_option_limit_policy(pd.DataFrame([sell_row]), time_in_force="gtc")
+            action_rows.extend(priced_sell.to_dict(orient="records"))
+
+    if pending is not None and not pending.empty:
+        for _, raw_order in pending.iterrows():
+            order = raw_order.to_dict()
+            symbol = str(order.get("symbol") or order.get("underlying_symbol") or "").strip().upper()
+            action = str(order.get("action") or "").strip().lower()
+            if action.startswith("sell_to_close") and symbol:
+                pending_sell_contracts.add(_option_contract_key(order))
+                continue
+            if not action.startswith("buy_to_open") or not symbol:
+                continue
+            target = target_by_symbol.get(symbol)
+            if target is not None and _same_option_contract(order, target) and action == "buy_to_open_call":
+                pending_buy_symbols.add(symbol)
+                continue
+            action_rows.append(
+                {
+                    "symbol": symbol,
+                    "action": "cancel_buy_to_open_put" if action == "buy_to_open_put" else "cancel_buy_to_open_call",
+                    "reason": "Open Robinhood option order is no longer the target contract.",
+                    "quantity": order.get("contract_quantity", order.get("quantity", 0)),
+                    "expiry_date": str(order.get("expiry_date") or ""),
+                    "strike_price": order.get("strike_price"),
+                    "option_type": str(order.get("option_type") or "call").strip().lower(),
+                    "order_type": "cancel",
+                    "order_id": str(order.get("order_id") or ""),
+                    "cancel_url": str(order.get("cancel_url") or ""),
+                    "price": order.get("price"),
+                }
+            )
+
+    for _, target in targets.sort_values(["combined_score", "symbol"], ascending=[False, True], kind="stable").iterrows():
+        symbol = str(target.get("symbol") or "").strip().upper()
+        if not symbol or symbol in held_target_symbols or symbol in pending_buy_symbols:
+            continue
+        quantity = int(_number(target.get("quantity", target.get("target_contracts"))))
+        if quantity <= 0:
+            continue
+        buy_row = {
+            **target.to_dict(),
+            "symbol": symbol,
+            "action": "buy_to_open_call",
+            "reason": "New current top-K trading_app_v2 Robinhood option target.",
+            "quantity": quantity,
+            "qty": quantity,
+            "option_type": "call",
+            "order_type": "limit",
+            "time_in_force": "gtc",
+        }
+        priced = apply_option_limit_policy(pd.DataFrame([buy_row]), time_in_force="gtc")
+        priced["gate_discount_pct"] = float(gate_discount_pct)
+        if float(gate_discount_pct) >= 100.0:
+            priced["skip_submit"] = True
+            priced["skip_reason"] = "gate_discount_pct_100_blocks_orders"
+        action_rows.extend(priced.to_dict(orient="records"))
+
+    actions = pd.DataFrame(action_rows)
+    if not actions.empty:
+        if "combined_score" not in actions.columns:
+            actions["combined_score"] = pd.NA
+        if "skip_submit" not in actions.columns:
+            actions["skip_submit"] = False
+        sell_mask = actions["action"].astype(str).str.startswith("sell_to_close")
+        if sell_mask.any():
+            duplicate_sell = actions.loc[sell_mask].apply(lambda row: _option_contract_key(row.to_dict()) in pending_sell_contracts, axis=1)
+            actions.loc[actions.loc[sell_mask].index[duplicate_sell], "skip_submit"] = True
+            actions.loc[actions.loc[sell_mask].index[duplicate_sell], "skip_reason"] = "pending_sell_to_close_exists"
+        skip_submit = actions.get("skip_submit", pd.Series(False, index=actions.index))
+        actions["skip_submit"] = skip_submit.map(lambda value: bool(value) if pd.notna(value) else False)
+        priority = {
+            "cancel_buy_to_open_call": 0,
+            "cancel_buy_to_open_put": 1,
+            "sell_to_close_call": 2,
+            "sell_to_close_put": 3,
+            "buy_to_open_call": 4,
+        }
+        actions["_priority"] = actions["action"].map(priority).fillna(99)
+        actions = actions.sort_values(["_priority", "combined_score", "symbol"], ascending=[True, False, True], kind="stable").drop(columns=["_priority"])
+    else:
+        actions["skip_submit"] = pd.Series(dtype=bool)
+
+    summary = pd.DataFrame(
+        [
+            {
+                "target_positions": int(len(target_symbols)),
+                "positions_seen": int(0 if current is None else len(current)),
+                "open_orders_seen": int(0 if pending is None else len(pending)),
+                "positions_kept": int(len(held_target_symbols)),
+                "pending_buys_kept": int(len(pending_buy_symbols)),
+                "orders_to_cancel": int(actions["action"].astype(str).str.startswith("cancel_").sum()) if not actions.empty else 0,
+                "positions_to_exit": int(actions["action"].astype(str).str.startswith("sell_to_close").sum()) if not actions.empty else 0,
+                "orders_to_open": int(actions["action"].astype(str).str.startswith("buy_to_open").sum()) if not actions.empty else 0,
+                "gate_discount_pct": float(gate_discount_pct),
+            }
+        ]
+    )
+    return {
+        "summary": summary,
+        "current_option_positions": pd.DataFrame() if current is None else current.reset_index(drop=True),
+        "pending_option_orders": pd.DataFrame() if pending is None else pending.reset_index(drop=True),
+        "target_contracts": targets.reset_index(drop=True),
+        "actions": actions.reset_index(drop=True),
+        "actionable_orders": actions.reset_index(drop=True),
+    }
+
+
+def _normalize_robinhood_target_contracts(target_contracts: pd.DataFrame) -> pd.DataFrame:
+    if target_contracts is None or target_contracts.empty:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "option_type",
+                "expiry_date",
+                "strike_price",
+                "quantity",
+                "limit_price",
+                "combined_score",
+            ]
+        )
+    out = target_contracts.copy()
+    if "underlying_symbol" in out.columns:
+        symbol = out["underlying_symbol"]
+    else:
+        symbol = out.get("symbol", pd.Series("", index=out.index))
+    out["symbol"] = symbol.astype(str).str.strip().str.upper()
+    out["option_type"] = out.get("option_type", "call")
+    out["option_type"] = out["option_type"].astype(str).str.strip().str.lower().replace({"": "call"})
+    if "expiry_date" not in out.columns and "expiration_date" in out.columns:
+        out["expiry_date"] = out["expiration_date"]
+    if "quantity" not in out.columns and "target_contracts" in out.columns:
+        out["quantity"] = out["target_contracts"]
+    if "limit_price" not in out.columns:
+        if "limit_order_price" in out.columns:
+            out["limit_price"] = out["limit_order_price"]
+        elif "bid_price" in out.columns:
+            out["limit_price"] = out["bid_price"]
+        elif "mark_price" in out.columns:
+            out["limit_price"] = out["mark_price"]
+        else:
+            out["limit_price"] = pd.NA
+    if "combined_score" not in out.columns:
+        out["combined_score"] = pd.NA
+    out["strike_price"] = pd.to_numeric(out.get("strike_price"), errors="coerce")
+    out["quantity"] = pd.to_numeric(out.get("quantity"), errors="coerce").fillna(0).astype("int64")
+    out["limit_price"] = pd.to_numeric(out["limit_price"], errors="coerce")
+    return out.dropna(subset=["symbol", "expiry_date", "strike_price"]).loc[out["quantity"].gt(0)].reset_index(drop=True)
+
+
+def _option_contract_key(row: Mapping[str, Any]) -> tuple[str, str, float, str]:
+    strike = pd.to_numeric(pd.Series([row.get("strike_price")]), errors="coerce").iloc[0]
+    return (
+        str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper(),
+        str(row.get("expiry_date") or row.get("expiration_date") or "").strip(),
+        float(strike) if pd.notna(strike) else 0.0,
+        str(row.get("option_type") or "").strip().lower(),
+    )
+
+
+def _same_option_contract(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return _option_contract_key(left) == _option_contract_key(right)
+
+
+def _first_positive(row: Mapping[str, Any], keys: Sequence[str]) -> float | None:
+    for key in keys:
+        value = _number(row.get(key), default=float("nan"))
+        if math.isfinite(value) and value > 0:
+            return float(value)
+    return None
 
 
 def build_llm_review_orders(
@@ -489,59 +785,71 @@ def build_llm_review_orders(
     return orders
 
 
-def apply_order_gate(
+def apply_option_limit_policy(
     orders: pd.DataFrame,
     *,
-    gate_discount_pct: float,
-    reference_price_col: str = "limit_price",
+    time_in_force: str | None = None,
 ) -> pd.DataFrame:
+    """Set option limit prices from the executable side of the quote.
+
+    Buy-to-open orders bid. Sell-to-close orders ask. Cancels pass through.
+    """
+
+    if orders is None or orders.empty:
+        return pd.DataFrame() if orders is None else orders.copy()
     work = orders.copy()
-    work["gate_discount_pct"] = float(gate_discount_pct)
-    if float(gate_discount_pct) >= 100.0:
-        work["skip_submit"] = True
-        work["skip_reason"] = "gate_discount_pct_100_blocks_orders"
-        return work
-    discount_multiplier = max(0.0, 1.0 - (float(gate_discount_pct) / 100.0))
-    if reference_price_col in work.columns:
-        reference = pd.to_numeric(work[reference_price_col], errors="coerce")
-    elif "price" in work.columns:
-        reference = pd.to_numeric(work["price"], errors="coerce")
-    else:
-        reference = pd.Series(index=work.index, dtype="float64")
-    if reference.isna().all():
-        if "ask_price" in work.columns:
-            reference = pd.to_numeric(work["ask_price"], errors="coerce")
-        elif "mark_price" in work.columns:
-            reference = pd.to_numeric(work["mark_price"], errors="coerce")
-    work["limit_order_price"] = (reference * discount_multiplier).round(2)
-    work["price"] = work["limit_order_price"]
-    work["order_type"] = "limit"
-    work["time_in_force"] = "gtc"
-    work["skip_submit"] = work["limit_order_price"].isna() | work["limit_order_price"].le(0)
-    work["skip_reason"] = work["skip_submit"].map({True: "invalid_gate_limit_price", False: ""})
+    if "skip_submit" not in work.columns:
+        work["skip_submit"] = False
+    if "skip_reason" not in work.columns:
+        work["skip_reason"] = ""
+    for idx, row in work.iterrows():
+        action = str(row.get("action") or "").strip().lower()
+        if action.startswith("cancel_") or action == "cancel_open_order":
+            work.at[idx, "skip_submit"] = False
+            continue
+        if action.startswith("buy_to_open") or str(row.get("side") or "").strip().lower() == "buy":
+            price = _first_positive(row.to_dict(), ("bid_price",))
+            source = "bid_price"
+            pricing_side = "buy"
+        elif action.startswith("sell_to_close") or str(row.get("side") or "").strip().lower() == "sell":
+            price = _first_positive(row.to_dict(), ("ask_price",))
+            source = "ask_price"
+            pricing_side = "sell"
+        else:
+            continue
+        work.at[idx, "order_type"] = "limit"
+        if time_in_force is not None:
+            work.at[idx, "time_in_force"] = str(time_in_force)
+        if price is None:
+            work.at[idx, "skip_submit"] = True
+            work.at[idx, "skip_reason"] = f"missing_{source}"
+            continue
+        limit_price = normalize_option_limit_price(float(price), side=pricing_side)
+        if limit_price is None:
+            work.at[idx, "skip_submit"] = True
+            work.at[idx, "skip_reason"] = f"invalid_{source}"
+            continue
+        work.at[idx, "limit_price"] = float(limit_price)
+        work.at[idx, "limit_order_price"] = float(limit_price)
+        work.at[idx, "price"] = float(limit_price)
+        work.at[idx, "limit_price_source"] = source
+        work.at[idx, "skip_submit"] = False
+        work.at[idx, "skip_reason"] = ""
     return work
 
 
-def submit_alpaca_orders(client: Any, orders: pd.DataFrame, *, dry_run: bool = True) -> pd.DataFrame:
+def submit_alpaca_orders(client: Any, orders: pd.DataFrame) -> pd.DataFrame:
     if orders is None or orders.empty:
         return pd.DataFrame()
     actionable = orders.loc[~orders.get("skip_submit", pd.Series(False, index=orders.index)).astype(bool)].copy()
-    if dry_run:
-        actionable["submitted"] = False
-        actionable["response"] = "dry_run"
-        return actionable
     responses = client.submit_orders(actionable.to_dict(orient="records"))
     return pd.DataFrame(responses)
 
 
-def submit_robinhood_option_orders(orders: pd.DataFrame, *, dry_run: bool = True, account_number: str | None = None) -> pd.DataFrame:
+def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str | None = None) -> pd.DataFrame:
     if orders is None or orders.empty:
         return pd.DataFrame()
     actionable = orders.loc[~orders.get("skip_submit", pd.Series(False, index=orders.index)).astype(bool)].copy()
-    if dry_run:
-        actionable["submitted"] = False
-        actionable["response"] = "dry_run"
-        return actionable
     from platforms.brokers.robinhood import submit_robinhood_option_orders as _submit
 
     return _submit(orders_df=actionable, account_number=account_number, time_in_force="gtc")
@@ -549,15 +857,23 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, dry_run: bool = True
 
 def write_streamlit_leaderboard_app(*, live_dir: Path, output_path: Path | None = None) -> Path:
     live_dir = Path(live_dir).resolve()
+    repo_root = find_repo_root(Path(__file__).resolve())
     output = Path(output_path or (live_dir / "streamlit_trading_app_v2.py"))
     output.parent.mkdir(parents=True, exist_ok=True)
     script = f'''from __future__ import annotations
 
 from pathlib import Path
+import sys
 import pandas as pd
 import streamlit as st
 
 LIVE_DIR = Path(r"{str(live_dir)}")
+REPO_ROOT = Path(r"{str(repo_root)}")
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.trading_app_v2_runtime import alpaca_client_from_env, submit_alpaca_orders, submit_robinhood_option_orders
+
 st.set_page_config(page_title="Trading App V2", layout="wide")
 st.title("Trading App V2 Leaderboard")
 
@@ -577,9 +893,34 @@ cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series(
 
 st.dataframe(leaderboard, use_container_width=True, hide_index=True)
 
+order_frames = {{}}
 for path in sorted(LIVE_DIR.glob("*_orders.csv")):
     st.subheader(path.stem.replace("_", " ").title())
-    st.dataframe(pd.read_csv(path), use_container_width=True, hide_index=True)
+    frame = pd.read_csv(path)
+    order_frames[path.stem.removesuffix("_orders")] = frame
+    st.dataframe(frame, use_container_width=True, hide_index=True)
+
+st.divider()
+st.subheader("Submit Orders")
+confirm = st.checkbox("I have reviewed positions, open orders, exits, cancels, and new orders.")
+if st.button("Submit Orders", type="primary", disabled=not confirm):
+    results = {{}}
+    account_prefixes = {{
+        "alpaca_equity_paper": "EQUITY",
+        "alpaca_option_paper": "OPTION",
+        "alpaca_llm_paper": "LLM",
+    }}
+    for name, orders in order_frames.items():
+        if orders.empty:
+            continue
+        if name in account_prefixes:
+            client = alpaca_client_from_env(account_prefixes[name])
+            results[name] = submit_alpaca_orders(client, orders)
+        elif name == "robinhood_option_real":
+            results[name] = submit_robinhood_option_orders(orders)
+    for name, result in results.items():
+        st.write(f"{{name}}: {{len(result)}} response row(s)")
+        st.dataframe(result, use_container_width=True, hide_index=True)
 '''
     output.write_text(script, encoding="utf-8")
     return output

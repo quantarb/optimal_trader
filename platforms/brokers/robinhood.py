@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import os
 import time
-from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import numpy as np
 import pandas as pd
+
+from platforms.brokers.option_pricing import (
+    normalize_option_limit_price,
+    option_limit_tick_size,
+)
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -16,10 +20,7 @@ except Exception:  # pragma: no cover - optional dependency
     load_dotenv = None
 
 _REPO_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-_OPTION_PENNY_TICK_THRESHOLD = 3.00
-_OPTION_PENNY_TICK_SIZE = 0.01
-_OPTION_NICKEL_TICK_SIZE = 0.05
-_BUY_OPTION_BID_MULTIPLIER = 0.05
+_BUY_OPTION_BID_MULTIPLIER = 1.00
 _OPTION_CONTRACT_MULTIPLIER = 100.0
 _ROBINHOOD_OPTION_API_ATTEMPTS = 3
 _OPTION_MARKET_DATA_CANDIDATE_LIMIT = 16
@@ -226,11 +227,9 @@ def _option_previous_close_price(payload: Mapping[str, Any] | pd.Series | dict[s
     return None
 
 
-def _decimal_from_float(value: float) -> Decimal:
-    return Decimal(str(float(value)))
-
-
 def _multiplier_label(value: float) -> str:
+    from decimal import Decimal
+
     decimal_value = Decimal(str(float(value))).normalize()
     text = format(decimal_value, "f").rstrip("0").rstrip(".")
     return text.replace("-", "neg_").replace(".", "_")
@@ -245,42 +244,15 @@ def _buy_option_bid_limit_column() -> str:
 
 
 def _option_limit_tick_size(price: float | None) -> float | None:
-    number = _positive_float(price)
-    if number is None:
-        return None
-    if float(number) < _OPTION_PENNY_TICK_THRESHOLD:
-        return _OPTION_PENNY_TICK_SIZE
-    return _OPTION_NICKEL_TICK_SIZE
+    return option_limit_tick_size(price)
 
 
 def _round_option_limit_price(price: float | None) -> float | None:
-    number = _positive_float(price)
-    if number is None:
-        return None
-    tick = _option_limit_tick_size(float(number))
-    if tick is None:
-        return None
-    decimal_number = _decimal_from_float(number)
-    decimal_tick = _decimal_from_float(tick)
-    rounded = (decimal_number / decimal_tick).to_integral_value(rounding=ROUND_HALF_UP) * decimal_tick
-    if rounded <= 0:
-        return None
-    return float(rounded.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return normalize_option_limit_price(price, side="nearest")
 
 
 def _floor_option_limit_price(price: float | None) -> float | None:
-    if price is None:
-        return None
-    number = _positive_float(price)
-    tick = _option_limit_tick_size(float(number)) if number is not None else None
-    if number is None or tick is None:
-        return None
-    decimal_number = _decimal_from_float(number)
-    decimal_tick = _decimal_from_float(tick)
-    floored = (decimal_number / decimal_tick).to_integral_value(rounding=ROUND_FLOOR) * decimal_tick
-    if floored <= 0.0:
-        return None
-    return _round_option_limit_price(float(floored))
+    return normalize_option_limit_price(price, side="buy")
 
 
 def _robinhood_strike_candidates(strike: Any) -> list[str]:
@@ -353,7 +325,7 @@ def _sell_option_limit_price(row: Mapping[str, Any] | pd.Series | dict[str, Any]
     for key in ("ask_price", "mark_price", "limit_order_price", "price", "average_price", "bid_price"):
         value = _positive_float(data.get(key))
         if value is not None:
-            return _round_option_limit_price(float(value)), key
+            return normalize_option_limit_price(float(value), side="sell"), key
     return None, ""
 
 
@@ -1874,7 +1846,12 @@ def submit_robinhood_option_orders(
         else:
             limit_price = _positive_float(row.get("price"))
         if order_type != "market":
-            limit_price = _round_option_limit_price(limit_price)
+            if action == "buy_to_open_call" or action == "buy_to_open_put":
+                limit_price = normalize_option_limit_price(limit_price, side="buy")
+            elif action == "sell_to_close_call" or action == "sell_to_close_put":
+                limit_price = normalize_option_limit_price(limit_price, side="sell")
+            else:
+                limit_price = _round_option_limit_price(limit_price)
         if not symbol or option_type not in {"call", "put"} or not expiry_date or pd.isna(strike_price) or pd.isna(quantity) or int(quantity) <= 0:
             responses.append(_result_row(symbol, action, {"skipped": "invalid_order_payload"}, skipped="invalid_order_payload"))
             continue

@@ -6,6 +6,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from platforms.brokers.option_pricing import normalize_option_limit_price
+
 
 def load_ib_components() -> dict[str, Any]:
     try:
@@ -886,19 +888,17 @@ def build_ib_order(mods, row: pd.Series, broker_cfg: dict[str, Any], option_cfg:
         order.orderType = str(option_cfg.get("close_px_base_order_type", "MKT")).upper()
         if order.orderType == "LMT":
             if action == "BUY":
-                ref_price = row.get("ask", np.nan)
-                if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                    ref_price = row.get("bid", np.nan)
-                if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                    raise RuntimeError(f"Cannot build ClosePx limit buy order for {row['symbol']} without valid bid/ask data.")
-                order.lmtPrice = round(float(ref_price) * (1.0 + float(option_cfg.get("limit_price_slippage_pct", 0.05))), 2)
-            else:
                 ref_price = row.get("bid", np.nan)
                 if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                    ref_price = row.get("ask", np.nan)
+                    raise RuntimeError(f"Cannot build ClosePx limit buy order for {row['symbol']} without valid bid data.")
+                order.lmtPrice = normalize_option_limit_price(float(ref_price), side="buy")
+            else:
+                ref_price = row.get("ask", np.nan)
                 if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                    raise RuntimeError(f"Cannot build ClosePx limit sell order for {row['symbol']} without valid bid/ask data.")
-                order.lmtPrice = round(max(0.01, float(ref_price) * (1.0 - float(option_cfg.get("limit_price_slippage_pct", 0.05)))), 2)
+                    raise RuntimeError(f"Cannot build ClosePx limit sell order for {row['symbol']} without valid ask data.")
+                order.lmtPrice = normalize_option_limit_price(float(ref_price), side="sell")
+            if order.lmtPrice is None:
+                raise RuntimeError(f"Cannot build ClosePx limit {action.lower()} order for {row['symbol']} with invalid option price.")
         order.algoStrategy = "ClosePx"
         order.algoParams = [
             mods["TagValue"]("maxPctVol", str(option_cfg.get("close_px_max_pct_vol", 0.1))),
@@ -908,19 +908,17 @@ def build_ib_order(mods, row: pd.Series, broker_cfg: dict[str, Any], option_cfg:
         ]
     elif order_type == "LMT":
         if action == "BUY":
-            ref_price = row.get("ask", np.nan)
-            if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                ref_price = row.get("bid", np.nan)
-            if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                raise RuntimeError(f"Cannot build limit buy order for {row['symbol']} without valid bid/ask data.")
-            limit_price = round(float(ref_price) * (1.0 + float(option_cfg.get("limit_price_slippage_pct", 0.05))), 2)
-        else:
             ref_price = row.get("bid", np.nan)
             if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                ref_price = row.get("ask", np.nan)
+                raise RuntimeError(f"Cannot build limit buy order for {row['symbol']} without valid bid data.")
+            limit_price = normalize_option_limit_price(float(ref_price), side="buy")
+        else:
+            ref_price = row.get("ask", np.nan)
             if not np.isfinite(ref_price) or float(ref_price) <= 0.0:
-                raise RuntimeError(f"Cannot build limit sell order for {row['symbol']} without valid bid/ask data.")
-            limit_price = round(max(0.01, float(ref_price) * (1.0 - float(option_cfg.get("limit_price_slippage_pct", 0.05)))), 2)
+                raise RuntimeError(f"Cannot build limit sell order for {row['symbol']} without valid ask data.")
+            limit_price = normalize_option_limit_price(float(ref_price), side="sell")
+        if limit_price is None:
+            raise RuntimeError(f"Cannot build limit {action.lower()} order for {row['symbol']} with invalid option price.")
         order = mods["LimitOrder"](action, quantity, limit_price)
     else:
         order = mods["MarketOrder"](action, quantity)

@@ -158,7 +158,7 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         self.assertEqual(str(skipped.loc[0, "reason"]), "option_lookup_failed")
         self.assertTrue(any("stopping new option lookups" in line for line in plan["plan_log_lines"]))
 
-    def test_enrich_buy_to_open_uses_bid_multiplier_as_limit(self) -> None:
+    def test_enrich_buy_to_open_uses_bid_as_limit(self) -> None:
         class FakeRobinhood:
             @staticmethod
             def get_option_market_data(symbol, expiry, strike, option_type):
@@ -189,12 +189,12 @@ class RobinhoodOptionOrderPricingTests(TestCase):
             enriched = robinhood.enrich_robinhood_option_prices(orders)
 
         bid_limit_column = robinhood._buy_option_bid_limit_column()
-        self.assertEqual(float(enriched.loc[0, "price"]), 0.06)
-        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 0.06)
-        self.assertAlmostEqual(float(enriched.loc[0, bid_limit_column]), 0.067)
+        self.assertEqual(float(enriched.loc[0, "price"]), 1.34)
+        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 1.34)
+        self.assertAlmostEqual(float(enriched.loc[0, bid_limit_column]), 1.34)
         self.assertEqual(enriched.loc[0, "limit_price_source"], robinhood._buy_option_bid_limit_source())
 
-    def test_enrich_buy_to_open_uses_bid_multiplier_when_below_previous_close(self) -> None:
+    def test_enrich_buy_to_open_uses_bid_when_below_previous_close(self) -> None:
         class FakeRobinhood:
             @staticmethod
             def get_option_market_data(symbol, expiry, strike, option_type):
@@ -225,9 +225,9 @@ class RobinhoodOptionOrderPricingTests(TestCase):
             enriched = robinhood.enrich_robinhood_option_prices(orders)
 
         bid_limit_column = robinhood._buy_option_bid_limit_column()
-        self.assertEqual(float(enriched.loc[0, "price"]), 0.06)
-        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 0.06)
-        self.assertEqual(float(enriched.loc[0, bid_limit_column]), 0.06)
+        self.assertEqual(float(enriched.loc[0, "price"]), 1.20)
+        self.assertEqual(float(enriched.loc[0, "limit_order_price"]), 1.20)
+        self.assertEqual(float(enriched.loc[0, bid_limit_column]), 1.20)
         self.assertEqual(enriched.loc[0, "limit_price_source"], robinhood._buy_option_bid_limit_source())
 
     def test_enrich_sell_to_close_sets_limit_order_price_from_ask(self) -> None:
@@ -322,7 +322,7 @@ class RobinhoodOptionOrderPricingTests(TestCase):
                     "expiry_date": "2026-06-19",
                     "strike_price": 200.0,
                     "order_type": "limit",
-                    "price": 0.10,
+                    "price": 1.20,
                 }
             ]
         )
@@ -330,30 +330,30 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         with patch.object(robinhood, "_require_robin_stocks", return_value=FakeRobinhood):
             annotated = robinhood.annotate_robinhood_option_limit_savings(orders)
 
-        self.assertEqual(float(annotated.loc[0, "submitted_limit_price"]), 0.10)
-        self.assertEqual(float(annotated.loc[0, "discount_rate"]), 0.05)
-        self.assertEqual(float(annotated.loc[0, "limit_price"]), 0.10)
+        self.assertEqual(float(annotated.loc[0, "submitted_limit_price"]), 1.20)
+        self.assertEqual(float(annotated.loc[0, "discount_rate"]), 1.0)
+        self.assertEqual(float(annotated.loc[0, "limit_price"]), 1.20)
         self.assertEqual(float(annotated.loc[0, "current_qty"]), 2.0)
-        self.assertEqual(float(annotated.loc[0, "original_strategy_price"]), 2.00)
-        self.assertAlmostEqual(float(annotated.loc[0, "original_strategy_qty"]), 0.1)
-        self.assertEqual(float(annotated.loc[0, "inferred_original_reference_price"]), 2.00)
+        self.assertEqual(float(annotated.loc[0, "original_strategy_price"]), 1.20)
+        self.assertAlmostEqual(float(annotated.loc[0, "original_strategy_qty"]), 2.0)
+        self.assertEqual(float(annotated.loc[0, "inferred_original_reference_price"]), 1.20)
         self.assertEqual(float(annotated.loc[0, "contract_quantity"]), 2.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity"]), 0.1)
-        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity_floor"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity"]), 2.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity_floor"]), 2.0)
         self.assertEqual(float(annotated.loc[0, "contract_multiplier"]), 100.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "submitted_limit_notional"]), 20.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_notional"]), 20.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_per_share"]), 1.90)
-        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_per_contract"]), 190.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_total"]), 19.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "submitted_limit_notional"]), 240.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_notional"]), 240.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_per_share"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_per_contract"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_total"]), 0.0)
         self.assertEqual(float(annotated.loc[0, "limit_savings_reference_price"]), 1.20)
         self.assertEqual(annotated.loc[0, "limit_savings_reference_source"], "bid_price")
-        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_per_share"]), -0.80)
-        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_per_contract"]), -80.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_total"]), -8.0)
-        self.assertEqual(annotated.loc[0, "missed_move_label"], "avoided_loss")
+        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_per_share"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_per_contract"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_total"]), 0.0)
+        self.assertEqual(annotated.loc[0, "missed_move_label"], "flat")
         target_bid_limit_column = f"target_{robinhood._buy_option_bid_limit_source()}_limit_price"
-        self.assertEqual(float(annotated.loc[0, target_bid_limit_column]), 0.06)
+        self.assertEqual(float(annotated.loc[0, target_bid_limit_column]), 1.20)
 
     def test_annotate_pending_buy_limit_savings_normalizes_share_equivalent_quantity(self) -> None:
         class FakeRobinhood:
@@ -371,7 +371,7 @@ class RobinhoodOptionOrderPricingTests(TestCase):
                     "expiry_date": "2026-06-19",
                     "strike_price": 200.0,
                     "order_type": "limit",
-                    "price": 0.10,
+                    "price": 1.20,
                 }
             ]
         )
@@ -380,10 +380,10 @@ class RobinhoodOptionOrderPricingTests(TestCase):
             annotated = robinhood.annotate_robinhood_option_limit_savings(orders)
 
         self.assertEqual(float(annotated.loc[0, "contract_quantity"]), 2.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity"]), 0.1)
+        self.assertAlmostEqual(float(annotated.loc[0, "inferred_original_strategy_contract_quantity"]), 2.0)
         self.assertEqual(str(annotated.loc[0, "quantity_source"]), "share_equivalent_divided_by_100")
-        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_total"]), 19.0)
-        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_total"]), -8.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "discount_saved_total"]), 0.0)
+        self.assertAlmostEqual(float(annotated.loc[0, "missed_move_total"]), 0.0)
 
     def test_load_option_positions_populates_bid_price(self) -> None:
         class FakeRobinhood:
@@ -416,7 +416,7 @@ class RobinhoodOptionOrderPricingTests(TestCase):
         self.assertEqual(float(positions.loc[0, "bid_price"]), 1.25)
         self.assertEqual(float(positions.loc[0, "mark_price"]), 1.30)
 
-    def test_submit_buy_to_open_uses_bid_multiplier(self) -> None:
+    def test_submit_buy_to_open_uses_bid(self) -> None:
         orders = pd.DataFrame(
             [
                 {
@@ -445,20 +445,20 @@ class RobinhoodOptionOrderPricingTests(TestCase):
 
         response = results.loc[0, "response"]
         self.assertTrue(bool(results.loc[0, "submitted"]))
-        self.assertEqual(float(response["price"]), 0.06)
-        self.assertEqual(float(calls[0][0][2]), 0.06)
+        self.assertEqual(float(response["price"]), 1.34)
+        self.assertEqual(float(calls[0][0][2]), 1.34)
         self.assertEqual(calls[0][1]["timeInForce"], "gtc")
 
     def test_buy_limit_price_uses_decimal_tick_floor_without_float_artifacts(self) -> None:
         limit_price, source = robinhood._buy_option_limit_price({"bid_price": 1.999999999})
 
-        self.assertEqual(limit_price, 0.09)
+        self.assertEqual(limit_price, 1.99)
         self.assertEqual(source, robinhood._buy_option_bid_limit_source())
 
     def test_buy_limit_price_uses_nickel_tick_at_three_dollars_and_above(self) -> None:
         limit_price, source = robinhood._buy_option_limit_price({"bid_price": 70.17})
 
-        self.assertEqual(limit_price, 3.50)
+        self.assertEqual(limit_price, 70.15)
         self.assertEqual(source, robinhood._buy_option_bid_limit_source())
 
     def test_plan_exits_flipped_positions_and_counts_pending_entries_against_capacity(self) -> None:
@@ -818,12 +818,12 @@ class RobinhoodOptionOrderPricingTests(TestCase):
                 account_equity=5_000.0,
                 strategy_allocation=5_000.0,
                 as_of_date="2026-04-27",
-            )
+        )
 
         buy_orders = plan["actions"].loc[plan["actions"]["action"].astype(str).str.startswith("buy_to_open")]
-        self.assertEqual(int(buy_orders.iloc[0]["quantity"]), 40)
-        self.assertEqual(float(buy_orders.iloc[0]["limit_order_price"]), 1.25)
-        self.assertEqual(float(buy_orders.iloc[0]["contract_value"]), 125.0)
+        self.assertEqual(int(buy_orders.iloc[0]["quantity"]), 2)
+        self.assertEqual(float(buy_orders.iloc[0]["limit_order_price"]), 25.0)
+        self.assertEqual(float(buy_orders.iloc[0]["contract_value"]), 2500.0)
 
     def test_submit_limit_exit_uses_limit_price(self) -> None:
         orders = pd.DataFrame(
