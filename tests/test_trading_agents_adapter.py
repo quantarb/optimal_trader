@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from types import ModuleType
 
@@ -55,6 +56,19 @@ def test_review_trade_candidates_marks_unavailable(monkeypatch):
             monkeypatch.delitem(sys.modules, name, raising=False)
 
     monkeypatch.setattr("platforms.agents.trading_agents.default_trading_agents_repo", lambda: __import__("pathlib").Path("/missing"))
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        "platforms.agents.trading_agents.importlib.util.find_spec",
+        lambda name: None if name == "tradingagents" else real_find_spec(name),
+    )
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name, package=None):
+        if name == "tradingagents" or name.startswith("tradingagents."):
+            raise ModuleNotFoundError(name)
+        return real_import_module(name, package=package)
+
+    monkeypatch.setattr("platforms.agents.trading_agents.importlib.import_module", fake_import_module)
     reviewed = review_trade_candidates(pd.DataFrame([{"symbol": "AAPL"}]))
 
     assert reviewed.loc[0, "llm_decision"] == "unavailable"
