@@ -1,4 +1,1 @@
 streamlit>=1.32
-# faiss-cpu is required for optimal_trade_lookup vector search (and code analysis tools).
-# The main environment.yml also declares it under pip for full env reproducibility.
-faiss-cpu>=1.8

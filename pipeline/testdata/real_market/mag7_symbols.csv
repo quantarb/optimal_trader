@@ -1,8 +1,0 @@
-symbol,company_name,exchange,country,sector,industry,market_cap,price,beta,volume,dividend,dividend_yield,payload
-AAPL,Apple Inc.,,,,,,,,,,,{}
-AMZN,"Amazon.com, Inc.",,,,,,,,,,,{}
-GOOGL,Alphabet Inc.,,,,,,,,,,,{}
-META,"Meta Platforms, Inc.",,,,,,,,,,,{}
-MSFT,Microsoft Corporation,,,,,,,,,,,{}
-NVDA,NVIDIA Corporation,,,,,,,,,,,{}
-TSLA,"Tesla, Inc.",,,,,,,,,,,{}

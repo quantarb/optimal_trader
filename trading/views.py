@@ -1,21 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import date
 from typing import Any
 
 import pandas as pd
-from django.contrib import messages
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
-from django.urls import reverse
 
-from app.live_trade_leaderboard import (
-    default_live_trade_config,
-    latest_scored_staleness_reason,
-    load_saved_leaderboard,
-)
-from app.optimal_trade_lookup import OptimalTradeQuery, find_nearest_optimal_trades
+from app.trading_app_v2_runtime import default_paths
 
 
 LEADERBOARD_PAGE_SIZE = 50
@@ -26,16 +18,13 @@ def _streamlit_trading_url() -> str:
 
 
 def trading_leaderboard(request: HttpRequest) -> HttpResponse:
-    default_cfg = default_live_trade_config()
-    saved = load_saved_leaderboard()
-    leaderboard = pd.DataFrame()
-    meta: dict[str, Any] = {}
-    if saved is not None:
-        leaderboard, meta = saved
-        strategy_cfg = (meta.get("config") or {}).get("strategy") or default_cfg.get("strategy") or {}
-        threshold = float(strategy_cfg.get("component_threshold", 0.50))
-        leaderboard = _recompute_eligibility(leaderboard, threshold=threshold)
-        leaderboard = _rank_leaderboard_for_display(leaderboard)
+    paths = default_paths()
+    leaderboard_path = paths.live_artifact_dir / "leaderboard_latest.csv"
+    metadata_path = paths.live_artifact_dir / "metadata.json"
+    leaderboard = _load_v2_leaderboard(leaderboard_path)
+    meta = _read_json(metadata_path)
+    if not leaderboard.empty:
+        leaderboard = _rank_v2_leaderboard_for_display(leaderboard)
 
     page = _coerce_int(request.GET.get("page"), default=1, minimum=1)
     page_rows, page_meta = _paginate_frame(leaderboard, page=page, page_size=LEADERBOARD_PAGE_SIZE)
@@ -46,19 +35,12 @@ def trading_leaderboard(request: HttpRequest) -> HttpResponse:
         "Direction",
         "Eligible",
         "Classifier Score",
-        "Regressor Score",
-        "Autoencoder Score",
         "Combined Score",
-        "Similar Trades",
+        "Close",
+        "Model Count",
     ]
-    table = _frame_table(page_rows, display_columns, link_columns={"Similar Trades": "Similar Trades"})
+    table = _frame_table(page_rows, display_columns)
 
-    artifact_dir = (
-        (meta.get("config") or {}).get("runtime", {}).get("artifact_dir")
-        or meta.get("artifact_dir")
-        or default_cfg["runtime"]["artifact_dir"]
-    )
-    stale_reason = latest_scored_staleness_reason(artifact_dir=artifact_dir)
     summary = _leaderboard_summary(leaderboard, meta)
     return render(
         request,
@@ -68,87 +50,49 @@ def trading_leaderboard(request: HttpRequest) -> HttpResponse:
             "leaderboard_summary": summary,
             "page_meta": page_meta,
             "meta": meta,
-            "artifact_dir": artifact_dir,
-            "stale_reason": stale_reason,
+            "artifact_dir": str(paths.live_artifact_dir),
+            "stale_reason": "" if leaderboard_path.exists() else f"missing_v2_leaderboard={leaderboard_path}",
             "has_leaderboard": not leaderboard.empty,
             "streamlit_url": _streamlit_trading_url(),
         },
     )
 
-
-def similar_trades(request: HttpRequest) -> HttpResponse:
-    form = _similar_trades_form(request)
-    result = None
-    error = ""
-    if request.method == "POST" or str(request.GET.get("symbol") or "").strip():
-        try:
-            result = find_nearest_optimal_trades(
-                OptimalTradeQuery(
-                    symbol=str(form["symbol"]).strip().upper(),
-                    as_of_date=str(form["as_of_date"] or "") or None,
-                    top_k=int(form["top_k"]),
-                    query_lookback_years=int(form["query_lookback_years"]),
-                    reference_start_date=str(form["reference_start_date"]),
-                    min_profit_pct_points=float(form["min_profit_pct_points"]),
-                    download_missing_prices=False,
-                    artifact_dir=str(form["artifact_dir"]),
-                )
-            )
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            messages.error(request, f"Similar-trades lookup failed: {error}")
-
-    context: dict[str, Any] = {"form": form, "error": error, "result": result}
-    if result is not None:
-        context.update(
-            {
-                "query_summary_table": _frame_table(result.query_summary),
-                "indicator_table": _frame_table(result.indicator_summary),
-                "nearest_trades_table": _frame_table(result.nearest_trades),
-                "feature_attribution_table": _frame_table(result.feature_attribution),
-                "model_predictions": result.model_predictions,
-                "metadata": result.metadata,
-            }
-        )
-    return render(request, "trading/similar_trades.html", context)
-
-
-def _similar_trades_form(request: HttpRequest) -> dict[str, Any]:
-    default_cfg = default_live_trade_config()
-    source = request.POST if request.method == "POST" else request.GET
-    return {
-        "symbol": str(source.get("symbol") or "AAPL").strip().upper(),
-        "as_of_date": str(source.get("as_of_date") or date.today().isoformat()),
-        "top_k": _coerce_int(source.get("top_k"), default=10, minimum=1),
-        "query_lookback_years": _coerce_int(source.get("query_lookback_years"), default=5, minimum=1),
-        "reference_start_date": str(source.get("reference_start_date") or "2010-01-01"),
-        "min_profit_pct_points": _coerce_float(source.get("min_profit_pct_points"), default=5.0, minimum=0.0),
-        "artifact_dir": str(source.get("artifact_dir") or default_cfg["runtime"]["artifact_dir"]),
-    }
-
-
-def _recompute_eligibility(frame: pd.DataFrame, threshold: float = 0.50) -> pd.DataFrame:
+def _load_v2_leaderboard(path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    frame = pd.read_csv(path)
     if frame.empty:
-        return frame.copy()
+        return frame
     out = frame.copy()
-    component_cols = [column for column in out.columns if str(column).startswith("__component__")]
-    if component_cols:
-        eligible = pd.Series(True, index=out.index, dtype=bool)
-        for component_col in component_cols:
-            eligible &= pd.to_numeric(out[component_col], errors="coerce").gt(float(threshold)).fillna(False)
-        out["Eligible"] = eligible & pd.to_numeric(out.get("Combined Score"), errors="coerce").notna()
-        return out
-    required_cols = ["Classifier Score", "Regressor Score", "Autoencoder Score"]
-    if all(column in out.columns for column in required_cols):
-        out["Eligible"] = (
-            pd.to_numeric(out["Classifier Score"], errors="coerce").gt(float(threshold))
-            & pd.to_numeric(out["Regressor Score"], errors="coerce").gt(float(threshold))
-            & pd.to_numeric(out["Autoencoder Score"], errors="coerce").gt(float(threshold))
-        )
+    rename_map = {
+        "rank": "Rank",
+        "score_date": "Scored Date",
+        "symbol": "Symbol",
+        "eligible": "Eligible",
+        "prob_buy": "Classifier Score",
+        "close": "Close",
+        "model_count": "Model Count",
+    }
+    out = out.rename(columns={source: target for source, target in rename_map.items() if source in out.columns})
+    out["Direction"] = "Long"
+    out["Combined Score"] = pd.to_numeric(out.get("Classifier Score"), errors="coerce")
+    if "Eligible" in out.columns:
+        out["Eligible"] = out["Eligible"].astype(bool)
     return out
 
 
-def _rank_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFrame:
+def _read_json(path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        import json
+
+        return dict(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return {}
+
+
+def _rank_v2_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame.copy()
     out = frame.copy()
@@ -159,9 +103,6 @@ def _rank_leaderboard_for_display(frame: pd.DataFrame) -> pd.DataFrame:
         out = out.sort_values(["Combined Score"], ascending=[False], kind="stable")
     out = out.reset_index(drop=True)
     out["Rank"] = range(1, len(out) + 1)
-    out["Similar Trades"] = out["Symbol"].map(
-        lambda symbol: reverse("trading-similar-trades") + f"?symbol={str(symbol).strip().upper()}"
-    )
     return out
 
 
@@ -235,7 +176,7 @@ def _format_cell(column: str, value: Any) -> str:
     if column in {"Classifier Score", "Regressor Score", "Autoencoder Score", "Combined Score"}:
         numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
         return "" if pd.isna(numeric) else f"{float(numeric):.4f}"
-    if column in {"Price", "__price", "Target Dollars"}:
+    if column in {"Price", "__price", "Target Dollars", "Close"}:
         numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
         return "" if pd.isna(numeric) else f"${float(numeric):,.2f}"
     if column in {"Target Weight"}:
@@ -255,14 +196,4 @@ def _coerce_int(value: Any, *, default: int, minimum: int | None = None) -> int:
         out = int(default)
     if minimum is not None:
         out = max(int(minimum), out)
-    return out
-
-
-def _coerce_float(value: Any, *, default: float, minimum: float | None = None) -> float:
-    try:
-        out = float(value)
-    except Exception:
-        out = float(default)
-    if minimum is not None:
-        out = max(float(minimum), out)
     return out

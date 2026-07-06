@@ -1857,7 +1857,12 @@ def submit_robinhood_option_orders(
         if order_type == "market":
             limit_price = None
         elif action == "buy_to_open_call" or action == "buy_to_open_put":
-            limit_price, _limit_price_source = _buy_option_limit_price(row)
+            limit_price = (
+                _positive_float(row.get("limit_order_price"))
+                or _positive_float(row.get("limit_price"))
+            )
+            if limit_price is None:
+                limit_price, _limit_price_source = _buy_option_limit_price(row)
         elif action == "sell_to_close_call" or action == "sell_to_close_put":
             # Use ask for sell orders to target a higher credit (better for the seller).
             limit_price = (

@@ -1,1 +1,0 @@
-"""Product quality analysis toolkit."""

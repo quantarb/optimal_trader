@@ -1,1 +1,1 @@
-"""Interactive app helpers for optimal-trader research tools."""
+"""Live trading app helpers."""

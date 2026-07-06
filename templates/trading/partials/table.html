@@ -11,7 +11,7 @@
         </thead>
         <tbody>
           {% for row in table.rows %}
-            <tr class="{% if row.is_eligible %}trading-row-eligible{% endif %}">
+            <tr class="{% if row.is_eligible %}eligible{% endif %}">
               {% for cell in row.cells %}
                 <td>
                   {% if cell.href %}
