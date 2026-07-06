@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from trading.alpaca_paper import build_equal_weight_order_plan
+from platforms.brokers.alpaca import build_equal_weight_order_plan
 
 
 class AlpacaPaperOrderPlanTests(TestCase):

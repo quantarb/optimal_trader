@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -38,8 +36,6 @@ class TradingAppV2Paths:
     equity_artifact_dir: Path
     option_artifact_dir: Path
     live_artifact_dir: Path
-    quant_orchestrator_repo: Path
-    quant_warehouse_repo: Path
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -59,26 +55,6 @@ def default_paths(repo_root: Path | None = None) -> TradingAppV2Paths:
         equity_artifact_dir=artifact_root / "equity_moe",
         option_artifact_dir=artifact_root / "option_family_ranker",
         live_artifact_dir=artifact_root / "live",
-        quant_orchestrator_repo=root.parent / "quant-orchestrator",
-        quant_warehouse_repo=root.parent / "quant-warehouse",
-    )
-
-
-def maybe_prefer_local_downstream_repos(paths: TradingAppV2Paths, *, enabled: bool) -> None:
-    if not enabled:
-        return
-    for candidate in (paths.quant_orchestrator_repo, paths.quant_warehouse_repo):
-        if candidate.exists() and str(candidate) not in sys.path:
-            sys.path.insert(0, str(candidate))
-
-
-def reinstall_downstream_from_github(repo_root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements-quant-warehouse.txt"],
-        cwd=str(repo_root),
-        text=True,
-        capture_output=True,
-        check=True,
     )
 
 
@@ -118,6 +94,7 @@ def run_equity_moe_training(
         oracle_frequencies=("YE",),
         oracle_k_min=1,
         oracle_k_max=12,
+        quant_warehouse_root=None,
         run_zipline_backtests=bool(run_backtests),
         log_mlflow=bool(log_mlflow),
     )
@@ -153,48 +130,37 @@ def run_option_family_ranker_training(
     target_col: str = "rank_y",
     all_feature_families: bool = True,
     feature_families: Sequence[str] = (),
-) -> subprocess.CompletedProcess[str]:
-    script_path = paths.quant_orchestrator_repo / "scripts" / "run_option_family_ranker_experiment.py"
-    if not script_path.exists():
-        raise FileNotFoundError(
-            "The option-family ranker is currently exposed as a quant-orchestrator repo script. "
-            f"Expected {script_path}. If this needs to run from only the installed package, promote "
-            "that script into quant_orchestrator and reinstall optimal_trader from GitHub."
-        )
-    train_end_value = str(train_end or pd.Timestamp.today().date())
+    max_family_features: int = 25,
+    n_estimators: int = 400,
+    max_trades: int = 0,
+    random_seed: int = 20260704,
+):
+    from quant_orchestrator.research_tools import (
+        OptionFamilyRankerConfig,
+        run_option_family_ranker_experiment,
+    )
+
+    train_end_value = str(train_end or "2024-12-31")
     eval_start_value = (pd.Timestamp(train_end_value) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     out_dir = Path(output_dir or paths.option_artifact_dir)
-    command = [
-        sys.executable,
-        str(script_path),
-        "--option-panel",
-        str(Path(option_panel).expanduser().resolve()),
-        "--output-dir",
-        str(out_dir),
-        "--min-market-cap",
-        str(int(min_market_cap)),
-        "--start-date",
-        str(data_start),
-        "--end-date",
-        str(data_end or ""),
-        "--train-end",
-        train_end_value,
-        "--eval-start",
-        eval_start_value,
-        "--target-col",
-        str(target_col),
-    ]
-    if all_feature_families:
-        command.append("--all-feature-families")
-    for family in feature_families:
-        command.extend(["--feature-family", str(family)])
-    return subprocess.run(
-        command,
-        cwd=str(paths.quant_orchestrator_repo),
-        text=True,
-        capture_output=True,
-        check=True,
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config = OptionFamilyRankerConfig(
+        option_panel=Path(option_panel).expanduser().resolve(),
+        output_dir=out_dir,
+        min_market_cap=int(min_market_cap),
+        start_date=str(data_start),
+        end_date=str(data_end or "") or None,
+        train_end=train_end_value,
+        eval_start=eval_start_value,
+        target_col=str(target_col),
+        all_feature_families=bool(all_feature_families),
+        feature_families=tuple(str(family) for family in feature_families),
+        max_family_features=int(max_family_features),
+        n_estimators=int(n_estimators),
+        max_trades=int(max_trades),
+        random_seed=int(random_seed),
     )
+    return run_option_family_ranker_experiment(config)
 
 
 def load_equity_artifacts(artifact_dir: Path) -> dict[str, pd.DataFrame]:
@@ -309,7 +275,7 @@ def leaderboard_to_ranked_scores(leaderboard: pd.DataFrame) -> pd.DataFrame:
 
 
 def alpaca_client_from_env(prefix: str):
-    from trading.alpaca_paper import AlpacaPaperClient
+    from platforms.brokers.alpaca import AlpacaPaperClient
 
     clean = str(prefix).strip().upper()
     key = os.getenv(f"{clean}_ALPACA_PAPER_API_KEY") or os.getenv(f"ALPACA_{clean}_PAPER_API_KEY")
@@ -329,7 +295,7 @@ def build_alpaca_equity_orders(
     gross_exposure: float = 0.95,
     liquidate_unselected: bool = True,
 ) -> pd.DataFrame:
-    from trading.alpaca_paper import build_equal_weight_order_plan
+    from platforms.brokers.alpaca import build_equal_weight_order_plan
 
     client = alpaca_client_from_env(account_prefix)
     account = client.get_account()
@@ -599,25 +565,23 @@ def build_llm_review_orders(
     leaderboard: pd.DataFrame,
     top_k: int,
     account_prefix: str,
+    as_of_date: str | None = None,
+    trading_agents_config: Any | None = None,
 ) -> pd.DataFrame:
-    candidates = leaderboard.head(int(top_k)).copy()
-    candidates["llm_decision"] = "pending_review"
-    candidates["llm_reason"] = "trading_agents integration is intentionally called outside model training."
-    try:
-        import trading_agents  # type: ignore
+    from platforms.agents.trading_agents import approved_symbols, review_trade_candidates
 
-        reviewer = getattr(trading_agents, "review_trades", None)
-        if callable(reviewer):
-            reviewed = reviewer(candidates.to_dict(orient="records"))
-            candidates = pd.DataFrame(reviewed)
-    except Exception as exc:
-        candidates["llm_reason"] = f"trading_agents unavailable: {type(exc).__name__}"
-    approved = candidates.loc[candidates.get("llm_decision", "").astype(str).str.lower().isin({"buy", "approve", "approved"})]
-    if approved.empty:
+    candidates = leaderboard.head(int(top_k)).copy()
+    reviewed = review_trade_candidates(candidates, as_of_date=as_of_date, config=trading_agents_config)
+    symbols = approved_symbols(reviewed)
+    if not symbols:
         return pd.DataFrame(columns=["symbol", "side", "qty", "reason"])
-    reviewed_leaderboard = leaderboard.loc[leaderboard["symbol"].isin(approved["symbol"].astype(str).str.upper())].copy()
+    reviewed_leaderboard = leaderboard.loc[leaderboard["symbol"].astype(str).str.upper().isin(symbols)].copy()
     reviewed_leaderboard["eligible"] = True
-    return build_alpaca_equity_orders(leaderboard=reviewed_leaderboard, account_prefix=account_prefix)
+    orders = build_alpaca_equity_orders(leaderboard=reviewed_leaderboard, account_prefix=account_prefix)
+    if not orders.empty and not reviewed.empty:
+        review_cols = [col for col in ("symbol", "llm_decision", "llm_rating", "llm_reason", "llm_review_date") if col in reviewed.columns]
+        orders = orders.merge(reviewed[review_cols], on="symbol", how="left")
+    return orders
 
 
 def apply_order_gate(
@@ -673,7 +637,7 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, dry_run: bool = True
         actionable["submitted"] = False
         actionable["response"] = "dry_run"
         return actionable
-    from trading.robinhood import submit_robinhood_option_orders as _submit
+    from platforms.brokers.robinhood import submit_robinhood_option_orders as _submit
 
     return _submit(orders_df=actionable, account_number=account_number, time_in_force="gtc")
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from trading import robinhood
+from platforms.brokers import robinhood
 
 
 def test_submit_robinhood_option_orders_uses_explicit_buy_limit(monkeypatch):

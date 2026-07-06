@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from trading import robinhood
+from platforms.brokers import robinhood
 
 
 class RobinhoodOptionOrderPricingTests(TestCase):

@@ -6,10 +6,14 @@ research reporting are owned by the GitHub-installed downstream packages:
 
 - `quant-warehouse`
 - `quant-orchestrator`
+- `tradingagents`
 
 ## Kept Here
 
-- `trading/`: real broker adapters for Alpaca and Robinhood.
+- `platforms/brokers/`: real broker adapters for Alpaca, Robinhood, and
+  Interactive Brokers.
+- `platforms/agents/`: LLM/agent adapters such as TradingAgents.
+- `trading/`: the minimal Django app that reads v2 live artifacts.
 - `app/trading_app_v2_runtime.py`: thin notebook/runtime glue that delegates
   data and model work downstream, builds live order plans, and writes the
   Streamlit app.
@@ -30,7 +34,8 @@ New live code may import:
 
 - `quant_warehouse`
 - `quant_orchestrator`
-- `trading.*`
+- `platforms.brokers.*`
+- `platforms.agents.*`
 - `app.trading_app_v2_runtime`
 
 New live code should not recreate local warehouse, feature, target, backtest,
