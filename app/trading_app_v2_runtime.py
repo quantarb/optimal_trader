@@ -9,6 +9,8 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
+from app.quant_warehouse_storage import ensure_quant_warehouse_storage
+
 
 DEFAULT_STRATEGY_SOURCES = (
     "fmp.fmp_income_mcap",
@@ -70,6 +72,7 @@ def run_equity_moe_training(
     run_backtests: bool = True,
     log_mlflow: bool = False,
 ):
+    storage = ensure_quant_warehouse_storage()
     from quant_orchestrator.research_tools.ml_trading import write_ml_trading_artifact_files
     from quant_orchestrator.research_tools.ml_trading_experiment import (
         MLTradingExperimentConfig,
@@ -114,7 +117,9 @@ def run_equity_moe_training(
         analysis_markdown=result.analysis_markdown,
         directory=artifact_dir,
     )
-    (artifact_dir / "live_config.json").write_text(json.dumps(_dataclass_dict(config), indent=2, default=str), encoding="utf-8")
+    live_config = _dataclass_dict(config)
+    live_config["quant_warehouse_storage"] = storage.as_dict()
+    (artifact_dir / "live_config.json").write_text(json.dumps(live_config, indent=2, default=str), encoding="utf-8")
     return result
 
 
@@ -135,6 +140,7 @@ def run_option_family_ranker_training(
     max_trades: int = 0,
     random_seed: int = 20260704,
 ):
+    ensure_quant_warehouse_storage()
     from quant_orchestrator.research_tools import (
         OptionFamilyRankerConfig,
         run_option_family_ranker_experiment,
@@ -178,6 +184,7 @@ def latest_prices_from_quant_warehouse(
     provider: str = "fmp",
     lookback_days: int = 30,
 ) -> dict[str, float]:
+    ensure_quant_warehouse_storage()
     from quant_warehouse import Warehouse
 
     warehouse = Warehouse()
