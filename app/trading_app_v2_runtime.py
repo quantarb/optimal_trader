@@ -87,7 +87,7 @@ def run_equity_moe_training(
         experiment_name="trading_app_v2_10b_oracle_ye_moe",
         min_market_cap=int(min_market_cap),
         start_date=str(data_start),
-        end_date=str(data_end).strip() or None,
+        end_date=_optional_date_string(data_end),
         train_end=train_end_value,
         oos_start=oos_start_value,
         score_start=str(data_start),
@@ -155,7 +155,7 @@ def run_option_family_ranker_training(
         output_dir=out_dir,
         min_market_cap=int(min_market_cap),
         start_date=str(data_start),
-        end_date=str(data_end or "") or None,
+        end_date=_optional_date_string(data_end),
         train_end=train_end_value,
         eval_start=eval_start_value,
         target_col=str(target_col),
@@ -702,6 +702,15 @@ def _dataclass_dict(value: Any) -> dict[str, Any]:
         return asdict(value)
     except Exception:
         return dict(getattr(value, "__dict__", {}) or {})
+
+
+def _optional_date_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "nat"}:
+        return None
+    return text
 
 
 def _enrich_alpaca_option_records(client: Any, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
