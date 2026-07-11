@@ -194,6 +194,10 @@ def test_streamlit_app_submits_each_account_separately(tmp_path):
     assert "Submit {account_label} Orders" in script
     assert 'key=f"submit_{name}"' in script
     assert 'for name, orders in order_frames.items()' not in script
+    assert '"alpaca_equity_paper": "equity"' in script
+    assert '"alpaca_option_paper": "option"' in script
+    assert '"alpaca_llm_paper": "option"' in script
+    assert "asset_type=alpaca_asset_types[name]" in script
 
 
 def test_streamlit_app_displays_feature_family_scores_for_all_symbols(tmp_path):

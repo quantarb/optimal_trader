@@ -1690,6 +1690,11 @@ with orders_tab:
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
     }}
+    alpaca_asset_types = {{
+        "alpaca_equity_paper": "equity",
+        "alpaca_option_paper": "option",
+        "alpaca_llm_paper": "option",
+    }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
@@ -1712,7 +1717,11 @@ with orders_tab:
             if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
                 if submitters[name] == "alpaca":
                     client = alpaca_client_from_env(account_prefixes[name])
-                    result = submit_alpaca_orders(client, orders)
+                    result = submit_alpaca_orders(
+                        client,
+                        orders,
+                        asset_type=alpaca_asset_types[name],
+                    )
                 elif submitters[name] == "robinhood_option":
                     result = submit_robinhood_option_orders(orders)
                 else:
@@ -1803,6 +1812,11 @@ with orders_tab:
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
     }}
+    alpaca_asset_types = {{
+        "alpaca_equity_paper": "equity",
+        "alpaca_option_paper": "option",
+        "alpaca_llm_paper": "option",
+    }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
@@ -1825,7 +1839,11 @@ with orders_tab:
             if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
                 if submitters[name] == "alpaca":
                     client = alpaca_client_from_env(account_prefixes[name])
-                    result = submit_alpaca_orders(client, orders)
+                    result = submit_alpaca_orders(
+                        client,
+                        orders,
+                        asset_type=alpaca_asset_types[name],
+                    )
                 elif submitters[name] == "robinhood_option":
                     result = submit_robinhood_option_orders(orders)
                 else:
