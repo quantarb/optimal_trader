@@ -607,7 +607,14 @@ def build_score_date_option_ml_ranking_table(
     target_dte: int = 90,
     min_market_cap: int = 1_000_000_000_000,
     start_date: str = "1900-01-01",
+    max_underlyings: int = 20,
 ) -> pd.DataFrame:
+    requested_symbols = _normalize_symbols(symbols or ())
+    if len(requested_symbols) > int(max_underlyings):
+        raise ValueError(
+            f"Option score-date refresh requested {len(requested_symbols)} underlyings; "
+            f"limit is {int(max_underlyings)}. Score equities and select top-K first."
+        )
     root = Path(option_ranker_dir)
     family_dirs = sorted(path for path in root.iterdir() if path.is_dir()) if root.exists() else []
     if not family_dirs:
@@ -1293,11 +1300,12 @@ def build_robinhood_option_orders(
             "order_type": "limit",
             "time_in_force": "gtc",
         }
-        priced = apply_option_limit_policy(pd.DataFrame([buy_row]), time_in_force="gtc")
-        priced["gate_discount_pct"] = float(gate_discount_pct)
-        if float(gate_discount_pct) >= 100.0:
-            priced["skip_submit"] = True
-            priced["skip_reason"] = "gate_discount_pct_100_blocks_orders"
+        priced = apply_option_limit_policy(
+            pd.DataFrame([buy_row]),
+            time_in_force="gtc",
+            buy_discount_pct=min(float(gate_discount_pct), 99.99),
+        )
+        priced = apply_robinhood_submission_gate(priced, gate_discount_pct=gate_discount_pct)
         action_rows.extend(priced.to_dict(orient="records"))
 
     actions = pd.DataFrame(action_rows)
@@ -1348,6 +1356,31 @@ def build_robinhood_option_orders(
         "actions": actions.reset_index(drop=True),
         "actionable_orders": actions.reset_index(drop=True),
     }
+
+
+def apply_robinhood_submission_gate(
+    orders: pd.DataFrame,
+    *,
+    gate_discount_pct: float,
+) -> pd.DataFrame:
+    """Apply a Robinhood-only gate without mutating any paper-account plan."""
+
+    gate = float(gate_discount_pct)
+    if not 0.0 <= gate <= 100.0:
+        raise ValueError("gate_discount_pct must be in [0, 100]")
+    out = pd.DataFrame() if orders is None else orders.copy()
+    if out.empty:
+        return out
+    out["gate_discount_pct"] = gate
+    if "skip_submit" not in out.columns:
+        out["skip_submit"] = False
+    if "skip_reason" not in out.columns:
+        out["skip_reason"] = ""
+    trade_mask = ~out.get("action", pd.Series("", index=out.index)).astype(str).str.startswith("cancel_")
+    if gate >= 100.0:
+        out.loc[trade_mask, "skip_submit"] = True
+        out.loc[trade_mask, "skip_reason"] = "robinhood_gate_100_blocks_orders"
+    return out
 
 
 def _normalize_robinhood_target_contracts(target_contracts: pd.DataFrame) -> pd.DataFrame:
@@ -1442,15 +1475,26 @@ def apply_option_limit_policy(
     orders: pd.DataFrame,
     *,
     time_in_force: str | None = None,
+    buy_discount_pct: float = 0.0,
+    priced_at: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Set option limit prices from the executable side of the quote.
 
     Buy-to-open orders bid. Sell-to-close orders ask. Cancels pass through.
     """
 
+    discount = float(buy_discount_pct)
+    if not 0.0 <= discount < 100.0:
+        raise ValueError("buy_discount_pct must be in [0, 100)")
     if orders is None or orders.empty:
         return pd.DataFrame() if orders is None else orders.copy()
     work = orders.copy()
+    price_timestamp = pd.Timestamp.now(tz="UTC") if priced_at is None else pd.Timestamp(priced_at)
+    price_timestamp = (
+        price_timestamp.tz_localize("UTC")
+        if price_timestamp.tzinfo is None
+        else price_timestamp.tz_convert("UTC")
+    )
     if "skip_submit" not in work.columns:
         work["skip_submit"] = False
     if "skip_reason" not in work.columns:
@@ -1464,6 +1508,8 @@ def apply_option_limit_policy(
             price = _first_positive(row.to_dict(), ("bid_price",))
             source = "bid_price"
             pricing_side = "buy"
+            if price is not None:
+                price *= 1.0 - (discount / 100.0)
         elif action.startswith("sell_to_close") or str(row.get("side") or "").strip().lower() == "sell":
             price = _first_positive(row.to_dict(), ("ask_price",))
             source = "ask_price"
@@ -1486,9 +1532,72 @@ def apply_option_limit_policy(
         work.at[idx, "limit_order_price"] = float(limit_price)
         work.at[idx, "price"] = float(limit_price)
         work.at[idx, "limit_price_source"] = source
+        work.at[idx, "live_quote_priced_at"] = price_timestamp.isoformat()
+        work.at[idx, "buy_discount_pct"] = discount if pricing_side == "buy" else 0.0
         work.at[idx, "skip_submit"] = False
         work.at[idx, "skip_reason"] = ""
     return work
+
+
+def generate_live_option_limit_prices(
+    order_intents: pd.DataFrame,
+    live_quotes: pd.DataFrame,
+    *,
+    buy_discount_pct: float = 0.0,
+    time_in_force: str = "day",
+    priced_at: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Join live quotes to already-selected contracts and generate limit prices.
+
+    The input intents own symbol and contract selection. This function only adds
+    the current bid/ask and derives an executable limit; it never reranks.
+    """
+
+    if order_intents is None or order_intents.empty:
+        return pd.DataFrame() if order_intents is None else order_intents.copy()
+    intents = order_intents.copy()
+    quotes = live_quotes.copy() if live_quotes is not None else pd.DataFrame()
+    key = "contract_symbol" if "contract_symbol" in intents.columns else "symbol"
+    quote_key = "contract_symbol" if "contract_symbol" in quotes.columns else "symbol"
+    if key not in intents.columns:
+        raise KeyError("option order intents require symbol or contract_symbol")
+    required_quotes = {quote_key, "bid_price", "ask_price"}
+    missing = required_quotes.difference(quotes.columns)
+    if missing:
+        raise KeyError(f"live option quotes missing columns: {sorted(missing)}")
+    if quotes[quote_key].astype(str).duplicated().any():
+        raise ValueError("live option quotes must contain one row per contract")
+    quote_columns = quotes[[quote_key, "bid_price", "ask_price"]].rename(columns={quote_key: key})
+    intents = intents.drop(columns=[col for col in ("bid_price", "ask_price") if col in intents.columns])
+    priced = intents.merge(quote_columns, on=key, how="left", validate="many_to_one")
+    return apply_option_limit_policy(
+        priced,
+        time_in_force=time_in_force,
+        buy_discount_pct=buy_discount_pct,
+        priced_at=priced_at,
+    )
+
+
+def validate_prior_day_selection(
+    frame: pd.DataFrame,
+    *,
+    selection_date_col: str,
+    live_date: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Fail closed unless every model/contract selection predates live pricing."""
+
+    if frame is None or frame.empty:
+        return pd.DataFrame() if frame is None else frame.copy()
+    if selection_date_col not in frame.columns:
+        raise KeyError(f"selection frame missing {selection_date_col!r}")
+    selected = pd.to_datetime(frame[selection_date_col], errors="coerce").dt.normalize()
+    if selected.isna().any():
+        raise ValueError(f"selection frame contains an invalid {selection_date_col}")
+    current = pd.Timestamp.now(tz="UTC") if live_date is None else pd.Timestamp(live_date)
+    current = current.tz_localize("UTC") if current.tzinfo is None else current.tz_convert("UTC")
+    if selected.ge(current.tz_localize(None).normalize()).any():
+        raise ValueError("symbol and option selections must use completed prior-day data")
+    return frame.copy()
 
 
 def _stamp_order_plan(orders: pd.DataFrame, *, created_at: str | None = None) -> pd.DataFrame:
@@ -1536,6 +1645,10 @@ def validate_order_plan_for_submission(
         if order_ids.eq("").any():
             raise ValueError("Refusing cancellation row without an order_id.")
 
+    duplicate_cols = [col for col in ("action", "symbol", "side", "qty", "order_id") if col in actionable.columns]
+    if duplicate_cols and actionable.duplicated(subset=duplicate_cols, keep=False).any():
+        raise ValueError(f"Refusing duplicate order rows keyed by {duplicate_cols}.")
+
     trade_rows = actionable.loc[~cancel_mask]
     if not trade_rows.empty:
         required = {"symbol", "side", "qty"}
@@ -1556,10 +1669,16 @@ def validate_order_plan_for_submission(
         )
         if quantities.gt(int(quantity_limit)).any():
             raise ValueError(f"Refusing order quantity above the {int(quantity_limit)} per-order limit.")
+        order_types = trade_rows.get("order_type", pd.Series("", index=trade_rows.index)).astype(str).str.lower().str.strip()
+        if str(asset_type).lower() == "option":
+            if not order_types.eq("limit").all():
+                raise ValueError("Refusing an option order that is not a limit order.")
+            limit_prices = pd.to_numeric(trade_rows.get("limit_price"), errors="coerce")
+            if limit_prices.isna().any() or limit_prices.le(0).any():
+                raise ValueError("Refusing an option order without a positive limit_price.")
+        elif not order_types.eq("market").all():
+            raise ValueError("Refusing an equity order that is not a market order.")
 
-    duplicate_cols = [col for col in ("action", "symbol", "side", "qty", "order_id") if col in actionable.columns]
-    if duplicate_cols and actionable.duplicated(subset=duplicate_cols, keep=False).any():
-        raise ValueError(f"Refusing duplicate order rows keyed by {duplicate_cols}.")
     return actionable.reset_index(drop=True)
 
 

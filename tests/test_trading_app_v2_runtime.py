@@ -140,6 +140,13 @@ def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
 def test_alpaca_client_from_env_rejects_generic_credential_fallback(monkeypatch):
     monkeypatch.setenv("ALPACA_PAPER_API_KEY", "generic-key")
     monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "generic-secret")
+    for name in (
+        "EQUITY_ALPACA_PAPER_API_KEY",
+        "EQUITY_ALPACA_PAPER_API_SECRET",
+        "ALPACA_EQUITY_PAPER_API_KEY",
+        "ALPACA_EQUITY_PAPER_API_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     with pytest.raises(RuntimeError, match="dedicated Alpaca paper credentials"):
         runtime.alpaca_client_from_env("EQUITY")
@@ -479,6 +486,41 @@ def test_apply_option_limit_policy_uses_bid_ask_ticks_and_preserves_cancels():
     assert pd.isna(priced.loc[2].get("limit_order_price"))
 
 
+def test_live_option_pricing_does_not_change_prior_day_contract_selection():
+    intents = pd.DataFrame(
+        [
+            {"symbol": "AAPL_CALL", "underlying_symbol": "AAPL", "action": "buy_to_open_call", "side": "buy"},
+            {"symbol": "MSFT_PUT", "underlying_symbol": "MSFT", "action": "sell_to_close_put", "side": "sell"},
+        ]
+    )
+    quotes = pd.DataFrame(
+        [
+            {"symbol": "AAPL_CALL", "bid_price": 2.17, "ask_price": 2.25},
+            {"symbol": "MSFT_PUT", "bid_price": 3.10, "ask_price": 3.17},
+        ]
+    )
+
+    priced = runtime.generate_live_option_limit_prices(
+        intents,
+        quotes,
+        priced_at="2026-07-11T16:00:00Z",
+    )
+
+    assert list(priced["symbol"]) == ["AAPL_CALL", "MSFT_PUT"]
+    assert list(priced["underlying_symbol"]) == ["AAPL", "MSFT"]
+    assert list(priced["limit_order_price"]) == [2.17, 3.2]
+    assert priced["live_quote_priced_at"].nunique() == 1
+
+
+def test_score_date_option_ranking_rejects_more_than_twenty_underlyings(tmp_path):
+    with pytest.raises(ValueError, match="limit is 20"):
+        runtime.build_score_date_option_ml_ranking_table(
+            tmp_path,
+            leaderboard=pd.DataFrame(),
+            symbols=[f"S{i:02d}" for i in range(21)],
+        )
+
+
 def test_robinhood_option_orders_reconcile_before_new_entries():
     target_contracts = pd.DataFrame(
         [
@@ -533,8 +575,42 @@ def test_robinhood_option_orders_reconcile_before_new_entries():
     assert list(actions["action"]) == ["cancel_buy_to_open_call", "sell_to_close_call", "buy_to_open_call"]
     assert float(actions.loc[1, "limit_order_price"]) == 2.33
     assert actions.loc[1, "limit_price_source"] == "ask_price"
-    assert float(actions.loc[2, "limit_order_price"]) == 70.15
+    assert float(actions.loc[2, "limit_order_price"]) == 7.0
     assert actions.loc[2, "limit_price_source"] == "bid_price"
+    assert float(actions.loc[2, "buy_discount_pct"]) == 90.0
+
+
+def test_robinhood_100_gate_blocks_only_robinhood_copy():
+    paper_orders = pd.DataFrame(
+        [{"symbol": "AAPL", "action": "buy_to_open_call", "side": "buy", "qty": 1}]
+    )
+
+    robinhood_orders = runtime.apply_robinhood_submission_gate(
+        paper_orders,
+        gate_discount_pct=100.0,
+    )
+
+    assert "skip_submit" not in paper_orders.columns
+    assert bool(robinhood_orders.loc[0, "skip_submit"]) is True
+    assert robinhood_orders.loc[0, "skip_reason"] == "robinhood_gate_100_blocks_orders"
+
+
+def test_prior_day_selection_rejects_live_day_inputs():
+    prior = pd.DataFrame([{"symbol": "AAPL", "selection_as_of": "2026-07-10"}])
+    same_day = pd.DataFrame([{"symbol": "AAPL", "selection_as_of": "2026-07-11"}])
+
+    accepted = runtime.validate_prior_day_selection(
+        prior,
+        selection_date_col="selection_as_of",
+        live_date="2026-07-11T16:00:00Z",
+    )
+    assert accepted.equals(prior)
+    with pytest.raises(ValueError, match="prior-day"):
+        runtime.validate_prior_day_selection(
+            same_day,
+            selection_date_col="selection_as_of",
+            live_date="2026-07-11T16:00:00Z",
+        )
 
 
 def test_submission_safety_rejects_unstamped_and_stale_plans():
@@ -581,6 +657,7 @@ def test_submission_safety_allows_stamped_cancellations_and_valid_orders():
                 "action": "rebalance",
                 "side": "buy",
                 "qty": 5,
+                "order_type": "market",
                 "order_id": "",
                 "plan_created_at": "2026-07-11T11:00:00Z",
             },
