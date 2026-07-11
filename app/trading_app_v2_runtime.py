@@ -828,6 +828,14 @@ def leaderboard_to_ranked_scores(leaderboard: pd.DataFrame) -> pd.DataFrame:
 def alpaca_client_from_env(prefix: str):
     from platforms.brokers.alpaca import AlpacaPaperClient
 
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(find_repo_root(Path(__file__).resolve()) / ".env", override=False)
+        except Exception:
+            pass
+
     clean = str(prefix).strip().upper()
     key = os.getenv(f"{clean}_ALPACA_PAPER_API_KEY") or os.getenv(f"ALPACA_{clean}_PAPER_API_KEY")
     secret = os.getenv(f"{clean}_ALPACA_PAPER_API_SECRET") or os.getenv(f"ALPACA_{clean}_PAPER_API_SECRET")
@@ -1513,6 +1521,16 @@ def build_ranked_alpaca_option_orders(
     client = alpaca_client_from_env(account_prefix)
     current_positions = _enrich_alpaca_option_records(client, client.get_positions())
     normalized_decisions = decisions.copy()
+    available_underlyings = set(selected["underlying_symbol"].astype(str).str.upper())
+    held_underlyings = {
+        str(row.get("underlying_symbol") or "").strip().upper()
+        for row in current_positions
+        if str(row.get("underlying_symbol") or "").strip()
+    }
+    normalized_decisions["symbol"] = normalized_decisions["symbol"].astype(str).str.upper()
+    normalized_decisions = normalized_decisions.loc[
+        normalized_decisions["symbol"].isin(available_underlyings | held_underlyings)
+    ].copy()
     if decision_col != "direction":
         normalized_decisions["decision"] = normalized_decisions[decision_col]
     planner = build_llm_option_order_plan if llm else build_directional_option_order_plan
