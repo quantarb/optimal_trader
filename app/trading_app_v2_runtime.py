@@ -169,11 +169,14 @@ def build_latest_equity_leaderboard(
             model_count=("strategy_source", "nunique"),
             best_family_score=("long_score", "max"),
         )
-        .sort_values(["prob_buy", "best_family_score"], ascending=[False, False], kind="stable")
-        .reset_index(drop=True)
     )
+    latest_by_symbol["direction"] = latest_by_symbol["prob_buy"].ge(latest_by_symbol["prob_short"]).map({True: "long", False: "short"})
+    latest_by_symbol["confidence"] = latest_by_symbol[["prob_buy", "prob_short"]].max(axis=1)
+    latest_by_symbol = latest_by_symbol.sort_values(
+        ["confidence", "best_family_score"], ascending=[False, False], kind="stable"
+    ).reset_index(drop=True)
     latest_by_symbol["rank"] = latest_by_symbol.index + 1
-    latest_by_symbol["selected"] = latest_by_symbol["rank"].le(int(top_k)) & latest_by_symbol["prob_buy"].ge(float(min_long_score))
+    latest_by_symbol["selected"] = latest_by_symbol["rank"].le(int(top_k)) & latest_by_symbol["confidence"].ge(float(min_long_score))
     price_map = latest_prices_from_quant_warehouse(latest_by_symbol["symbol"], provider=price_provider)
     latest_by_symbol["close"] = latest_by_symbol["symbol"].map(price_map)
     latest_by_symbol["eligible"] = latest_by_symbol["selected"] & latest_by_symbol["close"].gt(0)
@@ -577,19 +580,18 @@ def build_score_date_option_candidate_panel(
             continue
         prob_buy = _number(row.get("prob_buy"))
         prob_short = _number(row.get("prob_short"))
-        side = "short" if prob_short > prob_buy else "long"
-        option_type = "put" if side == "short" else "call"
-        option_action = "buy_put" if side == "short" else "buy_call"
         featured["option_type"] = featured["option_type"].astype(str).str.lower().str.strip()
-        featured = featured.loc[featured["option_type"].eq(option_type)].copy()
+        featured = featured.loc[featured["option_type"].isin({"call", "put"})].copy()
         if featured.empty:
             continue
-        featured["trade_id"] = f"live|{symbol}|{score_ts.date()}|{side}"
         featured["symbol"] = symbol
-        featured["side"] = side
-        featured["equity_signal_side"] = side
+        featured["side"] = featured["option_type"].map({"call": "long", "put": "short"})
+        featured["equity_signal_side"] = featured["side"]
+        featured["trade_id"] = featured["option_type"].map(
+            lambda option_type: f"live|{symbol}|{score_ts.date()}|{option_type}"
+        )
         featured["entry_date"] = score_ts
-        featured["option_action"] = option_action
+        featured["option_action"] = featured["option_type"].map({"call": "buy_call", "put": "buy_put"})
         featured["entry_mid"] = pd.to_numeric(featured.get("mid"), errors="coerce")
         frames.append(featured)
 
@@ -815,7 +817,7 @@ def save_live_artifacts(
 def leaderboard_to_ranked_scores(leaderboard: pd.DataFrame) -> pd.DataFrame:
     frame = leaderboard.copy()
     frame["symbol"] = frame["symbol"].astype(str).str.upper()
-    out = frame.set_index("symbol")[["close", "prob_buy", "prob_short", "selected"]].copy()
+    out = frame.set_index("symbol")[["close", "prob_buy", "prob_short", "direction", "selected"]].copy()
     out["close"] = pd.to_numeric(out["close"], errors="coerce")
     out["prob_buy"] = pd.to_numeric(out["prob_buy"], errors="coerce")
     out["prob_short"] = pd.to_numeric(out["prob_short"], errors="coerce")
@@ -869,7 +871,7 @@ def build_alpaca_equity_orders(
     gross_exposure: float = 0.95,
     liquidate_unselected: bool = True,
 ) -> pd.DataFrame:
-    from platforms.brokers.alpaca import build_equal_weight_order_plan
+    from platforms.brokers.alpaca import build_directional_equity_order_plan
 
     client = alpaca_client_from_env(account_prefix)
     account = client.get_account()
@@ -879,15 +881,21 @@ def build_alpaca_equity_orders(
         for row in client.get_positions()
         if str(row.get("asset_class") or "us_equity").lower() in {"us_equity", "equity", ""}
     }
-    selected = leaderboard.loc[leaderboard["eligible"], "symbol"].astype(str).str.upper().tolist()
+    directions = leaderboard[["symbol", "direction"]].to_dict(orient="records")
+    scored_symbols = {str(row["symbol"]).strip().upper() for row in directions}
+    directions.extend(
+        {"symbol": symbol, "direction": "exit"}
+        for symbol in positions
+        if symbol not in scored_symbols
+    )
     prices = dict(zip(leaderboard["symbol"].astype(str).str.upper(), pd.to_numeric(leaderboard["close"], errors="coerce")))
-    orders = build_equal_weight_order_plan(
-        selected,
+    orders = build_directional_equity_order_plan(
+        directions,
         prices,
         positions,
         portfolio_value=float(account.get("portfolio_value") or account.get("equity") or 0.0),
+        max_positions=20,
         gross_exposure=float(gross_exposure),
-        liquidate_unselected=bool(liquidate_unselected),
     )
     cancel_orders = _build_open_order_cancel_rows(open_orders, asset_classes={"", "us_equity", "equity"})
     return pd.DataFrame([*cancel_orders, *orders])
@@ -1477,6 +1485,85 @@ def build_llm_review_orders(
         review_cols = [col for col in ("symbol", "llm_decision", "llm_rating", "llm_reason", "llm_review_date") if col in reviewed.columns]
         orders = orders.merge(reviewed[review_cols], on="symbol", how="left")
     return orders
+
+
+def build_ranked_alpaca_option_orders(
+    *,
+    option_rankings: pd.DataFrame,
+    decisions: pd.DataFrame,
+    account_prefix: str,
+    decision_col: str = "direction",
+    llm: bool = False,
+    max_underlyings: int = 20,
+) -> pd.DataFrame:
+    """Reconcile prior-day symbol/contract selections, then price with live Alpaca quotes."""
+
+    from platforms.brokers.alpaca import build_directional_option_order_plan, build_llm_option_order_plan
+
+    if option_rankings is None or option_rankings.empty:
+        return pd.DataFrame()
+    ranked = option_rankings.copy()
+    selected_mask = ranked.get("selected_by_option_ensemble", pd.Series(False, index=ranked.index)).astype(bool)
+    selected = ranked.loc[selected_mask].copy()
+    selected["underlying_symbol"] = selected["symbol"].astype(str).str.upper()
+    if "contract_symbol" not in selected.columns:
+        raise KeyError("option rankings require contract_symbol")
+    selected["qty"] = 1
+    selected_contracts = selected.to_dict(orient="records")
+    client = alpaca_client_from_env(account_prefix)
+    current_positions = _enrich_alpaca_option_records(client, client.get_positions())
+    normalized_decisions = decisions.copy()
+    if decision_col != "direction":
+        normalized_decisions["decision"] = normalized_decisions[decision_col]
+    planner = build_llm_option_order_plan if llm else build_directional_option_order_plan
+    raw_orders = planner(
+        normalized_decisions.to_dict(orient="records"),
+        selected_contracts,
+        current_positions,
+        max_underlyings=int(max_underlyings),
+    )
+    if not raw_orders:
+        return pd.DataFrame()
+    intents = pd.DataFrame(raw_orders)
+    contract_symbols = intents.loc[
+        ~intents["action"].astype(str).str.startswith("cancel_"), "symbol"
+    ].astype(str).str.upper().unique().tolist()
+    snapshots = client.get_option_snapshots(contract_symbols)
+    quote_rows = []
+    for contract_symbol in contract_symbols:
+        bid, ask, _mark = _option_quote(snapshots.get(contract_symbol, {}))
+        quote_rows.append({"symbol": contract_symbol, "bid_price": bid, "ask_price": ask})
+    return generate_live_option_limit_prices(
+        intents,
+        pd.DataFrame(quote_rows),
+        time_in_force="day",
+    )
+
+
+def build_llm_ranked_option_orders(
+    *,
+    leaderboard: pd.DataFrame,
+    option_rankings: pd.DataFrame,
+    account_prefix: str,
+    top_k: int = 20,
+    as_of_date: str | None = None,
+    trading_agents_config: Any | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from platforms.agents.trading_agents import review_trade_candidates
+
+    candidates = leaderboard.head(int(top_k)).copy()
+    reviewed = review_trade_candidates(candidates, as_of_date=as_of_date, config=trading_agents_config)
+    rating = reviewed.get("llm_rating", pd.Series("Hold", index=reviewed.index)).astype(str).str.lower()
+    reviewed["decision"] = rating.map({"buy": "buy", "sell": "sell", "hold": "hold"}).fillna("hold")
+    orders = build_ranked_alpaca_option_orders(
+        option_rankings=option_rankings,
+        decisions=reviewed[["symbol", "decision"]],
+        account_prefix=account_prefix,
+        decision_col="decision",
+        llm=True,
+        max_underlyings=int(top_k),
+    )
+    return orders, reviewed
 
 
 def apply_option_limit_policy(
