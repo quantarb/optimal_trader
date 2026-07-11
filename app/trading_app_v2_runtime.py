@@ -815,11 +815,36 @@ def alpaca_client_from_env(prefix: str):
     key = os.getenv(f"{clean}_ALPACA_PAPER_API_KEY") or os.getenv(f"ALPACA_{clean}_PAPER_API_KEY")
     secret = os.getenv(f"{clean}_ALPACA_PAPER_API_SECRET") or os.getenv(f"ALPACA_{clean}_PAPER_API_SECRET")
     if not key or not secret:
-        key = os.getenv("ALPACA_PAPER_API_KEY")
-        secret = os.getenv("ALPACA_PAPER_API_SECRET")
-    if not key or not secret:
-        raise RuntimeError(f"Missing Alpaca paper credentials for prefix={prefix!r}.")
+        raise RuntimeError(
+            f"Missing dedicated Alpaca paper credentials for prefix={prefix!r}; "
+            "generic ALPACA_PAPER credentials are not accepted for multi-account trading."
+        )
     return AlpacaPaperClient(api_key=str(key), api_secret=str(secret))
+
+
+def load_distinct_alpaca_paper_accounts(
+    prefixes: Sequence[str] = ("EQUITY", "OPTION", "LLM"),
+) -> dict[str, Any]:
+    """Load dedicated paper clients and fail closed unless every account is distinct."""
+
+    normalized = [str(prefix).strip().upper() for prefix in prefixes]
+    if len(normalized) != 3 or len(set(normalized)) != 3 or any(not prefix for prefix in normalized):
+        raise ValueError("Exactly three distinct Alpaca account prefixes are required.")
+
+    clients = {prefix: alpaca_client_from_env(prefix) for prefix in normalized}
+    credential_pairs = {(client.api_key, client.api_secret) for client in clients.values()}
+    if len(credential_pairs) != len(clients):
+        raise RuntimeError("Alpaca paper credentials must be distinct for EQUITY, OPTION, and LLM accounts.")
+
+    account_ids: dict[str, str] = {}
+    for prefix, client in clients.items():
+        account_id = str(client.get_account().get("id") or "").strip()
+        if not account_id:
+            raise RuntimeError(f"Alpaca paper account for prefix={prefix!r} did not return an account ID.")
+        account_ids[prefix] = account_id
+    if len(set(account_ids.values())) != len(account_ids):
+        raise RuntimeError("EQUITY, OPTION, and LLM credentials must resolve to distinct Alpaca account IDs.")
+    return clients
 
 
 def build_alpaca_equity_orders(

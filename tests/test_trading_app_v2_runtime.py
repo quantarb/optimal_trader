@@ -17,6 +17,55 @@ def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
     assert frame.empty
 
 
+def test_alpaca_client_from_env_rejects_generic_credential_fallback(monkeypatch):
+    monkeypatch.setenv("ALPACA_PAPER_API_KEY", "generic-key")
+    monkeypatch.setenv("ALPACA_PAPER_API_SECRET", "generic-secret")
+
+    with pytest.raises(RuntimeError, match="dedicated Alpaca paper credentials"):
+        runtime.alpaca_client_from_env("EQUITY")
+
+
+def test_load_distinct_alpaca_paper_accounts_rejects_duplicate_account_ids(monkeypatch):
+    account_ids = {"equity-key": "account-1", "option-key": "account-2", "llm-key": "account-2"}
+    for prefix in ("EQUITY", "OPTION", "LLM"):
+        monkeypatch.setenv(f"{prefix}_ALPACA_PAPER_API_KEY", f"{prefix.lower()}-key")
+        monkeypatch.setenv(f"{prefix}_ALPACA_PAPER_API_SECRET", f"{prefix.lower()}-secret")
+
+    class FakeClient:
+        def __init__(self, api_key, api_secret):
+            self.api_key = api_key
+            self.api_secret = api_secret
+
+        def get_account(self):
+            return {"id": account_ids[self.api_key]}
+
+    monkeypatch.setattr("platforms.brokers.alpaca.AlpacaPaperClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="distinct Alpaca account IDs"):
+        runtime.load_distinct_alpaca_paper_accounts()
+
+
+def test_load_distinct_alpaca_paper_accounts_returns_three_isolated_clients(monkeypatch):
+    for prefix in ("EQUITY", "OPTION", "LLM"):
+        monkeypatch.setenv(f"ALPACA_{prefix}_PAPER_API_KEY", f"{prefix.lower()}-key")
+        monkeypatch.setenv(f"ALPACA_{prefix}_PAPER_API_SECRET", f"{prefix.lower()}-secret")
+
+    class FakeClient:
+        def __init__(self, api_key, api_secret):
+            self.api_key = api_key
+            self.api_secret = api_secret
+
+        def get_account(self):
+            return {"id": f"account-for-{self.api_key}"}
+
+    monkeypatch.setattr("platforms.brokers.alpaca.AlpacaPaperClient", FakeClient)
+
+    clients = runtime.load_distinct_alpaca_paper_accounts()
+
+    assert set(clients) == {"EQUITY", "OPTION", "LLM"}
+    assert len({client.api_key for client in clients.values()}) == 3
+
+
 def test_streamlit_app_submits_each_account_separately(tmp_path):
     app_path = runtime.write_streamlit_leaderboard_app(live_dir=tmp_path)
     script = app_path.read_text(encoding="utf-8")
