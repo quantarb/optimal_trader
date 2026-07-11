@@ -1,8 +1,290 @@
 from __future__ import annotations
 
+import py_compile
+
 import pandas as pd
+import pytest
 
 from app import trading_app_v2_runtime as runtime
+
+
+def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
+    path = tmp_path / "empty.csv"
+    pd.DataFrame().to_csv(path, index=False)
+
+    frame = runtime._read_csv_if_exists(path)
+
+    assert frame.empty
+
+
+def test_streamlit_app_submits_each_account_separately(tmp_path):
+    app_path = runtime.write_streamlit_leaderboard_app(live_dir=tmp_path)
+    script = app_path.read_text(encoding="utf-8")
+
+    assert "Submit Orders By Account" in script
+    assert "Submit {account_label} Orders" in script
+    assert 'key=f"submit_{name}"' in script
+    assert 'for name, orders in order_frames.items()' not in script
+
+
+def test_streamlit_app_displays_feature_family_scores_for_all_symbols(tmp_path):
+    app_path = runtime.write_streamlit_leaderboard_app(live_dir=tmp_path)
+    script = app_path.read_text(encoding="utf-8")
+
+    assert 'symbol_scores_path = LIVE_DIR / "symbol_scores.csv"' in script
+    assert "Scores By Symbol" in script
+    assert 'option_rankings_path = LIVE_DIR / "option_ml_rankings.csv"' in script
+    assert "Option ML Rankings" in script
+    assert "strategy_scores.csv" not in script
+    assert "combined_feature_family_scores" not in script
+    assert "Family Long Scores" not in script
+    assert "Family Short Scores" not in script
+    assert "Raw Family Scores" not in script
+
+
+def test_streamlit_app_can_embed_in_memory_tables(tmp_path):
+    app_path = runtime.write_streamlit_leaderboard_app(
+        live_dir=tmp_path,
+        leaderboard=pd.DataFrame(
+            [{"symbol": "AAPL", "rank": 1, "selected": True, "eligible": True, "score_date": "2026-01-02"}]
+        ),
+        symbol_scores=pd.DataFrame([{"symbol": "AAPL", "rank": 1, "ensemble_long_score": 0.7}]),
+        option_ml_rankings=pd.DataFrame([{"symbol": "AAPL", "option_ensemble_mean_score": 0.5}]),
+        orders={"alpaca_equity_paper": pd.DataFrame([{"symbol": "AAPL", "qty": 1}])},
+    )
+    script = app_path.read_text(encoding="utf-8")
+
+    py_compile.compile(str(app_path), doraise=True)
+    assert "EMBEDDED_DATA" in script
+    assert "read_embedded_frame" in script
+    assert "leaderboard_latest.csv" not in script
+    assert "symbol_scores.csv" not in script
+    assert "option_ml_rankings.csv" not in script
+
+
+def test_thetadata_oracle_backfill_accepts_in_memory_trade_frame(monkeypatch):
+    calls = []
+
+    def _fake_backfill(trades, **kwargs):
+        calls.append((trades.copy(), kwargs))
+        return {"status": "ok", "rows": len(trades)}
+
+    monkeypatch.setattr(
+        "quant_warehouse.migrate.backfill_thetadata_options.backfill_thetadata_options_for_oracle_trades",
+        _fake_backfill,
+    )
+    trades = pd.DataFrame(
+        [
+            {"trade_id": "t1", "symbol": "AAPL", "entry_date": "2026-01-02", "exit_date": "2026-01-05"},
+        ]
+    )
+
+    result = runtime.backfill_thetadata_for_oracle_trade_windows(
+        trades,
+        symbols=["AAPL"],
+        max_trades=1,
+        request_sleep=0.0,
+    )
+
+    assert result == {"status": "ok", "rows": 1}
+    assert len(calls) == 1
+    assert calls[0][0].equals(trades)
+    assert calls[0][1]["symbols"] == ["AAPL"]
+    assert calls[0][1]["max_trades"] == 1
+
+
+def test_build_symbol_score_table_contains_all_symbols_and_family_scores():
+    strategy_scores = pd.DataFrame(
+        [
+            {"strategy_source": "ensemble_mean", "symbol": "AAPL", "date": "2026-01-02", "long_score": 0.7, "short_score": 0.3, "model_count": 2},
+            {"strategy_source": "ensemble_mean", "symbol": "MSFT", "date": "2026-01-02", "long_score": 0.4, "short_score": 0.6, "model_count": 2},
+            {"strategy_source": "fmp.alpha", "symbol": "AAPL", "date": "2026-01-02", "long_score": 0.8, "short_score": 0.2},
+            {"strategy_source": "fmp.alpha", "symbol": "MSFT", "date": "2026-01-02", "long_score": 0.1, "short_score": 0.9},
+            {"strategy_source": "fmp.beta", "symbol": "TSLA", "date": "2026-01-02", "long_score": 0.6, "short_score": 0.4},
+        ]
+    )
+    leaderboard = pd.DataFrame(
+        [
+            {"symbol": "AAPL", "rank": 1, "prob_buy": 0.7, "prob_short": 0.3, "selected": True, "eligible": True},
+            {"symbol": "MSFT", "rank": 2, "prob_buy": 0.4, "prob_short": 0.6, "selected": False, "eligible": False},
+        ]
+    )
+
+    table = runtime.build_symbol_score_table(strategy_scores, leaderboard)
+
+    assert list(table["symbol"]) == ["AAPL", "MSFT", "TSLA"]
+    assert int(table.set_index("symbol").loc["AAPL", "rank"]) == 1
+    assert int(table.set_index("symbol").loc["MSFT", "rank"]) == 2
+    assert int(table.set_index("symbol").loc["TSLA", "rank"]) == 3
+    assert table.set_index("symbol").loc["AAPL", "ensemble_long_score"] == 0.7
+    assert table.set_index("symbol").loc["AAPL", "long__fmp.alpha"] == 0.8
+    assert table.set_index("symbol").loc["MSFT", "short__fmp.alpha"] == 0.9
+    assert table.set_index("symbol").loc["TSLA", "long__fmp.beta"] == 0.6
+
+
+def test_build_option_ml_ranking_table_uses_ensemble_mean_to_select_option(tmp_path):
+    root = tmp_path / "option_family_ranker"
+    family_a = root / "fmp.alpha"
+    family_b = root / "fmp.beta"
+    family_a.mkdir(parents=True)
+    family_b.mkdir(parents=True)
+    base = pd.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-02",
+                "contract_symbol": "AAPL_C_100",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 100.0,
+                "option_return": 0.1,
+            },
+            {
+                "trade_id": "t1",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-02",
+                "contract_symbol": "AAPL_C_105",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 105.0,
+                "option_return": 0.2,
+            },
+            {
+                "trade_id": "t2",
+                "symbol": "MSFT",
+                "entry_date": "2026-01-02",
+                "contract_symbol": "MSFT_C_100",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 100.0,
+                "option_return": 0.3,
+            },
+        ]
+    )
+    frame_a = base.assign(**{"pred_fmp.alpha_rank": [0.9, 0.2, 0.7]})
+    frame_b = base.assign(**{"pred_fmp.beta_rank": [0.1, 0.8, 0.7]})
+    frame_a.to_parquet(family_a / "eval_scored.parquet", index=False)
+    frame_b.to_parquet(family_b / "eval_scored.parquet", index=False)
+
+    table = runtime.build_option_ml_ranking_table(
+        root,
+        symbols=["AAPL"],
+        selected_only=False,
+        one_per_symbol=False,
+        tradable_as_of="2026-01-01",
+    )
+
+    by_contract = table.set_index("contract_symbol")
+    assert set(table["symbol"]) == {"AAPL"}
+    assert "MSFT_C_100" not in by_contract.index
+    assert by_contract.loc["AAPL_C_105", "option_ensemble_mean_score"] == 0.5
+    assert by_contract.loc["AAPL_C_100", "option_ensemble_mean_score"] == 0.5
+    assert bool(by_contract.loc["AAPL_C_105", "selected_by_option_ensemble"]) is True
+    assert int(by_contract.loc["AAPL_C_105", "option_ensemble_rank"]) == 1
+    assert by_contract.loc["AAPL_C_105", "family_score__fmp.alpha"] == 0.2
+    assert by_contract.loc["AAPL_C_105", "family_score__fmp.beta"] == 0.8
+
+
+def test_build_option_ml_ranking_table_live_view_returns_one_selected_option_per_symbol(tmp_path):
+    root = tmp_path / "option_family_ranker"
+    family = root / "fmp.alpha"
+    family.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "trade_id": "aapl_old",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-02",
+                "contract_symbol": "AAPL_C_100",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 100.0,
+                "pred_fmp.alpha_rank": 0.95,
+            },
+            {
+                "trade_id": "aapl_new",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-03",
+                "contract_symbol": "AAPL_C_105",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 105.0,
+                "pred_fmp.alpha_rank": 0.80,
+            },
+            {
+                "trade_id": "aapl_new",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-03",
+                "contract_symbol": "AAPL_C_110",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 110.0,
+                "pred_fmp.alpha_rank": 0.70,
+            },
+            {
+                "trade_id": "msft_new",
+                "symbol": "MSFT",
+                "entry_date": "2026-01-03",
+                "contract_symbol": "MSFT_C_100",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-02-20",
+                "strike": 100.0,
+                "pred_fmp.alpha_rank": 0.90,
+            },
+        ]
+    ).to_parquet(family / "eval_scored.parquet", index=False)
+
+    table = runtime.build_option_ml_ranking_table(root, symbols=["AAPL", "MSFT"], tradable_as_of="2026-01-01")
+
+    assert list(table["symbol"]) == ["AAPL", "MSFT"]
+    assert list(table["contract_symbol"]) == ["AAPL_C_105", "MSFT_C_100"]
+    assert table["selected_by_option_ensemble"].astype(bool).all()
+    assert table["option_ensemble_rank"].eq(1).all()
+
+
+def test_build_option_ml_ranking_table_excludes_expired_options(tmp_path):
+    root = tmp_path / "option_family_ranker"
+    family = root / "fmp.alpha"
+    family.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "trade_id": "aapl_old",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-02",
+                "contract_symbol": "AAPL_C_100",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-01-10",
+                "strike": 100.0,
+                "pred_fmp.alpha_rank": 0.99,
+            },
+            {
+                "trade_id": "aapl_live",
+                "symbol": "AAPL",
+                "entry_date": "2026-01-03",
+                "contract_symbol": "AAPL_C_105",
+                "option_type": "call",
+                "option_action": "buy_call",
+                "expiration": "2026-08-21",
+                "strike": 105.0,
+                "pred_fmp.alpha_rank": 0.50,
+            },
+        ]
+    ).to_parquet(family / "eval_scored.parquet", index=False)
+
+    table = runtime.build_option_ml_ranking_table(root, symbols=["AAPL"], tradable_as_of="2026-07-06")
+
+    assert list(table["contract_symbol"]) == ["AAPL_C_105"]
+    assert pd.to_datetime(table["expiration"]).ge(pd.Timestamp("2026-07-06")).all()
 
 
 def test_apply_option_limit_policy_uses_bid_ask_ticks_and_preserves_cancels():
@@ -81,3 +363,57 @@ def test_robinhood_option_orders_reconcile_before_new_entries():
     assert float(actions.loc[2, "limit_order_price"]) == 70.15
     assert actions.loc[2, "limit_price_source"] == "bid_price"
 
+
+def test_submission_safety_rejects_unstamped_and_stale_plans():
+    order = pd.DataFrame([{"symbol": "AAPL", "side": "buy", "qty": 1}])
+
+    with pytest.raises(ValueError, match="missing plan_created_at"):
+        runtime.validate_order_plan_for_submission(order, asset_type="equity", now="2026-07-11T12:00:00Z")
+
+    order["plan_created_at"] = "2026-07-09T12:00:00Z"
+    with pytest.raises(ValueError, match="stale order plan"):
+        runtime.validate_order_plan_for_submission(order, asset_type="equity", now="2026-07-11T12:00:00Z")
+
+
+def test_submission_safety_rejects_duplicate_and_oversized_option_orders():
+    created = "2026-07-11T11:00:00Z"
+    duplicate = pd.DataFrame(
+        [
+            {"symbol": "AAPL260117C00200000", "side": "buy", "qty": 1, "plan_created_at": created},
+            {"symbol": "AAPL260117C00200000", "side": "buy", "qty": 1, "plan_created_at": created},
+        ]
+    )
+    with pytest.raises(ValueError, match="duplicate order rows"):
+        runtime.validate_order_plan_for_submission(duplicate, asset_type="option", now="2026-07-11T12:00:00Z")
+
+    oversized = duplicate.iloc[:1].copy()
+    oversized["qty"] = 101
+    with pytest.raises(ValueError, match="100 per-order limit"):
+        runtime.validate_order_plan_for_submission(oversized, asset_type="option", now="2026-07-11T12:00:00Z")
+
+
+def test_submission_safety_allows_stamped_cancellations_and_valid_orders():
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "action": "cancel_open_order",
+                "side": "cancel",
+                "qty": 0,
+                "order_id": "open-1",
+                "plan_created_at": "2026-07-11T11:00:00Z",
+            },
+            {
+                "symbol": "MSFT",
+                "action": "rebalance",
+                "side": "buy",
+                "qty": 5,
+                "order_id": "",
+                "plan_created_at": "2026-07-11T11:00:00Z",
+            },
+        ]
+    )
+
+    validated = runtime.validate_order_plan_for_submission(plan, asset_type="equity", now="2026-07-11T12:00:00Z")
+
+    assert list(validated["symbol"]) == ["AAPL", "MSFT"]

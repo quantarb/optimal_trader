@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -38,6 +39,32 @@ DEFAULT_STRATEGY_SOURCES = (
     "financetoolkit.ft_ratios_liquidity",
 )
 
+OPTION_MODEL_FEATURES = (
+    "dte",
+    "dte_gap",
+    "moneyness",
+    "abs_moneyness",
+    "spread_pct",
+    "volume",
+    "open_interest",
+    "liquidity_score",
+    "delta",
+    "abs_delta",
+    "gamma",
+    "abs_gamma",
+    "theta",
+    "abs_theta",
+    "vega",
+    "abs_vega",
+    "rho",
+    "abs_rho",
+    "theta_to_mid",
+    "vega_to_mid",
+    "iv",
+    "iv_expiration_z",
+    "iv_times_sqrt_dte",
+)
+
 
 @dataclass(frozen=True)
 class TradingAppV2Paths:
@@ -46,6 +73,16 @@ class TradingAppV2Paths:
     equity_artifact_dir: Path
     option_artifact_dir: Path
     live_artifact_dir: Path
+
+
+@dataclass(frozen=True)
+class SubmissionSafetyPolicy:
+    """Hard limits applied immediately before an order reaches a broker."""
+
+    max_plan_age_hours: float = 24.0
+    max_orders: int = 100
+    max_quantity_per_order: int = 10_000
+    max_option_contracts_per_order: int = 100
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -143,28 +180,619 @@ def build_latest_equity_leaderboard(
     return latest_by_symbol
 
 
+def build_symbol_score_table(strategy_scores: pd.DataFrame, leaderboard: pd.DataFrame | None = None) -> pd.DataFrame:
+    required = {"date", "symbol", "strategy_source", "long_score", "short_score"}
+    missing = required.difference(strategy_scores.columns)
+    if missing:
+        raise KeyError(f"strategy_scores missing required columns: {sorted(missing)}")
+
+    scores = strategy_scores.copy()
+    scores["symbol"] = scores["symbol"].astype(str).str.strip().str.upper()
+    scores["strategy_source"] = scores["strategy_source"].astype(str).str.strip()
+    scores["date"] = pd.to_datetime(scores["date"], errors="coerce").dt.normalize()
+    scores["long_score"] = pd.to_numeric(scores["long_score"], errors="coerce")
+    scores["short_score"] = pd.to_numeric(scores["short_score"], errors="coerce")
+    scores = scores.dropna(subset=["date", "symbol", "strategy_source", "long_score", "short_score"])
+    latest = (
+        scores.sort_values(["strategy_source", "symbol", "date"])
+        .groupby(["strategy_source", "symbol"], as_index=False, sort=False)
+        .tail(1)
+        .copy()
+    )
+    if latest.empty:
+        return pd.DataFrame(columns=["rank", "symbol"])
+
+    ensemble = latest.loc[latest["strategy_source"].eq("ensemble_mean")].copy()
+    if ensemble.empty:
+        ensemble = (
+            latest.groupby("symbol", as_index=False)
+            .agg(
+                date=("date", "max"),
+                long_score=("long_score", "mean"),
+                short_score=("short_score", "mean"),
+                model_count=("strategy_source", "nunique"),
+            )
+            .assign(strategy_source="ensemble_mean")
+        )
+    if "model_count" not in ensemble.columns:
+        ensemble["model_count"] = pd.NA
+    base = ensemble[["symbol", "date", "long_score", "short_score", "model_count"]].rename(
+        columns={
+            "date": "score_date",
+            "long_score": "ensemble_long_score",
+            "short_score": "ensemble_short_score",
+            "model_count": "ensemble_model_count",
+        }
+    )
+    base["ensemble_net_score"] = base["ensemble_long_score"] - base["ensemble_short_score"]
+
+    family_scores = latest.loc[~latest["strategy_source"].eq("ensemble_mean")].copy()
+    if not family_scores.empty:
+        long_wide = family_scores.pivot(index="symbol", columns="strategy_source", values="long_score")
+        short_wide = family_scores.pivot(index="symbol", columns="strategy_source", values="short_score")
+        long_wide = long_wide.rename(columns={col: f"long__{col}" for col in long_wide.columns})
+        short_wide = short_wide.rename(columns={col: f"short__{col}" for col in short_wide.columns})
+        family_wide = long_wide.join(short_wide, how="outer").reset_index()
+        families = sorted(family_scores["strategy_source"].dropna().astype(str).unique())
+        family_cols = ["symbol"]
+        for family in families:
+            family_cols.extend([f"long__{family}", f"short__{family}"])
+        family_wide = family_wide.reindex(columns=[col for col in family_cols if col in family_wide.columns])
+        table = base.merge(family_wide, on="symbol", how="outer")
+    else:
+        table = base
+
+    if leaderboard is not None and not leaderboard.empty:
+        lead = leaderboard.copy()
+        lead["symbol"] = lead["symbol"].astype(str).str.strip().str.upper()
+        lead_cols = [
+            col
+            for col in ("symbol", "rank", "prob_buy", "prob_short", "best_family_score", "selected", "close", "eligible")
+            if col in lead.columns
+        ]
+        table = lead[lead_cols].merge(table, on="symbol", how="outer")
+    if "rank" not in table.columns:
+        table["rank"] = pd.NA
+    missing_rank = pd.to_numeric(table["rank"], errors="coerce").isna()
+    if missing_rank.any():
+        max_rank = pd.to_numeric(table["rank"], errors="coerce").max()
+        start_rank = int(max_rank) + 1 if pd.notna(max_rank) else 1
+        fallback = table.loc[missing_rank].sort_values(
+            ["ensemble_long_score", "symbol"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        table.loc[fallback.index, "rank"] = range(start_rank, start_rank + len(fallback))
+    table["rank"] = pd.to_numeric(table["rank"], errors="coerce").astype("Int64")
+    ordered_prefix = [
+        col
+        for col in (
+            "rank",
+            "symbol",
+            "score_date",
+            "ensemble_long_score",
+            "ensemble_short_score",
+            "ensemble_net_score",
+            "prob_buy",
+            "prob_short",
+            "best_family_score",
+            "ensemble_model_count",
+            "selected",
+            "eligible",
+            "close",
+        )
+        if col in table.columns
+    ]
+    remaining = [col for col in table.columns if col not in ordered_prefix]
+    return table.reindex(columns=[*ordered_prefix, *remaining]).sort_values(["rank", "symbol"], kind="stable").reset_index(drop=True)
+
+
+def build_option_ml_ranking_table(
+    option_ranker_dir: Path,
+    *,
+    symbols: Sequence[str] | None = None,
+    selected_only: bool = True,
+    one_per_symbol: bool = True,
+    tradable_as_of: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    root = Path(option_ranker_dir)
+    if not root.exists():
+        return pd.DataFrame()
+    scored_paths = sorted(path for path in root.glob("*/eval_scored.parquet") if path.is_file())
+    if not scored_paths:
+        return pd.DataFrame()
+    selected_symbols = {
+        str(symbol).strip().upper()
+        for symbol in (symbols or ())
+        if str(symbol).strip()
+    }
+
+    base_cols = [
+        "trade_id",
+        "symbol",
+        "side",
+        "equity_signal_side",
+        "entry_date",
+        "equity_exit_date",
+        "option_exit_date",
+        "expiration",
+        "contract_symbol",
+        "option_type",
+        "option_action",
+        "strike",
+        "dte",
+        "moneyness",
+        "abs_moneyness",
+        "spread_pct",
+        "bid",
+        "ask",
+        "entry_mid",
+        "option_return",
+        "rank_y",
+    ]
+    key_cols: list[str] | None = None
+    table: pd.DataFrame | None = None
+    score_cols: list[str] = []
+
+    for path in scored_paths:
+        family = path.parent.name
+        frame = pd.read_parquet(path)
+        prediction_cols = [
+            col
+            for col in frame.columns
+            if str(col).startswith("pred_") and not str(col).endswith("_pairwise")
+        ]
+        if not prediction_cols:
+            continue
+        score_col = prediction_cols[0]
+        if key_cols is None:
+            if "contract_symbol" in frame.columns:
+                key_cols = [col for col in ("trade_id", "symbol", "entry_date", "contract_symbol") if col in frame.columns]
+            else:
+                key_cols = [
+                    col
+                    for col in ("trade_id", "symbol", "entry_date", "expiration", "strike", "option_type", "option_action")
+                    if col in frame.columns
+                ]
+            if not key_cols:
+                return pd.DataFrame()
+            keep_cols = [col for col in base_cols if col in frame.columns]
+            table = frame[keep_cols].copy()
+            table = table.drop_duplicates(subset=key_cols, keep="first").reset_index(drop=True)
+
+        family_score_col = f"family_score__{family}"
+        score_frame = frame[[*key_cols, score_col]].copy()
+        score_frame[score_col] = pd.to_numeric(score_frame[score_col], errors="coerce")
+        score_frame = score_frame.drop_duplicates(subset=key_cols, keep="first").rename(columns={score_col: family_score_col})
+        table = table.merge(score_frame, on=key_cols, how="outer")
+        score_cols.append(family_score_col)
+
+    if table is None or not score_cols:
+        return pd.DataFrame()
+    if selected_symbols and "symbol" in table.columns:
+        table["symbol"] = table["symbol"].astype(str).str.strip().str.upper()
+        table = table.loc[table["symbol"].isin(selected_symbols)].copy()
+        if table.empty:
+            return pd.DataFrame()
+    if "expiration" in table.columns:
+        as_of = pd.Timestamp.today().normalize() if tradable_as_of is None else pd.Timestamp(tradable_as_of).normalize()
+        expirations = pd.to_datetime(table["expiration"], errors="coerce").dt.normalize()
+        table = table.loc[expirations.ge(as_of)].copy()
+        if table.empty:
+            return pd.DataFrame()
+    table["option_ensemble_mean_score"] = table[score_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+    table["option_family_score_count"] = table[score_cols].notna().sum(axis=1)
+    sort_cols = ["trade_id", "option_ensemble_mean_score"]
+    ascending = [True, False]
+    if "option_return" in table.columns:
+        table["option_return"] = pd.to_numeric(table["option_return"], errors="coerce")
+        sort_cols.append("option_return")
+        ascending.append(False)
+    if "contract_symbol" in table.columns:
+        sort_cols.append("contract_symbol")
+        ascending.append(True)
+    table = table.sort_values(sort_cols, ascending=ascending, kind="stable").reset_index(drop=True)
+    table["option_ensemble_rank"] = table.groupby("trade_id", sort=False).cumcount() + 1
+    table["selected_by_option_ensemble"] = table["option_ensemble_rank"].eq(1)
+    if selected_only:
+        table = table.loc[table["selected_by_option_ensemble"]].copy()
+    if one_per_symbol and "symbol" in table.columns:
+        symbol_sort_cols = ["symbol"]
+        symbol_ascending = [True]
+        if "entry_date" in table.columns:
+            table["_entry_date_sort"] = pd.to_datetime(table["entry_date"], errors="coerce")
+            symbol_sort_cols.append("_entry_date_sort")
+            symbol_ascending.append(False)
+        symbol_sort_cols.append("option_ensemble_mean_score")
+        symbol_ascending.append(False)
+        if "contract_symbol" in table.columns:
+            symbol_sort_cols.append("contract_symbol")
+            symbol_ascending.append(True)
+        table = (
+            table.sort_values(symbol_sort_cols, ascending=symbol_ascending, kind="stable")
+            .groupby("symbol", as_index=False, sort=False)
+            .head(1)
+            .drop(columns=["_entry_date_sort"], errors="ignore")
+            .reset_index(drop=True)
+        )
+    if "entry_date" in table.columns:
+        table["entry_date"] = pd.to_datetime(table["entry_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "expiration" in table.columns:
+        table["expiration"] = pd.to_datetime(table["expiration"], errors="coerce").dt.strftime("%Y-%m-%d")
+    ordered_prefix = [
+        col
+        for col in (
+            "selected_by_option_ensemble",
+            "option_ensemble_rank",
+            "option_ensemble_mean_score",
+            "option_family_score_count",
+            "trade_id",
+            "symbol",
+            "side",
+            "equity_signal_side",
+            "entry_date",
+            "option_type",
+            "option_action",
+            "contract_symbol",
+            "expiration",
+            "strike",
+            "dte",
+            "moneyness",
+            "spread_pct",
+            "bid",
+            "ask",
+            "entry_mid",
+            "option_return",
+            "rank_y",
+        )
+        if col in table.columns
+    ]
+    remaining = [col for col in table.columns if col not in ordered_prefix]
+    return table.reindex(columns=[*ordered_prefix, *remaining]).sort_values(
+        ["trade_id", "option_ensemble_rank"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def backfill_thetadata_eod_for_score_date(
+    *,
+    symbols: Sequence[str],
+    score_date: str | pd.Timestamp,
+    max_workers: int = 1,
+    overwrite: bool = False,
+    request_sleep: float = 0.0,
+) -> dict[str, Any]:
+    from quant_warehouse.migrate.backfill_thetadata_options import backfill_thetadata_options
+
+    clean_symbols = _normalize_symbols(symbols)
+    if not clean_symbols:
+        return {"symbols_requested": 0, "symbols_completed": 0, "symbols_failed": 0, "results": []}
+    date_text = pd.Timestamp(score_date).date().isoformat()
+    return backfill_thetadata_options(
+        symbols=clean_symbols,
+        start_date=date_text,
+        end_date=date_text,
+        backfill_window_days=1,
+        fallback_window_days=1,
+        max_workers=max(1, int(max_workers)),
+        overwrite=bool(overwrite),
+        skip_existing=not bool(overwrite),
+        request_sleep=float(request_sleep),
+        progress_logger=print,
+    )
+
+
+def backfill_thetadata_for_oracle_trade_windows(
+    oracle_trades: Path | pd.DataFrame,
+    *,
+    symbols: Sequence[str] | None = None,
+    max_trades: int | None = None,
+    backfill_window_days: int = 7,
+    fallback_window_days: int = 1,
+    overwrite: bool = False,
+    request_sleep: float = 0.0,
+) -> dict[str, Any]:
+    from quant_warehouse.migrate.backfill_thetadata_options import backfill_thetadata_options_for_oracle_trades
+
+    if isinstance(oracle_trades, pd.DataFrame):
+        trades = oracle_trades.copy()
+    else:
+        path = Path(oracle_trades).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Oracle trades file not found: {path}")
+        if path.suffix.lower() == ".parquet":
+            trades = pd.read_parquet(path)
+        elif path.suffix.lower() == ".csv":
+            trades = pd.read_csv(path)
+        else:
+            raise ValueError(f"Unsupported oracle trades file type: {path.suffix}")
+    return backfill_thetadata_options_for_oracle_trades(
+        trades,
+        symbols=symbols,
+        max_trades=max_trades,
+        backfill_window_days=int(backfill_window_days),
+        fallback_window_days=int(fallback_window_days),
+        skip_existing=not bool(overwrite),
+        overwrite=bool(overwrite),
+        request_sleep=float(request_sleep),
+        progress_logger=print,
+    )
+
+
+def build_score_date_option_candidate_panel(
+    *,
+    leaderboard: pd.DataFrame,
+    score_date: str | pd.Timestamp | None = None,
+    symbols: Sequence[str] | None = None,
+    target_dte: int = 90,
+) -> pd.DataFrame:
+    from quant_warehouse.platforms.data_providers.thetadata.feature_engineering.option_features import (
+        build_option_contract_features,
+    )
+    from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
+
+    if leaderboard is None or leaderboard.empty:
+        return pd.DataFrame()
+    lead = leaderboard.copy()
+    lead["symbol"] = lead["symbol"].astype(str).str.strip().str.upper()
+    if symbols:
+        wanted = set(_normalize_symbols(symbols))
+        lead = lead.loc[lead["symbol"].isin(wanted)].copy()
+    if "selected" in lead.columns:
+        lead = lead.loc[lead["selected"].astype(bool)].copy()
+    if lead.empty:
+        return pd.DataFrame()
+    if score_date is None:
+        score_date = pd.to_datetime(lead["score_date"], errors="coerce").max() if "score_date" in lead.columns else pd.Timestamp.today()
+    score_ts = pd.Timestamp(score_date).normalize()
+    frames: list[pd.DataFrame] = []
+
+    for row in lead.to_dict("records"):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            chain = read_thetadata_eod_option_chain(
+                symbol,
+                start_date=score_ts,
+                end_date=score_ts,
+                require_rich_columns=False,
+            )
+        except Exception:
+            continue
+        if chain.empty:
+            continue
+        spot = _number(row.get("close"))
+        featured = build_option_contract_features(
+            chain,
+            underlying_price=spot if spot > 0 else None,
+            target_dte=int(target_dte),
+        ).df
+        if featured.empty:
+            continue
+        featured["snapshot_date"] = pd.to_datetime(featured.get("snapshot_date"), errors="coerce").dt.normalize()
+        featured["expiration"] = pd.to_datetime(featured.get("expiration"), errors="coerce").dt.normalize()
+        featured = featured.loc[featured["snapshot_date"].eq(score_ts) & featured["expiration"].ge(score_ts)].copy()
+        if featured.empty:
+            continue
+        prob_buy = _number(row.get("prob_buy"))
+        prob_short = _number(row.get("prob_short"))
+        side = "short" if prob_short > prob_buy else "long"
+        option_type = "put" if side == "short" else "call"
+        option_action = "buy_put" if side == "short" else "buy_call"
+        featured["option_type"] = featured["option_type"].astype(str).str.lower().str.strip()
+        featured = featured.loc[featured["option_type"].eq(option_type)].copy()
+        if featured.empty:
+            continue
+        featured["trade_id"] = f"live|{symbol}|{score_ts.date()}|{side}"
+        featured["symbol"] = symbol
+        featured["side"] = side
+        featured["equity_signal_side"] = side
+        featured["entry_date"] = score_ts
+        featured["option_action"] = option_action
+        featured["entry_mid"] = pd.to_numeric(featured.get("mid"), errors="coerce")
+        frames.append(featured)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def build_score_date_option_ml_ranking_table(
+    option_ranker_dir: Path,
+    *,
+    leaderboard: pd.DataFrame,
+    score_date: str | pd.Timestamp | None = None,
+    symbols: Sequence[str] | None = None,
+    target_dte: int = 90,
+    min_market_cap: int = 1_000_000_000_000,
+    start_date: str = "1900-01-01",
+) -> pd.DataFrame:
+    root = Path(option_ranker_dir)
+    family_dirs = sorted(path for path in root.iterdir() if path.is_dir()) if root.exists() else []
+    if not family_dirs:
+        return pd.DataFrame()
+    candidates = build_score_date_option_candidate_panel(
+        leaderboard=leaderboard,
+        score_date=score_date,
+        symbols=symbols,
+        target_dte=target_dte,
+    )
+    if candidates.empty:
+        return pd.DataFrame()
+    score_ts = pd.to_datetime(candidates["entry_date"], errors="coerce").max()
+    symbol_list = tuple(sorted(candidates["symbol"].dropna().astype(str).str.upper().unique()))
+    from quant_warehouse.research_tools.feature_family_eval import FamilyEvaluationConfig, build_fundamental_feature_panel
+
+    feature_panel, _metadata, _diagnostics, _timings = build_fundamental_feature_panel(
+        symbol_list,
+        FamilyEvaluationConfig(
+            market_cap_min=int(min_market_cap),
+            start_date=str(start_date),
+            end_date=pd.Timestamp(score_ts).date().isoformat(),
+        ),
+    )
+    table = candidates.copy()
+    key_cols = [col for col in ("trade_id", "symbol", "entry_date", "contract_symbol") if col in table.columns]
+    score_cols: list[str] = []
+    for family_dir in family_dirs:
+        summary_path = family_dir / "summary.json"
+        ranker_path = family_dir / "ranker.pkl"
+        if not summary_path.exists() or not ranker_path.exists():
+            continue
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        option_features = [col for col in summary.get("option_features", OPTION_MODEL_FEATURES) if str(col)]
+        family_features = [col for col in summary.get("family_features", []) if str(col)]
+        joined = _join_score_date_family_features(table, feature_panel, family_features)
+        model_features = [*option_features, *family_features]
+        for col in model_features:
+            if col not in joined.columns:
+                joined[col] = pd.NA
+        with ranker_path.open("rb") as handle:
+            model = pickle.load(handle)
+        score_col = f"family_score__{family_dir.name}"
+        feature_frame = joined[model_features].apply(pd.to_numeric, errors="coerce")
+        joined[score_col] = model.predict(feature_frame)
+        table = table.merge(
+            joined[[*key_cols, score_col]].drop_duplicates(subset=key_cols, keep="first"),
+            on=key_cols,
+            how="left",
+        )
+        score_cols.append(score_col)
+    if not score_cols:
+        return pd.DataFrame()
+    return _finalize_option_ml_score_table(table, score_cols, tradable_as_of=score_ts)
+
+
+def _join_score_date_family_features(option_frame: pd.DataFrame, feature_panel: pd.DataFrame, feature_cols: Sequence[str]) -> pd.DataFrame:
+    if option_frame.empty or feature_panel.empty or not feature_cols:
+        return option_frame.copy()
+    left = option_frame.copy()
+    left["_row_id"] = range(len(left))
+    left["symbol"] = left["symbol"].astype(str).str.upper()
+    left["entry_date"] = pd.to_datetime(left["entry_date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
+    right = feature_panel.rename(columns={"date": "feature_date"}).copy()
+    right["symbol"] = right["symbol"].astype(str).str.upper()
+    right["feature_date"] = pd.to_datetime(right["feature_date"], errors="coerce").dt.normalize().astype("datetime64[ns]")
+    keep_cols = ["symbol", "feature_date", *[col for col in feature_cols if col in right.columns]]
+    merged_parts: list[pd.DataFrame] = []
+    for symbol, group in left.sort_values(["symbol", "entry_date", "_row_id"]).groupby("symbol", sort=False):
+        family = right.loc[right["symbol"].eq(symbol), keep_cols].sort_values("feature_date")
+        if family.empty:
+            merged_parts.append(group)
+            continue
+        merged_parts.append(
+            pd.merge_asof(
+                group.sort_values("entry_date"),
+                family,
+                by="symbol",
+                left_on="entry_date",
+                right_on="feature_date",
+                direction="backward",
+            )
+        )
+    return pd.concat(merged_parts, ignore_index=True, sort=False).sort_values("_row_id").drop(columns=["_row_id"]).reset_index(drop=True)
+
+
+def _finalize_option_ml_score_table(
+    table: pd.DataFrame,
+    score_cols: Sequence[str],
+    *,
+    tradable_as_of: str | pd.Timestamp,
+) -> pd.DataFrame:
+    if table.empty or not score_cols:
+        return pd.DataFrame()
+    work = table.copy()
+    as_of = max(pd.Timestamp(tradable_as_of).normalize(), pd.Timestamp.today().normalize())
+    if "expiration" in work.columns:
+        expirations = pd.to_datetime(work["expiration"], errors="coerce").dt.normalize()
+        work = work.loc[expirations.ge(as_of)].copy()
+        if work.empty:
+            return pd.DataFrame()
+    work["option_ensemble_mean_score"] = work[list(score_cols)].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+    work["option_family_score_count"] = work[list(score_cols)].notna().sum(axis=1)
+    sort_cols = ["trade_id", "option_ensemble_mean_score"]
+    ascending = [True, False]
+    if "contract_symbol" in work.columns:
+        sort_cols.append("contract_symbol")
+        ascending.append(True)
+    work = work.sort_values(sort_cols, ascending=ascending, kind="stable").reset_index(drop=True)
+    work["option_ensemble_rank"] = work.groupby("trade_id", sort=False).cumcount() + 1
+    work["selected_by_option_ensemble"] = work["option_ensemble_rank"].eq(1)
+    work = work.loc[work["selected_by_option_ensemble"]].copy()
+    if "symbol" in work.columns:
+        work = (
+            work.sort_values(["symbol", "option_ensemble_mean_score", "contract_symbol"], ascending=[True, False, True], kind="stable")
+            .groupby("symbol", as_index=False, sort=False)
+            .head(1)
+            .reset_index(drop=True)
+        )
+    if "entry_date" in work.columns:
+        work["entry_date"] = pd.to_datetime(work["entry_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if "expiration" in work.columns:
+        work["expiration"] = pd.to_datetime(work["expiration"], errors="coerce").dt.strftime("%Y-%m-%d")
+    ordered_prefix = [
+        col
+        for col in (
+            "selected_by_option_ensemble",
+            "option_ensemble_rank",
+            "option_ensemble_mean_score",
+            "option_family_score_count",
+            "trade_id",
+            "symbol",
+            "side",
+            "equity_signal_side",
+            "entry_date",
+            "option_type",
+            "option_action",
+            "contract_symbol",
+            "expiration",
+            "strike",
+            "dte",
+            "moneyness",
+            "spread_pct",
+            "bid",
+            "ask",
+            "entry_mid",
+        )
+        if col in work.columns
+    ]
+    remaining = [col for col in work.columns if col not in ordered_prefix]
+    return work.reindex(columns=[*ordered_prefix, *remaining]).sort_values(["symbol"], kind="stable").reset_index(drop=True)
+
+
 def save_live_artifacts(
     *,
     live_dir: Path,
     leaderboard: pd.DataFrame,
+    symbol_scores: pd.DataFrame | None = None,
+    option_ml_rankings: pd.DataFrame | None = None,
     orders: Mapping[str, pd.DataFrame] | None = None,
 ) -> dict[str, str]:
     live_dir = Path(live_dir)
     live_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "leaderboard": str(live_dir / "leaderboard_latest.csv"),
+        "symbol_scores": str(live_dir / "symbol_scores.csv"),
+        "option_ml_rankings": str(live_dir / "option_ml_rankings.csv"),
         "metadata": str(live_dir / "metadata.json"),
     }
     leaderboard.to_csv(paths["leaderboard"], index=False)
+    score_frame = symbol_scores.copy() if symbol_scores is not None else leaderboard.copy()
+    score_frame.to_csv(paths["symbol_scores"], index=False)
+    option_frame = option_ml_rankings.copy() if option_ml_rankings is not None else pd.DataFrame()
+    option_frame.to_csv(paths["option_ml_rankings"], index=False)
     metadata = {
         "created_at": pd.Timestamp.utcnow().isoformat(),
         "rows": int(len(leaderboard)),
         "selected": int(leaderboard.get("selected", pd.Series(dtype=bool)).sum()),
     }
     (live_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+    plan_created_at = pd.Timestamp.now(tz="UTC").isoformat()
     for name, frame in dict(orders or {}).items():
         order_path = live_dir / f"{name}_orders.csv"
-        frame.to_csv(order_path, index=False)
+        stamped = _stamp_order_plan(frame, created_at=plan_created_at)
+        stamped.to_csv(order_path, index=False)
         paths[f"{name}_orders"] = str(order_path)
     return paths
 
@@ -838,10 +1466,82 @@ def apply_option_limit_policy(
     return work
 
 
+def _stamp_order_plan(orders: pd.DataFrame, *, created_at: str | None = None) -> pd.DataFrame:
+    stamped = orders.copy()
+    if not stamped.empty and "plan_created_at" not in stamped.columns:
+        stamped["plan_created_at"] = created_at or pd.Timestamp.now(tz="UTC").isoformat()
+    return stamped
+
+
+def validate_order_plan_for_submission(
+    orders: pd.DataFrame,
+    *,
+    asset_type: str,
+    policy: SubmissionSafetyPolicy | None = None,
+    now: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Return actionable orders or raise before any broker side effect occurs."""
+
+    if orders is None or orders.empty:
+        return pd.DataFrame()
+    limits = policy or SubmissionSafetyPolicy()
+    actionable = orders.loc[~orders.get("skip_submit", pd.Series(False, index=orders.index)).astype(bool)].copy()
+    if actionable.empty:
+        return actionable
+    if len(actionable) > int(limits.max_orders):
+        raise ValueError(f"Refusing order plan with {len(actionable)} rows; limit is {limits.max_orders}.")
+
+    if "plan_created_at" not in actionable.columns:
+        raise ValueError("Refusing unstamped order plan: missing plan_created_at.")
+    created = pd.to_datetime(actionable["plan_created_at"], errors="coerce", utc=True)
+    if created.isna().any():
+        raise ValueError("Refusing order plan with an invalid plan_created_at.")
+    current = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    current = current.tz_localize("UTC") if current.tzinfo is None else current.tz_convert("UTC")
+    ages = current - created
+    if ages.lt(pd.Timedelta(0)).any():
+        raise ValueError("Refusing order plan dated in the future.")
+    if ages.gt(pd.Timedelta(hours=float(limits.max_plan_age_hours))).any():
+        raise ValueError(f"Refusing stale order plan older than {limits.max_plan_age_hours:g} hours.")
+
+    cancel_mask = actionable.get("action", pd.Series("", index=actionable.index)).astype(str).str.lower().str.startswith("cancel_")
+    cancel_mask |= actionable.get("side", pd.Series("", index=actionable.index)).astype(str).str.lower().eq("cancel")
+    if cancel_mask.any():
+        order_ids = actionable.loc[cancel_mask].get("order_id", pd.Series("", index=actionable.index[cancel_mask])).astype(str).str.strip()
+        if order_ids.eq("").any():
+            raise ValueError("Refusing cancellation row without an order_id.")
+
+    trade_rows = actionable.loc[~cancel_mask]
+    if not trade_rows.empty:
+        required = {"symbol", "side", "qty"}
+        missing = required.difference(trade_rows.columns)
+        if missing:
+            raise ValueError(f"Refusing order plan missing required columns: {sorted(missing)}.")
+        symbols = trade_rows["symbol"].astype(str).str.strip()
+        if symbols.eq("").any():
+            raise ValueError("Refusing order plan with an empty symbol.")
+        sides = trade_rows["side"].astype(str).str.lower().str.strip()
+        if not sides.isin({"buy", "sell"}).all():
+            raise ValueError("Refusing order plan with a side other than buy or sell.")
+        quantities = pd.to_numeric(trade_rows["qty"], errors="coerce")
+        if quantities.isna().any() or quantities.le(0).any() or quantities.mod(1).ne(0).any():
+            raise ValueError("Refusing order plan with a non-positive or non-integer quantity.")
+        quantity_limit = (
+            limits.max_option_contracts_per_order if str(asset_type).lower() == "option" else limits.max_quantity_per_order
+        )
+        if quantities.gt(int(quantity_limit)).any():
+            raise ValueError(f"Refusing order quantity above the {int(quantity_limit)} per-order limit.")
+
+    duplicate_cols = [col for col in ("action", "symbol", "side", "qty", "order_id") if col in actionable.columns]
+    if duplicate_cols and actionable.duplicated(subset=duplicate_cols, keep=False).any():
+        raise ValueError(f"Refusing duplicate order rows keyed by {duplicate_cols}.")
+    return actionable.reset_index(drop=True)
+
+
 def submit_alpaca_orders(client: Any, orders: pd.DataFrame) -> pd.DataFrame:
     if orders is None or orders.empty:
         return pd.DataFrame()
-    actionable = orders.loc[~orders.get("skip_submit", pd.Series(False, index=orders.index)).astype(bool)].copy()
+    actionable = validate_order_plan_for_submission(orders, asset_type="equity")
     responses = client.submit_orders(actionable.to_dict(orient="records"))
     return pd.DataFrame(responses)
 
@@ -849,17 +1549,148 @@ def submit_alpaca_orders(client: Any, orders: pd.DataFrame) -> pd.DataFrame:
 def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str | None = None) -> pd.DataFrame:
     if orders is None or orders.empty:
         return pd.DataFrame()
-    actionable = orders.loc[~orders.get("skip_submit", pd.Series(False, index=orders.index)).astype(bool)].copy()
+    actionable = validate_order_plan_for_submission(orders, asset_type="option")
     from platforms.brokers.robinhood import submit_robinhood_option_orders as _submit
 
     return _submit(orders_df=actionable, account_number=account_number, time_in_force="gtc")
 
 
-def write_streamlit_leaderboard_app(*, live_dir: Path, output_path: Path | None = None) -> Path:
+def write_streamlit_leaderboard_app(
+    *,
+    live_dir: Path,
+    output_path: Path | None = None,
+    leaderboard: pd.DataFrame | None = None,
+    symbol_scores: pd.DataFrame | None = None,
+    option_ml_rankings: pd.DataFrame | None = None,
+    orders: Mapping[str, pd.DataFrame] | None = None,
+) -> Path:
     live_dir = Path(live_dir).resolve()
     repo_root = find_repo_root(Path(__file__).resolve())
     output = Path(output_path or (live_dir / "streamlit_trading_app_v2.py"))
     output.parent.mkdir(parents=True, exist_ok=True)
+    if leaderboard is not None:
+        def _json_frame(frame: pd.DataFrame | None) -> str:
+            source = frame.copy() if frame is not None else pd.DataFrame()
+            return source.to_json(orient="split", date_format="iso")
+
+        payload = {
+            "leaderboard": _json_frame(leaderboard),
+            "symbol_scores": _json_frame(symbol_scores if symbol_scores is not None else leaderboard),
+            "option_ml_rankings": _json_frame(option_ml_rankings),
+            "orders": {str(name): _json_frame(_stamp_order_plan(frame)) for name, frame in dict(orders or {}).items()},
+        }
+        payload_literal = json.dumps(payload)
+        script = f'''from __future__ import annotations
+
+from io import StringIO
+from pathlib import Path
+import sys
+import pandas as pd
+import streamlit as st
+
+REPO_ROOT = Path(r"{str(repo_root)}")
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.trading_app_v2_runtime import alpaca_client_from_env, submit_alpaca_orders, submit_robinhood_option_orders
+
+EMBEDDED_DATA = {payload_literal}
+
+
+def read_embedded_frame(name: str) -> pd.DataFrame:
+    raw = EMBEDDED_DATA.get(name)
+    if not raw:
+        return pd.DataFrame()
+    return pd.read_json(StringIO(raw), orient="split")
+
+
+def read_embedded_orders() -> dict[str, pd.DataFrame]:
+    raw_orders = EMBEDDED_DATA.get("orders") or {{}}
+    return {{
+        str(name): pd.read_json(StringIO(raw), orient="split") if raw else pd.DataFrame()
+        for name, raw in raw_orders.items()
+    }}
+
+
+st.set_page_config(page_title="Trading App V2", layout="wide")
+st.title("Trading App V2 Leaderboard")
+
+leaderboard = read_embedded_frame("leaderboard")
+if leaderboard.empty:
+    st.warning("Leaderboard is empty for this generated app snapshot.")
+    st.stop()
+selected = int(leaderboard.get("selected", pd.Series(dtype=bool)).sum())
+eligible = int(leaderboard.get("eligible", pd.Series(dtype=bool)).sum())
+cols = st.columns(4)
+cols[0].metric("Rows", f"{{len(leaderboard):,}}")
+cols[1].metric("Selected", f"{{selected:,}}")
+cols[2].metric("Eligible", f"{{eligible:,}}")
+cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
+
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders"])
+
+with symbol_tab:
+    score_table = read_embedded_frame("symbol_scores")
+    if score_table.empty:
+        st.warning("Symbol score view is empty. Showing leaderboard only.")
+        score_table = leaderboard.copy()
+    st.subheader("Scores By Symbol")
+    st.dataframe(score_table.sort_values(["rank", "symbol"], kind="stable"), width="stretch", hide_index=True)
+
+with option_tab:
+    option_rankings = read_embedded_frame("option_ml_rankings")
+    if option_rankings.empty:
+        st.info("No tradable, unexpired option ML ranking rows are embedded in this app snapshot.")
+    else:
+        st.subheader("Selected Option ML Rankings")
+        st.dataframe(option_rankings, width="stretch", hide_index=True)
+
+with orders_tab:
+    order_frames = read_embedded_orders()
+    for name, frame in sorted(order_frames.items()):
+        st.subheader(name.replace("_", " ").title())
+        st.dataframe(frame, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Submit Orders By Account")
+    account_prefixes = {{
+        "alpaca_equity_paper": "EQUITY",
+        "alpaca_option_paper": "OPTION",
+        "alpaca_llm_paper": "LLM",
+    }}
+    submitters = {{
+        **{{name: "alpaca" for name in account_prefixes}},
+        "robinhood_option_real": "robinhood_option",
+    }}
+    for name in sorted(order_frames):
+        orders = order_frames[name]
+        account_label = name.replace("_", " ").title()
+        with st.expander(account_label, expanded=False):
+            if orders.empty:
+                st.info("No orders for this account.")
+                continue
+            st.dataframe(orders, width="stretch", hide_index=True)
+            confirm = st.checkbox(
+                f"I have reviewed only the {{account_label}} orders.",
+                key=f"confirm_{{name}}",
+            )
+            disabled = not confirm or name not in submitters
+            if name not in submitters:
+                st.warning("No submitter is configured for this account.")
+            if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
+                if submitters[name] == "alpaca":
+                    client = alpaca_client_from_env(account_prefixes[name])
+                    result = submit_alpaca_orders(client, orders)
+                elif submitters[name] == "robinhood_option":
+                    result = submit_robinhood_option_orders(orders)
+                else:
+                    result = pd.DataFrame()
+                st.write(f"{{name}}: {{len(result)}} response row(s)")
+                st.dataframe(result, width="stretch", hide_index=True)
+'''
+        output.write_text(script, encoding="utf-8")
+        return output
+
     script = f'''from __future__ import annotations
 
 from pathlib import Path
@@ -874,6 +1705,17 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.trading_app_v2_runtime import alpaca_client_from_env, submit_alpaca_orders, submit_robinhood_option_orders
 
+
+def read_csv_if_nonempty(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists() or path.stat().st_size <= 1:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
 st.set_page_config(page_title="Trading App V2", layout="wide")
 st.title("Trading App V2 Leaderboard")
 
@@ -882,7 +1724,10 @@ if not leaderboard_path.exists():
     st.error(f"Missing leaderboard: {{leaderboard_path}}")
     st.stop()
 
-leaderboard = pd.read_csv(leaderboard_path)
+leaderboard = read_csv_if_nonempty(leaderboard_path)
+if leaderboard.empty:
+    st.warning(f"Leaderboard is empty: {{leaderboard_path}}")
+    st.stop()
 selected = int(leaderboard.get("selected", pd.Series(dtype=bool)).sum())
 eligible = int(leaderboard.get("eligible", pd.Series(dtype=bool)).sum())
 cols = st.columns(4)
@@ -891,36 +1736,70 @@ cols[1].metric("Selected", f"{{selected:,}}")
 cols[2].metric("Eligible", f"{{eligible:,}}")
 cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
 
-st.dataframe(leaderboard, use_container_width=True, hide_index=True)
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders"])
 
-order_frames = {{}}
-for path in sorted(LIVE_DIR.glob("*_orders.csv")):
-    st.subheader(path.stem.replace("_", " ").title())
-    frame = pd.read_csv(path)
-    order_frames[path.stem.removesuffix("_orders")] = frame
-    st.dataframe(frame, use_container_width=True, hide_index=True)
+with symbol_tab:
+    symbol_scores_path = LIVE_DIR / "symbol_scores.csv"
+    score_table = read_csv_if_nonempty(symbol_scores_path)
+    if score_table.empty:
+        st.warning(f"Missing or empty symbol score view: {{symbol_scores_path}}. Showing leaderboard only.")
+        score_table = leaderboard.copy()
+    st.subheader("Scores By Symbol")
+    st.dataframe(score_table.sort_values(["rank", "symbol"], kind="stable"), width="stretch", hide_index=True)
 
-st.divider()
-st.subheader("Submit Orders")
-confirm = st.checkbox("I have reviewed positions, open orders, exits, cancels, and new orders.")
-if st.button("Submit Orders", type="primary", disabled=not confirm):
-    results = {{}}
+with option_tab:
+    option_rankings_path = LIVE_DIR / "option_ml_rankings.csv"
+    option_rankings = read_csv_if_nonempty(option_rankings_path)
+    if option_rankings.empty:
+        st.info(f"No tradable, unexpired option ML ranking rows found at {{option_rankings_path}}.")
+    else:
+        st.subheader("Selected Option ML Rankings")
+        st.dataframe(option_rankings, width="stretch", hide_index=True)
+
+with orders_tab:
+    order_frames = {{}}
+    for path in sorted(LIVE_DIR.glob("*_orders.csv")):
+        st.subheader(path.stem.replace("_", " ").title())
+        frame = read_csv_if_nonempty(path)
+        order_frames[path.stem.removesuffix("_orders")] = frame
+        st.dataframe(frame, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Submit Orders By Account")
     account_prefixes = {{
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
     }}
-    for name, orders in order_frames.items():
-        if orders.empty:
-            continue
-        if name in account_prefixes:
-            client = alpaca_client_from_env(account_prefixes[name])
-            results[name] = submit_alpaca_orders(client, orders)
-        elif name == "robinhood_option_real":
-            results[name] = submit_robinhood_option_orders(orders)
-    for name, result in results.items():
-        st.write(f"{{name}}: {{len(result)}} response row(s)")
-        st.dataframe(result, use_container_width=True, hide_index=True)
+    submitters = {{
+        **{{name: "alpaca" for name in account_prefixes}},
+        "robinhood_option_real": "robinhood_option",
+    }}
+    for name in sorted(order_frames):
+        orders = order_frames[name]
+        account_label = name.replace("_", " ").title()
+        with st.expander(account_label, expanded=False):
+            if orders.empty:
+                st.info("No orders for this account.")
+                continue
+            st.dataframe(orders, width="stretch", hide_index=True)
+            confirm = st.checkbox(
+                f"I have reviewed only the {{account_label}} orders.",
+                key=f"confirm_{{name}}",
+            )
+            disabled = not confirm or name not in submitters
+            if name not in submitters:
+                st.warning("No submitter is configured for this account.")
+            if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
+                if submitters[name] == "alpaca":
+                    client = alpaca_client_from_env(account_prefixes[name])
+                    result = submit_alpaca_orders(client, orders)
+                elif submitters[name] == "robinhood_option":
+                    result = submit_robinhood_option_orders(orders)
+                else:
+                    result = pd.DataFrame()
+                st.write(f"{{name}}: {{len(result)}} response row(s)")
+                st.dataframe(result, width="stretch", hide_index=True)
 '''
     output.write_text(script, encoding="utf-8")
     return output
@@ -931,7 +1810,10 @@ def _normalize_symbols(symbols: Sequence[str]) -> list[str]:
 
 
 def _read_csv_if_exists(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path) if Path(path).exists() else pd.DataFrame()
+    path = Path(path)
+    if not path.exists() or path.stat().st_size <= 1:
+        return pd.DataFrame()
+    return pd.read_csv(path)
 
 
 def _enrich_alpaca_option_records(client: Any, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
