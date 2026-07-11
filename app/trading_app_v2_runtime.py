@@ -1538,10 +1538,17 @@ def validate_order_plan_for_submission(
     return actionable.reset_index(drop=True)
 
 
-def submit_alpaca_orders(client: Any, orders: pd.DataFrame) -> pd.DataFrame:
+def submit_alpaca_orders(
+    client: Any,
+    orders: pd.DataFrame,
+    *,
+    asset_type: str = "equity",
+) -> pd.DataFrame:
+    """Validate and submit an Alpaca plan using limits for its asset class."""
+
     if orders is None or orders.empty:
         return pd.DataFrame()
-    actionable = validate_order_plan_for_submission(orders, asset_type="equity")
+    actionable = validate_order_plan_for_submission(orders, asset_type=asset_type)
     responses = client.submit_orders(actionable.to_dict(orient="records"))
     return pd.DataFrame(responses)
 

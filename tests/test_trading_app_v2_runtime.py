@@ -417,3 +417,30 @@ def test_submission_safety_allows_stamped_cancellations_and_valid_orders():
     validated = runtime.validate_order_plan_for_submission(plan, asset_type="equity", now="2026-07-11T12:00:00Z")
 
     assert list(validated["symbol"]) == ["AAPL", "MSFT"]
+
+
+def test_submit_alpaca_option_orders_uses_option_quantity_limit_without_side_effects():
+    class FakeClient:
+        def __init__(self):
+            self.submitted = []
+
+        def submit_orders(self, orders):
+            self.submitted.extend(orders)
+            return orders
+
+    client = FakeClient()
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL260117C00200000",
+                "side": "buy",
+                "qty": 101,
+                "plan_created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="100 per-order limit"):
+        runtime.submit_alpaca_orders(client, plan, asset_type="option")
+
+    assert client.submitted == []
