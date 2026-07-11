@@ -13,6 +13,108 @@ PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 DATA_BASE_URL = "https://data.alpaca.markets"
 
 
+def build_directional_option_order_plan(
+    ranked_directions: Sequence[Mapping[str, Any]],
+    selected_contracts: Sequence[Mapping[str, Any]],
+    current_positions: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    max_underlyings: int = 20,
+) -> list[dict[str, Any]]:
+    """Reconcile ranker-selected calls/puts against meta_stack directions."""
+    if not 1 <= int(max_underlyings) <= 20:
+        raise ValueError("max_underlyings must be between 1 and 20")
+
+    directions: dict[str, str] = {}
+    for row in ranked_directions:
+        underlying = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
+        direction = str(row.get("direction") or row.get("meta_stack_direction") or "").strip().lower()
+        if not underlying or underlying in directions:
+            continue
+        if direction not in {"long", "short", "hold"}:
+            raise ValueError(f"Invalid meta_stack direction for {underlying}: {direction!r}")
+        directions[underlying] = direction
+
+    selections: dict[tuple[str, str], dict[str, Any]] = {}
+    selected_underlyings: set[str] = set()
+    for raw in selected_contracts:
+        row = dict(raw)
+        underlying = str(row.get("underlying_symbol") or row.get("symbol") or "").strip().upper()
+        contract_symbol = str(row.get("contract_symbol") or row.get("option_symbol") or "").strip().upper()
+        option_type = str(row.get("option_type") or row.get("type") or "").strip().lower()
+        if not underlying or not contract_symbol or option_type not in {"call", "put"}:
+            raise ValueError("Each selected contract requires an underlying, contract symbol, and call/put type.")
+        key = (underlying, option_type)
+        if key in selections:
+            raise ValueError(f"Multiple selected {option_type} contracts for {underlying}")
+        selections[key] = {**row, "underlying_symbol": underlying, "contract_symbol": contract_symbol, "option_type": option_type}
+        selected_underlyings.add(underlying)
+    if len(selected_underlyings) > int(max_underlyings):
+        raise ValueError(f"Option selections contain {len(selected_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    unknown = sorted(selected_underlyings.difference(directions))
+    if unknown:
+        raise ValueError(f"Missing meta_stack directions for selected contracts: {unknown}")
+
+    positions: list[dict[str, Any]] = []
+    held_underlyings: set[str] = set()
+    for raw in current_positions or []:
+        row = dict(raw)
+        underlying = str(row.get("underlying_symbol") or "").strip().upper()
+        contract_symbol = str(row.get("contract_symbol") or row.get("option_symbol") or row.get("symbol") or "").strip().upper()
+        option_type = str(row.get("option_type") or row.get("type") or "").strip().lower()
+        quantity = float(row.get("qty") or row.get("quantity") or 0)
+        if not underlying or not contract_symbol or option_type not in {"call", "put"} or quantity == 0:
+            raise ValueError("Each current option position requires an underlying, contract symbol, call/put type, and quantity.")
+        positions.append({**row, "underlying_symbol": underlying, "contract_symbol": contract_symbol, "option_type": option_type, "qty": quantity})
+        held_underlyings.add(underlying)
+    if len(held_underlyings) > int(max_underlyings):
+        raise ValueError(f"Current option account has {len(held_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    missing = sorted(held_underlyings.difference(directions))
+    if missing:
+        raise ValueError(f"Missing meta_stack directions for current option positions: {missing}")
+
+    retained_contracts: set[str] = set()
+    orders: list[dict[str, Any]] = []
+    for position in positions:
+        underlying = position["underlying_symbol"]
+        option_type = position["option_type"]
+        direction = directions[underlying]
+        desired_type = "call" if direction == "long" else "put" if direction == "short" else None
+        selected = selections.get((underlying, desired_type)) if desired_type else None
+        retain = direction == "hold" or (
+            option_type == desired_type and selected is not None and position["contract_symbol"] == selected["contract_symbol"]
+        )
+        if retain:
+            retained_contracts.add(position["contract_symbol"])
+            continue
+        orders.append({
+            "symbol": position["contract_symbol"],
+            "underlying_symbol": underlying,
+            "option_type": option_type,
+            "action": f"sell_to_close_{option_type}",
+            "side": "sell",
+            "qty": abs(position["qty"]),
+        })
+
+    for underlying, direction in directions.items():
+        if direction == "hold":
+            continue
+        option_type = "call" if direction == "long" else "put"
+        selected = selections.get((underlying, option_type))
+        if selected is None:
+            raise ValueError(f"Missing selected {option_type} contract for {underlying} {direction} signal")
+        if selected["contract_symbol"] in retained_contracts:
+            continue
+        orders.append({
+            "symbol": selected["contract_symbol"],
+            "underlying_symbol": underlying,
+            "option_type": option_type,
+            "action": f"buy_to_open_{option_type}",
+            "side": "buy",
+            "qty": int(selected.get("qty") or 1),
+        })
+    return orders
+
+
 def build_directional_equity_order_plan(
     ranked_directions: Sequence[Mapping[str, Any]],
     latest_prices: Mapping[str, float],
