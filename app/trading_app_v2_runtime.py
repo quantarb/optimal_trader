@@ -608,6 +608,7 @@ def build_score_date_option_ml_ranking_table(
     min_market_cap: int = 1_000_000_000_000,
     start_date: str = "1900-01-01",
     max_underlyings: int = 20,
+    equity_family_scores: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     requested_symbols = _normalize_symbols(symbols or ())
     if len(requested_symbols) > int(max_underlyings):
@@ -616,9 +617,6 @@ def build_score_date_option_ml_ranking_table(
             f"limit is {int(max_underlyings)}. Score equities and select top-K first."
         )
     root = Path(option_ranker_dir)
-    family_dirs = sorted(path for path in root.iterdir() if path.is_dir()) if root.exists() else []
-    if not family_dirs:
-        return pd.DataFrame()
     candidates = build_score_date_option_candidate_panel(
         leaderboard=leaderboard,
         score_date=score_date,
@@ -626,6 +624,16 @@ def build_score_date_option_ml_ranking_table(
         target_dte=target_dte,
     )
     if candidates.empty:
+        return pd.DataFrame()
+    meta_model_path = root / "option_meta_stack" / "meta_stack_ranker.pkl"
+    if meta_model_path.exists():
+        if equity_family_scores is None or equity_family_scores.empty:
+            raise ValueError("Meta-stack option scoring requires current equity_family_scores")
+        from quant_orchestrator.research_tools import score_option_meta_ranker
+
+        return score_option_meta_ranker(meta_model_path, candidates, equity_family_scores)
+    family_dirs = sorted(path for path in root.iterdir() if path.is_dir()) if root.exists() else []
+    if not family_dirs:
         return pd.DataFrame()
     score_ts = pd.to_datetime(candidates["entry_date"], errors="coerce").max()
     symbol_list = tuple(sorted(candidates["symbol"].dropna().astype(str).str.upper().unique()))

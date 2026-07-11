@@ -521,6 +521,30 @@ def test_score_date_option_ranking_rejects_more_than_twenty_underlyings(tmp_path
         )
 
 
+def test_score_date_option_ranking_prefers_single_meta_stack(monkeypatch, tmp_path):
+    model_path = tmp_path / "option_meta_stack" / "meta_stack_ranker.pkl"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"model")
+    candidates = pd.DataFrame(
+        [{"trade_id": "t1", "symbol": "AAPL", "entry_date": "2026-07-10", "contract_symbol": "AAPL_CALL"}]
+    )
+    expected = candidates.assign(pred_meta_stack_rank=0.9)
+    monkeypatch.setattr(runtime, "build_score_date_option_candidate_panel", lambda **kwargs: candidates)
+    monkeypatch.setattr(
+        "quant_orchestrator.research_tools.score_option_meta_ranker",
+        lambda path, option_candidates, equity_scores: expected,
+    )
+
+    result = runtime.build_score_date_option_ml_ranking_table(
+        tmp_path,
+        leaderboard=pd.DataFrame(),
+        symbols=["AAPL"],
+        equity_family_scores=pd.DataFrame([{"symbol": "AAPL"}]),
+    )
+
+    assert result.equals(expected)
+
+
 def test_robinhood_option_orders_reconcile_before_new_entries():
     target_contracts = pd.DataFrame(
         [
