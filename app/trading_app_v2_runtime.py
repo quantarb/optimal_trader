@@ -1224,6 +1224,9 @@ def build_robinhood_option_orders(
 
     from platforms.brokers import robinhood
 
+    if current_option_positions is None or pending_option_orders is None:
+        robinhood.robinhood_login()
+
     current = (
         current_option_positions.copy()
         if current_option_positions is not None

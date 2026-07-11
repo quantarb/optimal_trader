@@ -19,7 +19,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     load_dotenv = None
 
-_REPO_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+_REPO_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 _BUY_OPTION_BID_MULTIPLIER = 1.00
 _OPTION_CONTRACT_MULTIPLIER = 100.0
 _ROBINHOOD_OPTION_API_ATTEMPTS = 3
