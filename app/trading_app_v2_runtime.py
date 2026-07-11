@@ -1258,7 +1258,7 @@ def build_robinhood_option_orders(
             if not symbol or quantity <= 0:
                 continue
             target = target_by_symbol.get(symbol)
-            if target is not None and _same_option_contract(position, target) and str(position.get("option_type") or "").lower() == "call":
+            if target is not None and _same_option_contract(position, target):
                 held_target_symbols.add(symbol)
                 continue
             sell_row = {
@@ -1290,7 +1290,8 @@ def build_robinhood_option_orders(
             if not action.startswith("buy_to_open") or not symbol:
                 continue
             target = target_by_symbol.get(symbol)
-            if target is not None and _same_option_contract(order, target) and action == "buy_to_open_call":
+            target_type = str(target.get("option_type") or "call").lower() if target is not None else ""
+            if target is not None and _same_option_contract(order, target) and action == f"buy_to_open_{target_type}":
                 pending_buy_symbols.add(symbol)
                 continue
             action_rows.append(
@@ -1316,14 +1317,15 @@ def build_robinhood_option_orders(
         quantity = int(_number(target.get("quantity", target.get("target_contracts"))))
         if quantity <= 0:
             continue
+        option_type = str(target.get("option_type") or "call").strip().lower()
         buy_row = {
             **target.to_dict(),
             "symbol": symbol,
-            "action": "buy_to_open_call",
+            "action": f"buy_to_open_{option_type}",
             "reason": "New current top-K trading_app_v2 Robinhood option target.",
             "quantity": quantity,
             "qty": quantity,
-            "option_type": "call",
+            "option_type": option_type,
             "order_type": "limit",
             "time_in_force": "gtc",
         }
@@ -1354,6 +1356,7 @@ def build_robinhood_option_orders(
             "sell_to_close_call": 2,
             "sell_to_close_put": 3,
             "buy_to_open_call": 4,
+            "buy_to_open_put": 5,
         }
         actions["_priority"] = actions["action"].map(priority).fillna(99)
         actions = actions.sort_values(["_priority", "combined_score", "symbol"], ascending=[True, False, True], kind="stable").drop(columns=["_priority"])
