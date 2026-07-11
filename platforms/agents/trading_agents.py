@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import sys
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +35,8 @@ class TradingAgentsReviewConfig:
     checkpoint_enabled: bool | None = None
     debug: bool = False
     max_workers: int = 4
+    fast_symbol_date_only: bool = True
+    request_timeout_seconds: float = 30.0
     data_vendors: Mapping[str, str] | None = field(
         default_factory=lambda: {
             "core_stock_apis": "yfinance",
@@ -97,6 +101,8 @@ def review_trade_candidates(
         return _empty_review_frame()
 
     review_config = config or TradingAgentsReviewConfig()
+    if review_config.fast_symbol_date_only:
+        return _review_candidates_fast(frame, as_of_date=as_of_date, config=review_config)
     ensure_tradingagents_importable(review_config.repo_path)
 
     try:
@@ -149,6 +155,91 @@ def review_trade_candidates(
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tradingagents") as executor:
             rows = list(executor.map(review_record, records))
     return pd.DataFrame(rows)
+
+
+def _review_candidates_fast(
+    frame: pd.DataFrame,
+    *,
+    as_of_date: str | None,
+    config: TradingAgentsReviewConfig,
+) -> pd.DataFrame:
+    load_repo_env()
+    records = frame.to_dict(orient="records")
+
+    def review(record: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(record.get("symbol") or "").strip().upper()
+        trade_date = _review_date(record, as_of_date)
+        row = dict(record)
+        row.update({"llm_provider": "deepseek_fast", "llm_review_date": trade_date})
+        try:
+            decision, reason = _deepseek_symbol_date_decision(symbol, trade_date, config=config)
+        except Exception as exc:
+            row.update(
+                {
+                    "llm_decision": "error",
+                    "llm_rating": "",
+                    "llm_reason": f"DeepSeek fast review error: {type(exc).__name__}: {exc}",
+                    "llm_raw_decision": "",
+                }
+            )
+            return row
+        rating = {"buy": "Buy", "sell": "Sell", "hold": "Hold"}[decision]
+        row.update(
+            {
+                "llm_decision": "approved" if decision == "buy" else "rejected",
+                "llm_rating": rating,
+                "llm_reason": reason,
+                "llm_raw_decision": decision.upper(),
+            }
+        )
+        return row
+
+    workers = max(1, min(int(config.max_workers), len(records)))
+    if workers == 1:
+        rows = [review(record) for record in records]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="deepseek-fast") as executor:
+            rows = list(executor.map(review, records))
+    return pd.DataFrame(rows)
+
+
+def _deepseek_symbol_date_decision(
+    symbol: str,
+    trade_date: str,
+    *,
+    config: TradingAgentsReviewConfig,
+) -> tuple[str, str]:
+    api_key = str(os.getenv("DEEPSEEK_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY is missing")
+    payload = {
+        "model": config.quick_think_llm or "deepseek-v4-flash",
+        "temperature": 0,
+        "max_tokens": 300,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Return one trading decision using exactly this format: DECISION: BUY, SELL, or HOLD; REASON: one short sentence.",
+            },
+            {"role": "user", "content": f"Symbol: {symbol}\nAs-of date: {trade_date}"},
+        ],
+    }
+    request = urllib.request.Request(
+        (config.backend_url or "https://api.deepseek.com") .rstrip("/") + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=float(config.request_timeout_seconds)) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    message = dict(body["choices"][0]["message"])
+    content = str(message.get("content") or message.get("reasoning_content") or "").strip()
+    upper = content.upper()
+    decision = next((value for value in ("BUY", "SELL", "HOLD") if f"DECISION: {value}" in upper), "")
+    if not decision:
+        raise ValueError(f"Unparseable DeepSeek decision: {content[:160]!r}")
+    reason = content.split("REASON:", 1)[-1].strip() if "REASON:" in upper else content
+    return decision.lower(), reason
 
 
 def approved_symbols(reviewed: pd.DataFrame) -> set[str]:

@@ -6,7 +6,7 @@ from types import ModuleType
 
 import pandas as pd
 
-from platforms.agents.trading_agents import approved_symbols, review_trade_candidates
+from platforms.agents.trading_agents import TradingAgentsReviewConfig, approved_symbols, review_trade_candidates
 
 
 def test_review_trade_candidates_uses_tradingagents_graph(monkeypatch):
@@ -41,7 +41,8 @@ def test_review_trade_candidates_uses_tradingagents_graph(monkeypatch):
                 {"symbol": "aapl", "score_date": "2026-07-05"},
                 {"symbol": "msft", "score_date": "2026-07-05"},
             ]
-        )
+        ),
+        config=TradingAgentsReviewConfig(fast_symbol_date_only=False, max_workers=1),
     )
 
     assert calls == [("AAPL", "2026-07-05"), ("MSFT", "2026-07-05")]
@@ -69,7 +70,27 @@ def test_review_trade_candidates_marks_unavailable(monkeypatch):
         return real_import_module(name, package=package)
 
     monkeypatch.setattr("platforms.agents.trading_agents.importlib.import_module", fake_import_module)
-    reviewed = review_trade_candidates(pd.DataFrame([{"symbol": "AAPL"}]))
+    reviewed = review_trade_candidates(
+        pd.DataFrame([{"symbol": "AAPL"}]),
+        config=TradingAgentsReviewConfig(fast_symbol_date_only=False),
+    )
 
     assert reviewed.loc[0, "llm_decision"] == "unavailable"
     assert "tradingagents unavailable" in reviewed.loc[0, "llm_reason"]
+
+
+def test_fast_review_sends_only_symbol_and_date_contract(monkeypatch):
+    calls = []
+
+    def fake_decision(symbol, trade_date, *, config):
+        calls.append((symbol, trade_date))
+        return ("sell", "bearish")
+
+    monkeypatch.setattr("platforms.agents.trading_agents._deepseek_symbol_date_decision", fake_decision)
+    reviewed = review_trade_candidates(
+        pd.DataFrame([{"symbol": "AAPL", "score_date": "2026-07-10", "prob_buy": 0.9}]),
+        config=TradingAgentsReviewConfig(max_workers=1),
+    )
+
+    assert calls == [("AAPL", "2026-07-10")]
+    assert reviewed.loc[0, "llm_rating"] == "Sell"
