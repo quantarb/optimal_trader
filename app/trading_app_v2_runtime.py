@@ -600,6 +600,44 @@ def build_score_date_option_candidate_panel(
     return pd.concat(frames, ignore_index=True, sort=False)
 
 
+def select_optionable_leaderboard(
+    leaderboard: pd.DataFrame,
+    *,
+    score_date: str | pd.Timestamp,
+    top_k: int = 20,
+) -> pd.DataFrame:
+    """Select the highest-ranked underlyings with a locally available score-date chain."""
+
+    from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
+
+    selected_rows = []
+    score_ts = pd.Timestamp(score_date).normalize()
+    for row in leaderboard.sort_values("rank", kind="stable").to_dict("records"):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            chain = read_thetadata_eod_option_chain(
+                symbol,
+                start_date=score_ts,
+                end_date=score_ts,
+                require_rich_columns=False,
+            )
+        except Exception:
+            continue
+        if chain is None or chain.empty:
+            continue
+        selected_rows.append(row)
+        if len(selected_rows) >= int(top_k):
+            break
+    out = pd.DataFrame(selected_rows)
+    if not out.empty:
+        out["selected"] = True
+        out["eligible"] = True
+        out["option_rank"] = range(1, len(out) + 1)
+    return out
+
+
 def build_score_date_option_ml_ranking_table(
     option_ranker_dir: Path,
     *,

@@ -545,6 +545,29 @@ def test_score_date_option_ranking_prefers_single_meta_stack(monkeypatch, tmp_pa
     assert result.equals(expected)
 
 
+def test_optionable_leaderboard_backfills_capacity_from_lower_equity_ranks(monkeypatch):
+    leaderboard = pd.DataFrame(
+        [
+            {"symbol": "BAD", "rank": 1},
+            {"symbol": "AAPL", "rank": 2},
+            {"symbol": "MSFT", "rank": 3},
+        ]
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.read_thetadata_eod_option_chain",
+        lambda symbol, **kwargs: pd.DataFrame() if symbol == "BAD" else pd.DataFrame([{"symbol": symbol}]),
+    )
+
+    selected = runtime.select_optionable_leaderboard(
+        leaderboard,
+        score_date="2026-07-10",
+        top_k=2,
+    )
+
+    assert selected["symbol"].tolist() == ["AAPL", "MSFT"]
+    assert selected["option_rank"].tolist() == [1, 2]
+
+
 def test_robinhood_option_orders_reconcile_before_new_entries():
     target_contracts = pd.DataFrame(
         [
