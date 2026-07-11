@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 
 from app import trading_app_v2_runtime as runtime
-from platforms.brokers.alpaca import build_directional_equity_order_plan, build_directional_option_order_plan
+from platforms.brokers.alpaca import (
+    build_directional_equity_order_plan,
+    build_directional_option_order_plan,
+    build_llm_option_order_plan,
+)
 
 
 def test_directional_equity_plan_closes_opposites_retains_hold_and_fills_ranked_capacity():
@@ -87,6 +91,41 @@ def test_directional_option_plan_keeps_exact_ranker_selection_and_caps_candidate
     directions = [{"symbol": f"S{i}", "direction": "long"} for i in range(21)]
     with pytest.raises(ValueError, match="limit is 20"):
         build_directional_option_order_plan(directions, selections)
+
+
+def test_llm_option_plan_reverses_opposites_and_retains_same_type_or_hold():
+    plan = build_llm_option_order_plan(
+        [
+            {"symbol": "AAPL", "decision": "buy"},
+            {"symbol": "MSFT", "decision": "sell"},
+            {"symbol": "NVDA", "decision": "hold"},
+        ],
+        [
+            {"underlying_symbol": "AAPL", "contract_symbol": "AAPL_C_NEW", "option_type": "call"},
+            {"underlying_symbol": "MSFT", "contract_symbol": "MSFT_P_NEW", "option_type": "put"},
+        ],
+        [
+            {"underlying_symbol": "AAPL", "symbol": "AAPL_P_OLD", "option_type": "put", "qty": 2},
+            {"underlying_symbol": "MSFT", "symbol": "MSFT_P_OLD", "option_type": "put", "qty": 1},
+            {"underlying_symbol": "NVDA", "symbol": "NVDA_C_OLD", "option_type": "call", "qty": 1},
+        ],
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [
+        ("AAPL_P_OLD", "sell_to_close_put"),
+        ("AAPL_C_NEW", "buy_to_open_call"),
+    ]
+
+
+def test_llm_option_plan_hold_opens_nothing_and_caps_decision_candidates():
+    assert build_llm_option_order_plan(
+        [{"symbol": "AAPL", "decision": "hold"}],
+        [],
+    ) == []
+
+    decisions = [{"symbol": f"S{i}", "decision": "long"} for i in range(21)]
+    with pytest.raises(ValueError, match="limit is 20"):
+        build_llm_option_order_plan(decisions, [])
 
 
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):

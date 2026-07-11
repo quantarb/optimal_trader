@@ -13,6 +13,110 @@ PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 DATA_BASE_URL = "https://data.alpaca.markets"
 
 
+def build_llm_option_order_plan(
+    decisions: Sequence[Mapping[str, Any]],
+    selected_contracts: Sequence[Mapping[str, Any]],
+    current_positions: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    max_underlyings: int = 20,
+) -> list[dict[str, Any]]:
+    """Reconcile TradingAgents decisions using preselected ranker contracts."""
+    if not 1 <= int(max_underlyings) <= 20:
+        raise ValueError("max_underlyings must be between 1 and 20")
+
+    normalized_decisions: dict[str, str] = {}
+    aliases = {"buy": "long", "long": "long", "sell": "short", "short": "short", "hold": "hold"}
+    for row in decisions:
+        underlying = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
+        raw_decision = str(row.get("decision") or row.get("rating") or row.get("direction") or "").strip().lower()
+        if not underlying or underlying in normalized_decisions:
+            continue
+        if raw_decision not in aliases:
+            raise ValueError(f"Invalid TradingAgents decision for {underlying}: {raw_decision!r}")
+        normalized_decisions[underlying] = aliases[raw_decision]
+    if len(normalized_decisions) > int(max_underlyings):
+        raise ValueError(f"TradingAgents decisions contain {len(normalized_decisions)} unique underlyings; limit is {max_underlyings}.")
+
+    selections: dict[tuple[str, str], dict[str, Any]] = {}
+    selected_underlyings: set[str] = set()
+    for raw in selected_contracts:
+        row = dict(raw)
+        underlying = str(row.get("underlying_symbol") or row.get("symbol") or "").strip().upper()
+        contract_symbol = str(row.get("contract_symbol") or row.get("option_symbol") or "").strip().upper()
+        option_type = str(row.get("option_type") or row.get("type") or "").strip().lower()
+        if not underlying or not contract_symbol or option_type not in {"call", "put"}:
+            raise ValueError("Each selected contract requires an underlying, contract symbol, and call/put type.")
+        if (underlying, option_type) in selections:
+            raise ValueError(f"Multiple selected {option_type} contracts for {underlying}")
+        selections[(underlying, option_type)] = {
+            **row,
+            "underlying_symbol": underlying,
+            "contract_symbol": contract_symbol,
+            "option_type": option_type,
+        }
+        selected_underlyings.add(underlying)
+    if len(selected_underlyings) > int(max_underlyings):
+        raise ValueError(f"Option selections contain {len(selected_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    unknown = sorted(selected_underlyings.difference(normalized_decisions))
+    if unknown:
+        raise ValueError(f"Missing TradingAgents decisions for selected contracts: {unknown}")
+
+    positions: list[dict[str, Any]] = []
+    held_underlyings: set[str] = set()
+    for raw in current_positions or []:
+        row = dict(raw)
+        underlying = str(row.get("underlying_symbol") or "").strip().upper()
+        contract_symbol = str(row.get("contract_symbol") or row.get("option_symbol") or row.get("symbol") or "").strip().upper()
+        option_type = str(row.get("option_type") or row.get("type") or "").strip().lower()
+        quantity = float(row.get("qty") or row.get("quantity") or 0)
+        if not underlying or not contract_symbol or option_type not in {"call", "put"} or quantity == 0:
+            raise ValueError("Each current option position requires an underlying, contract symbol, call/put type, and quantity.")
+        positions.append({**row, "underlying_symbol": underlying, "contract_symbol": contract_symbol, "option_type": option_type, "qty": quantity})
+        held_underlyings.add(underlying)
+    if len(held_underlyings) > int(max_underlyings):
+        raise ValueError(f"Current LLM option account has {len(held_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    missing = sorted(held_underlyings.difference(normalized_decisions))
+    if missing:
+        raise ValueError(f"Missing TradingAgents decisions for current option positions: {missing}")
+
+    retained: set[tuple[str, str]] = set()
+    orders: list[dict[str, Any]] = []
+    for position in positions:
+        underlying = position["underlying_symbol"]
+        decision = normalized_decisions[underlying]
+        desired_type = "call" if decision == "long" else "put" if decision == "short" else None
+        if decision == "hold" or position["option_type"] == desired_type:
+            retained.add((underlying, position["option_type"]))
+            continue
+        orders.append({
+            "symbol": position["contract_symbol"],
+            "underlying_symbol": underlying,
+            "option_type": position["option_type"],
+            "action": f"sell_to_close_{position['option_type']}",
+            "side": "sell",
+            "qty": abs(position["qty"]),
+        })
+
+    for underlying, decision in normalized_decisions.items():
+        if decision == "hold":
+            continue
+        option_type = "call" if decision == "long" else "put"
+        if (underlying, option_type) in retained:
+            continue
+        selected = selections.get((underlying, option_type))
+        if selected is None:
+            raise ValueError(f"Missing selected {option_type} contract for {underlying} {decision} decision")
+        orders.append({
+            "symbol": selected["contract_symbol"],
+            "underlying_symbol": underlying,
+            "option_type": option_type,
+            "action": f"buy_to_open_{option_type}",
+            "side": "buy",
+            "qty": int(selected.get("qty") or 1),
+        })
+    return orders
+
+
 def build_directional_option_order_plan(
     ranked_directions: Sequence[Mapping[str, Any]],
     selected_contracts: Sequence[Mapping[str, Any]],
