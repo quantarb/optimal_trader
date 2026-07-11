@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -19,7 +20,7 @@ _REPO_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 @dataclass(frozen=True)
 class TradingAgentsReviewConfig:
     repo_path: Path | None = None
-    selected_analysts: tuple[str, ...] = ("market", "social", "news", "fundamentals")
+    selected_analysts: tuple[str, ...] = ("market",)
     asset_type: str = "stock"
     llm_provider: str | None = "deepseek"
     deep_think_llm: str | None = "deepseek-v4-flash"
@@ -31,6 +32,7 @@ class TradingAgentsReviewConfig:
     max_risk_discuss_rounds: int | None = 1
     checkpoint_enabled: bool | None = None
     debug: bool = False
+    max_workers: int = 4
     data_vendors: Mapping[str, str] | None = field(
         default_factory=lambda: {
             "core_stock_apis": "yfinance",
@@ -105,14 +107,12 @@ def review_trade_candidates(
 
     graph_cls = getattr(graph_module, "TradingAgentsGraph")
     agent_config = _build_agent_config(getattr(config_module, "DEFAULT_CONFIG", {}) or {}, review_config)
-    graph = graph_cls(
-        selected_analysts=list(review_config.selected_analysts),
-        debug=bool(review_config.debug),
-        config=agent_config,
-    )
-
-    rows: list[dict[str, Any]] = []
-    for record in frame.to_dict(orient="records"):
+    def review_record(record: dict[str, Any]) -> dict[str, Any]:
+        graph = graph_cls(
+            selected_analysts=list(review_config.selected_analysts),
+            debug=bool(review_config.debug),
+            config=dict(agent_config),
+        )
         symbol = str(record.get("symbol") or "").strip().upper()
         trade_date = _review_date(record, as_of_date)
         row = dict(record)
@@ -139,7 +139,15 @@ def review_trade_candidates(
                     "llm_raw_decision": _raw_final_decision(final_state),
                 }
             )
-        rows.append(row)
+        return row
+
+    records = frame.to_dict(orient="records")
+    worker_count = max(1, min(int(review_config.max_workers), len(records)))
+    if worker_count == 1:
+        rows = [review_record(record) for record in records]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tradingagents") as executor:
+            rows = list(executor.map(review_record, records))
     return pd.DataFrame(rows)
 
 
