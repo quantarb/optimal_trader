@@ -13,6 +13,95 @@ PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 DATA_BASE_URL = "https://data.alpaca.markets"
 
 
+def build_directional_equity_order_plan(
+    ranked_directions: Sequence[Mapping[str, Any]],
+    latest_prices: Mapping[str, float],
+    current_positions: Mapping[str, float] | None = None,
+    *,
+    portfolio_value: float,
+    max_positions: int = 20,
+    gross_exposure: float = 0.95,
+) -> list[dict[str, Any]]:
+    """Reconcile ranked long/short/hold signals without exceeding account capacity."""
+    if portfolio_value <= 0:
+        raise ValueError("portfolio_value must be positive")
+    if not 0 < gross_exposure <= 1:
+        raise ValueError("gross_exposure must be in (0, 1]")
+    if not 1 <= int(max_positions) <= 20:
+        raise ValueError("max_positions must be between 1 and 20")
+
+    signals: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for row in ranked_directions:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        direction = str(row.get("direction") or row.get("meta_stack_direction") or "").strip().lower()
+        if not symbol or symbol in seen:
+            continue
+        if direction not in {"long", "short", "hold"}:
+            raise ValueError(f"Invalid meta_stack direction for {symbol}: {direction!r}")
+        signals.append((symbol, direction))
+        seen.add(symbol)
+
+    positions = {
+        str(symbol).strip().upper(): float(quantity)
+        for symbol, quantity in dict(current_positions or {}).items()
+        if str(symbol).strip() and float(quantity) != 0
+    }
+    if len(positions) > int(max_positions):
+        raise ValueError(f"Current account has {len(positions)} unique positions; limit is {max_positions}.")
+    missing = sorted(set(positions).difference(seen))
+    if missing:
+        raise ValueError(f"Missing meta_stack directions for current positions: {missing}")
+
+    direction_by_symbol = dict(signals)
+    retained = {
+        symbol
+        for symbol, quantity in positions.items()
+        if direction_by_symbol[symbol] == "hold"
+        or (direction_by_symbol[symbol] == "long" and quantity > 0)
+        or (direction_by_symbol[symbol] == "short" and quantity < 0)
+    }
+    candidates = [(symbol, direction) for symbol, direction in signals if direction != "hold" and symbol not in retained]
+    selected = candidates[: max(0, int(max_positions) - len(retained))]
+
+    orders: list[dict[str, Any]] = []
+    selected_symbols = {symbol for symbol, _ in selected}
+    for symbol, quantity in positions.items():
+        if symbol in retained:
+            continue
+        orders.append(
+            {
+                "symbol": symbol,
+                "action": "close_opposite_signal" if symbol in selected_symbols else "close_for_capacity",
+                "side": "sell" if quantity > 0 else "buy",
+                "qty": int(abs(quantity)),
+                "order_type": "market",
+                "time_in_force": "day",
+            }
+        )
+
+    target_count = len(retained) + len(selected)
+    dollars_per_position = float(portfolio_value) * float(gross_exposure) / target_count if target_count else 0.0
+    for symbol, direction in selected:
+        price = float(latest_prices.get(symbol, 0.0) or 0.0)
+        if price <= 0:
+            raise ValueError(f"Missing positive latest price for {symbol}")
+        quantity = int(dollars_per_position // price)
+        if quantity <= 0:
+            continue
+        orders.append(
+            {
+                "symbol": symbol,
+                "action": f"open_{direction}",
+                "side": "buy" if direction == "long" else "sell",
+                "qty": quantity,
+                "order_type": "market",
+                "time_in_force": "day",
+            }
+        )
+    return orders
+
+
 def build_equal_weight_order_plan(
     target_symbols: Sequence[str],
     latest_prices: Mapping[str, float],

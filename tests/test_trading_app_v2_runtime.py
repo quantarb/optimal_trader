@@ -6,6 +6,44 @@ import pandas as pd
 import pytest
 
 from app import trading_app_v2_runtime as runtime
+from platforms.brokers.alpaca import build_directional_equity_order_plan
+
+
+def test_directional_equity_plan_closes_opposites_retains_hold_and_fills_ranked_capacity():
+    plan = build_directional_equity_order_plan(
+        [
+            {"symbol": "AAPL", "meta_stack_direction": "short"},
+            {"symbol": "MSFT", "meta_stack_direction": "long"},
+            {"symbol": "NVDA", "meta_stack_direction": "hold"},
+            {"symbol": "TSLA", "meta_stack_direction": "long"},
+            {"symbol": "AMZN", "meta_stack_direction": "short"},
+        ],
+        {"AAPL": 100, "MSFT": 200, "TSLA": 250, "AMZN": 200},
+        {"AAPL": 3, "MSFT": -2, "NVDA": 4},
+        portfolio_value=4_000,
+        gross_exposure=1.0,
+        max_positions=4,
+    )
+
+    assert [(row["symbol"], row["action"], row["side"]) for row in plan] == [
+        ("AAPL", "close_opposite_signal", "sell"),
+        ("MSFT", "close_opposite_signal", "buy"),
+        ("AAPL", "open_short", "sell"),
+        ("MSFT", "open_long", "buy"),
+        ("TSLA", "open_long", "buy"),
+    ]
+    assert "NVDA" not in {row["symbol"] for row in plan}
+    assert "AMZN" not in {row["symbol"] for row in plan}
+
+
+def test_directional_equity_plan_fails_closed_without_signal_for_a_held_symbol():
+    with pytest.raises(ValueError, match="Missing meta_stack directions"):
+        build_directional_equity_order_plan(
+            [{"symbol": "AAPL", "direction": "long"}],
+            {"AAPL": 100},
+            {"AAPL": 1, "LEGACY": 1},
+            portfolio_value=1_000,
+        )
 
 
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
