@@ -176,10 +176,15 @@ def build_latest_equity_leaderboard(
         ["confidence", "best_family_score"], ascending=[False, False], kind="stable"
     ).reset_index(drop=True)
     latest_by_symbol["rank"] = latest_by_symbol.index + 1
-    latest_by_symbol["selected"] = latest_by_symbol["rank"].le(int(top_k)) & latest_by_symbol["confidence"].ge(float(min_long_score))
     price_map = latest_prices_from_quant_warehouse(latest_by_symbol["symbol"], provider=price_provider)
     latest_by_symbol["close"] = latest_by_symbol["symbol"].map(price_map)
-    latest_by_symbol["eligible"] = latest_by_symbol["selected"] & latest_by_symbol["close"].gt(0)
+    latest_by_symbol["eligible"] = latest_by_symbol["close"].gt(0) & latest_by_symbol["confidence"].ge(float(min_long_score))
+    latest_by_symbol["capacity_rank"] = pd.NA
+    eligible_index = latest_by_symbol.index[latest_by_symbol["eligible"]]
+    latest_by_symbol.loc[eligible_index, "capacity_rank"] = range(1, len(eligible_index) + 1)
+    latest_by_symbol["selected"] = latest_by_symbol["eligible"] & pd.to_numeric(
+        latest_by_symbol["capacity_rank"], errors="coerce"
+    ).le(int(top_k))
     return latest_by_symbol
 
 
@@ -927,14 +932,17 @@ def build_alpaca_equity_orders(
         for row in client.get_positions()
         if str(row.get("asset_class") or "us_equity").lower() in {"us_equity", "equity", ""}
     }
-    directions = leaderboard[["symbol", "direction"]].to_dict(orient="records")
+    eligible_rows = leaderboard.loc[
+        leaderboard.get("eligible", pd.Series(True, index=leaderboard.index)).astype(bool)
+    ]
+    directions = eligible_rows[["symbol", "direction"]].to_dict(orient="records")
     scored_symbols = {str(row["symbol"]).strip().upper() for row in directions}
     directions.extend(
         {"symbol": symbol, "direction": "exit"}
         for symbol in positions
         if symbol not in scored_symbols
     )
-    prices = dict(zip(leaderboard["symbol"].astype(str).str.upper(), pd.to_numeric(leaderboard["close"], errors="coerce")))
+    prices = dict(zip(eligible_rows["symbol"].astype(str).str.upper(), pd.to_numeric(eligible_rows["close"], errors="coerce")))
     orders = build_directional_equity_order_plan(
         directions,
         prices,
