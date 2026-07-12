@@ -31,15 +31,6 @@ def test_review_trade_candidates_uses_isolated_worker(monkeypatch):
     monkeypatch.setenv("ML_ALPACA_SECRET_KEY", "must-not-leak")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "worker-needs-this")
     monkeypatch.setattr("platforms.agents.trading_agents.subprocess.run", fake_run)
-    monkeypatch.setattr(
-        "platforms.agents.trading_agents._agent_evidence",
-        lambda symbol, date, candidate: {
-            "symbol": symbol,
-            "as_of_date": date,
-            "sufficient": True,
-            "price_summary": {"close": 100},
-        },
-    )
 
     reviewed = review_trade_candidates(
         pd.DataFrame(
@@ -57,7 +48,7 @@ def test_review_trade_candidates_uses_isolated_worker(monkeypatch):
 
     assert calls[0][0] == ["worker-python"]
     assert [row["symbol"] for row in calls[0][1]["candidates"]] == ["AAPL", "MSFT"]
-    assert all(row["evidence"]["sufficient"] for row in calls[0][1]["candidates"])
+    assert all("evidence" not in row for row in calls[0][1]["candidates"])
     assert "ML_ALPACA_SECRET_KEY" not in calls[0][2]
     assert "DEEPSEEK_API_KEY" not in calls[0][2]
     assert calls[0][2]["TRADINGAGENTS_ENV_FILE"].endswith("TradingAgents/.env")
@@ -71,10 +62,6 @@ def test_review_trade_candidates_worker_failure_is_hold(monkeypatch):
         raise TimeoutError("worker timed out")
 
     monkeypatch.setattr("platforms.agents.trading_agents.subprocess.run", fail)
-    monkeypatch.setattr(
-        "platforms.agents.trading_agents._agent_evidence",
-        lambda *args: {"sufficient": True, "price_summary": {"close": 100}},
-    )
     reviewed = review_trade_candidates(
         pd.DataFrame([{"symbol": "AAPL"}]),
         config=TradingAgentsReviewConfig(fast_symbol_date_only=False),

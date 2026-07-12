@@ -24,7 +24,7 @@ class TradingAgentsReviewConfig:
     worker_command: tuple[str, ...] | None = None
     worker_env_file: Path | None = None
     worker_timeout_seconds: float = 900.0
-    selected_analysts: tuple[str, ...] = ("market",)
+    selected_analysts: tuple[str, ...] = ("market", "fundamentals", "news", "social")
     asset_type: str = "stock"
     llm_provider: str | None = "deepseek"
     deep_think_llm: str | None = "deepseek-v4-flash"
@@ -109,7 +109,7 @@ def _review_candidates_worker(
         "candidates": [
             {
                 "symbol": symbol,
-                "evidence": _agent_evidence(symbol, trade_date, records_by_symbol[symbol]),
+                "strategy_context": _strategy_context(records_by_symbol[symbol]),
             }
             for symbol in symbols
         ],
@@ -176,24 +176,7 @@ def _review_candidates_worker(
     return pd.DataFrame(rows)
 
 
-def _agent_evidence(
-    symbol: str,
-    trade_date: str,
-    candidate: Mapping[str, Any],
-) -> dict[str, Any]:
-    try:
-        from quant_warehouse.export.agent_evidence import build_agent_evidence
-        from quant_warehouse.warehouse.api import Warehouse
-
-        packet = build_agent_evidence(Warehouse(), symbol, trade_date)
-    except Exception as exc:
-        return {
-            "symbol": symbol,
-            "as_of_date": trade_date,
-            "sufficient": False,
-            "missing": ["prices"],
-            "evidence_error": f"{type(exc).__name__}: {exc}",
-        }
+def _strategy_context(candidate: Mapping[str, Any]) -> dict[str, Any]:
     strategy_context: dict[str, Any] = {}
     for key, value in candidate.items():
         if key == "symbol" or isinstance(value, (dict, list, tuple, set)):
@@ -204,8 +187,7 @@ def _agent_evidence(
             strategy_context[str(key)] = value.isoformat()
         elif isinstance(value, (str, int, float, bool)):
             strategy_context[str(key)] = value
-    packet["strategy_context"] = strategy_context
-    return packet
+    return strategy_context
 
 
 def _validated_worker_decisions(
