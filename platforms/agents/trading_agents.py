@@ -23,7 +23,7 @@ class TradingAgentsReviewConfig:
     conda_env: str = "tradingagents"
     worker_command: tuple[str, ...] | None = None
     worker_env_file: Path | None = None
-    worker_timeout_seconds: float = 900.0
+    worker_timeout_seconds: float = 2_700.0
     live_social_enabled: bool = True
     selected_analysts: tuple[str, ...] = ("market", "fundamentals", "news", "social")
     asset_type: str = "stock"
@@ -37,8 +37,8 @@ class TradingAgentsReviewConfig:
     max_risk_discuss_rounds: int | None = 1
     checkpoint_enabled: bool | None = None
     debug: bool = False
-    max_workers: int = 4
-    fast_symbol_date_only: bool = True
+    max_workers: int = 8
+    fast_symbol_date_only: bool = False
     request_timeout_seconds: float = 30.0
     data_vendors: Mapping[str, str] | None = field(
         default_factory=lambda: {

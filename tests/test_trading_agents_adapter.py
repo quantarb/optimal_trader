@@ -82,7 +82,7 @@ def test_fast_review_sends_only_symbol_and_date_contract(monkeypatch):
     monkeypatch.setattr("platforms.agents.trading_agents._deepseek_symbol_date_decision", fake_decision)
     reviewed = review_trade_candidates(
         pd.DataFrame([{"symbol": "AAPL", "score_date": "2026-07-10", "prob_buy": 0.9}]),
-        config=TradingAgentsReviewConfig(max_workers=1),
+        config=TradingAgentsReviewConfig(fast_symbol_date_only=True, max_workers=1),
     )
 
     assert calls == [("AAPL", "2026-07-10")]

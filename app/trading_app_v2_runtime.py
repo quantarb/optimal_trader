@@ -1624,7 +1624,15 @@ def build_llm_ranked_option_orders(
     candidates = leaderboard.head(int(top_k)).copy()
     reviewed = review_trade_candidates(candidates, as_of_date=as_of_date, config=trading_agents_config)
     rating = reviewed.get("llm_rating", pd.Series("Hold", index=reviewed.index)).astype(str).str.lower()
-    reviewed["decision"] = rating.map({"buy": "buy", "sell": "sell", "hold": "hold"}).fillna("hold")
+    reviewed["decision"] = rating.map(
+        {
+            "buy": "buy",
+            "overweight": "buy",
+            "sell": "sell",
+            "underweight": "sell",
+            "hold": "hold",
+        }
+    ).fillna("hold")
     orders = build_ranked_alpaca_option_orders(
         option_rankings=option_rankings,
         decisions=reviewed[["symbol", "decision"]],

@@ -128,6 +128,37 @@ def test_llm_option_plan_hold_opens_nothing_and_caps_decision_candidates():
         build_llm_option_order_plan(decisions, [])
 
 
+def test_llm_ranked_orders_map_relative_ratings_to_direction(monkeypatch):
+    reviewed = pd.DataFrame(
+        {
+            "symbol": ["AAPL", "MSFT", "NVDA"],
+            "llm_rating": ["Overweight", "Underweight", "Hold"],
+        }
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "platforms.agents.trading_agents.review_trade_candidates",
+        lambda *args, **kwargs: reviewed.copy(),
+    )
+
+    def fake_build(**kwargs):
+        captured["decisions"] = kwargs["decisions"].copy()
+        return pd.DataFrame()
+
+    monkeypatch.setattr(runtime, "build_ranked_alpaca_option_orders", fake_build)
+    runtime.build_llm_ranked_option_orders(
+        leaderboard=reviewed,
+        option_rankings=pd.DataFrame({"symbol": ["AAPL"]}),
+        account_prefix="LLM",
+    )
+
+    assert captured["decisions"].set_index("symbol")["decision"].to_dict() == {
+        "AAPL": "buy",
+        "MSFT": "sell",
+        "NVDA": "hold",
+    }
+
+
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
     path = tmp_path / "empty.csv"
     pd.DataFrame().to_csv(path, index=False)
