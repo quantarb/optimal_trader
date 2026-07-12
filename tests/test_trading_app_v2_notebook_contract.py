@@ -21,6 +21,8 @@ def test_notebook_trades_only_the_equity_meta_stack():
     assert "build_score_ensemble(" not in source
     assert '"training_prediction_scope": "in_sample_same_oracle_rows"' not in source
     assert 'ta_mode="curated"' in source
+    assert '"100" if MIN_MARKET_CAP >= 1_000_000_000_000 else "250"' in source
+    assert "min_train_rows=MIN_FAMILY_TRAIN_ROWS" in source
 
 
 def test_historical_option_backfill_runs_after_live_artifacts_with_a_daily_bound():
