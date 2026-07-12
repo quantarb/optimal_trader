@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import py_compile
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -550,6 +551,45 @@ def test_score_date_option_ranking_rejects_more_than_twenty_underlyings(tmp_path
             leaderboard=pd.DataFrame(),
             symbols=[f"S{i:02d}" for i in range(21)],
         )
+
+
+def test_score_date_option_candidates_exclude_score_date_expirations(monkeypatch):
+    chain = pd.DataFrame([{"contract_symbol": "placeholder"}])
+    featured = pd.DataFrame(
+        [
+            {
+                "contract_symbol": "AAPL_EXPIRES_TODAY",
+                "snapshot_date": "2026-07-10",
+                "expiration": "2026-07-10",
+                "option_type": "call",
+                "mid": 1.0,
+            },
+            {
+                "contract_symbol": "AAPL_NEXT_SESSION",
+                "snapshot_date": "2026-07-10",
+                "expiration": "2026-07-13",
+                "option_type": "call",
+                "mid": 2.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.read_thetadata_eod_option_chain",
+        lambda *args, **kwargs: chain,
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.feature_engineering.option_features.build_option_contract_features",
+        lambda *args, **kwargs: SimpleNamespace(df=featured),
+    )
+
+    result = runtime.build_score_date_option_candidate_panel(
+        leaderboard=pd.DataFrame(
+            [{"symbol": "AAPL", "score_date": "2026-07-10", "selected": True, "close": 200.0}]
+        ),
+        score_date="2026-07-10",
+    )
+
+    assert result["contract_symbol"].tolist() == ["AAPL_NEXT_SESSION"]
 
 
 def test_score_date_option_ranking_prefers_single_meta_stack(monkeypatch, tmp_path):

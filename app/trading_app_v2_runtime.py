@@ -580,7 +580,9 @@ def build_score_date_option_candidate_panel(
             continue
         featured["snapshot_date"] = pd.to_datetime(featured.get("snapshot_date"), errors="coerce").dt.normalize()
         featured["expiration"] = pd.to_datetime(featured.get("expiration"), errors="coerce").dt.normalize()
-        featured = featured.loc[featured["snapshot_date"].eq(score_ts) & featured["expiration"].ge(score_ts)].copy()
+        # Signals are formed after the score-date close and executed on a later
+        # session, so a contract expiring on the score date is already unusable.
+        featured = featured.loc[featured["snapshot_date"].eq(score_ts) & featured["expiration"].gt(score_ts)].copy()
         if featured.empty:
             continue
         prob_buy = _number(row.get("prob_buy"))
