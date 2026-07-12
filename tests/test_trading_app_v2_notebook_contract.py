@@ -20,6 +20,7 @@ def test_notebook_trades_only_the_equity_meta_stack():
     assert "equity_family_scores=family_scores" in source
     assert "build_score_ensemble(" not in source
     assert '"training_prediction_scope": "in_sample_same_oracle_rows"' not in source
+    assert 'ta_mode="curated"' in source
 
 
 def test_historical_option_backfill_runs_after_live_artifacts_with_a_daily_bound():
