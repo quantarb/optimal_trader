@@ -27,3 +27,13 @@
 - Prefer widely used, actively maintained third-party packages or small forks of proven projects over custom implementations.
 - For trading UI, broker adapters, scheduling, serialization, analytics, model loading, and strategy/reporting utilities, use battle-tested libraries when they fit the live-app boundary.
 - Build from scratch only when no reliable package fits the requirement or the live app needs a thin custom wrapper around a proven dependency; document that reason in the change.
+
+## Scale-Tier Script Policy
+
+- Never create separate scripts, notebooks, or implementations for fixed market-cap tiers such as `$1T`, `$100B`, or `$10B`.
+- Market-cap thresholds, artifact tags, estimator counts, smoke/full behavior, and other scale controls must be command-line or configuration parameters on one canonical workflow.
+- Use the exact same code path at every scale. Run the highest threshold first as a smoke test, then lower the threshold only after the prior run succeeds.
+- Artifact directories may include a caller-supplied tag, but tier names must not be embedded in implementation names or control flow.
+- Remove superseded one-off scale scripts instead of retaining wrappers that can drift from the canonical runner.
+- Curated technical feature families are part of the default equity model contract at every scale. Do not create a technical/non-technical script split or an opt-out that silently removes them.
+- Scripts must call the current public optimized APIs in `quant-warehouse` and `quant-orchestrator`; do not copy notebook cells, private feature builders, model training loops, or full-panel filtering implementations into scripts.
