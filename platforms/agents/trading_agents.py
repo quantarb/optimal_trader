@@ -24,6 +24,7 @@ class TradingAgentsReviewConfig:
     worker_command: tuple[str, ...] | None = None
     worker_env_file: Path | None = None
     worker_timeout_seconds: float = 900.0
+    live_social_enabled: bool = True
     selected_analysts: tuple[str, ...] = ("market", "fundamentals", "news", "social")
     asset_type: str = "stock"
     llm_provider: str | None = "deepseek"
@@ -118,6 +119,7 @@ def _review_candidates_worker(
             "asset_type": config.asset_type,
             "debug": bool(config.debug),
             "max_workers": int(config.max_workers),
+            "live_social_enabled": bool(config.live_social_enabled),
             "agent_config": _build_agent_config({}, config),
         },
     }
@@ -339,6 +341,7 @@ def _build_agent_config(default_config: Mapping[str, Any], review_config: Tradin
         "max_debate_rounds": review_config.max_debate_rounds,
         "max_risk_discuss_rounds": review_config.max_risk_discuss_rounds,
         "checkpoint_enabled": review_config.checkpoint_enabled,
+        "live_social_enabled": review_config.live_social_enabled,
     }
     for key, value in override_map.items():
         if value is not None:
