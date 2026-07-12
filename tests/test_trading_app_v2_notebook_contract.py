@@ -5,10 +5,16 @@ from pathlib import Path
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "trading_app_v2.ipynb"
+OPTION_NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "trading_app_v2_option_ml_ranker.ipynb"
 
 
 def _source() -> str:
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+
+
+def _option_source() -> str:
+    notebook = json.loads(OPTION_NOTEBOOK.read_text(encoding="utf-8"))
     return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
 
 
@@ -43,3 +49,16 @@ def test_notebook_uses_only_requested_ye_k1_through_k3_labels():
     assert 'oracle_trade_k_by_frequency={"YE": tuple(range(1, 4))}' in source
     assert "for k in range(1, 4)" in source
     assert "YE k=1..12" not in source
+
+
+def test_option_notebook_preserves_unified_targets_and_uses_cuda():
+    source = _option_source()
+
+    assert "ORACLE_YE_K = (1, 2, 3)" in source
+    assert "OPTION_MAX_DTE = None" in source
+    assert 'dropna(subset=["trade_id", "entry_date", "rank_y", "symbol"])' in source
+    assert 'dropna(subset=["trade_id", "entry_date", "option_return", "symbol"])' not in source
+    assert "rank_y is the immutable unified target" in source
+    assert '_select_diverse_option_candidates(group, int(train_top_k_by_return))' in source
+    assert 'model_backend="rapids_random_forest"' in source
+    assert '"option_target_contract": OPTION_TARGET_CONTRACT' in source

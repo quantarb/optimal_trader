@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""1T smoke: universe → oracle labels → FE (fundamentals + technicals) → Stage A/B meta-stack.
+"""1T smoke: universe → oracle labels → unified option labels → FE → Stage A/B.
 
-Reuses cached option_candidate_panel_smoke_1t.parquet (skips ThetaData rebuild).
-Writes artifacts under option_family_ranker/option_meta_stack_smoke_1t_tech/.
+ThetaData reads are cache-only. The option panel is rebuilt so stale return-only
+labels cannot leak into the unified behavior-target smoke test.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from time import perf_counter
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 
 def main() -> int:
@@ -77,10 +78,11 @@ def main() -> int:
     # Cell 5: config, then override for 1T smoke
     exec_cell(5, label="config")
     g["MIN_MARKET_CAP"] = 1_000_000_000_000  # $1T
+    g["ORACLE_YE_K"] = (1, 2, 3)
     g["RUN_UNIVERSE_SCREEN"] = True
     g["RUN_ORACLE_TRADE_LABELS"] = True
-    g["RUN_OPTION_COVERAGE"] = False
-    g["RUN_OPTION_LABEL_PANEL"] = False
+    g["RUN_OPTION_COVERAGE"] = True
+    g["RUN_OPTION_LABEL_PANEL"] = True
     g["RUN_EQUITY_FAMILY_MODELS"] = True
     g["RUN_OPTION_META_STACK"] = True
     g["RUN_OPTION_RANKER_TRAINING"] = True
@@ -88,14 +90,22 @@ def main() -> int:
     g["ALL_FEATURE_FAMILIES"] = True
     g["REQUIRE_ALL_REQUESTED_FEATURE_FAMILIES"] = True
     g["N_ESTIMATORS"] = 100  # faster smoke; path still exercises full code
-    g["TRAIN_TOP_K_BY_RETURN"] = 100
+    # No horizon ceiling: early expirations are retained and ranked in the same
+    # label space as contracts with a realized exit return.
+    g["OPTION_MAX_DTE"] = None
+    # Do not recreate rank_y from option_return; that would discard the unified
+    # expiration-closeness ordering.
+    g["TRAIN_TOP_K_BY_RETURN"] = 128
 
-    # Point option panel at cached 1T smoke panel
+    # Rebuild an isolated unified-label panel from the local ThetaData cache.
     paths = g["paths"]
-    smoke_panel = paths.option_artifact_dir / "option_candidate_panel_smoke_1t.parquet"
-    if not smoke_panel.exists():
-        raise FileNotFoundError(f"Missing cached 1T option panel: {smoke_panel}")
+    smoke_panel = paths.option_artifact_dir / "option_candidate_panel_smoke_1t_unified.parquet"
     g["OPTION_PANEL_PATH"] = smoke_panel
+    if smoke_panel.exists():
+        cached_columns = set(pq.ParquetFile(smoke_panel).schema.names)
+        if {"rank_y", "label_basis"}.issubset(cached_columns):
+            g["RUN_OPTION_LABEL_PANEL"] = False
+            g["RUN_OPTION_COVERAGE"] = False
 
     # Isolate artifacts so we don't clobber the previous smoke dir
     meta_dir = paths.option_artifact_dir / "option_meta_stack_smoke_1t_tech"
@@ -155,6 +165,24 @@ def main() -> int:
     if tech.empty:
         raise RuntimeError("No technical families in selected_feature_metadata — FE path failed")
 
+    # Coverage and unified option-label materialization. These cells never
+    # download missing ThetaData; unavailable endpoint pairs are reported/skipped.
+    exec_cell(13, label="option_coverage")
+    exec_cell(15, label="unified_option_labels")
+    option_panel = g["option_candidate_panel"]
+    required = {"rank_y", "label_basis"}
+    missing = required.difference(option_panel.columns)
+    if missing:
+        raise RuntimeError(f"Unified option panel missing columns: {sorted(missing)}")
+    basis_counts = option_panel["label_basis"].value_counts().to_dict()
+    if not basis_counts.get("realized_exit_return"):
+        raise RuntimeError("Unified option panel has no realized-return rows")
+    if not basis_counts.get("expiration_closeness"):
+        raise RuntimeError("Unified option panel has no early-expiration rows")
+    if pd.to_numeric(option_panel["rank_y"], errors="coerce").isna().any():
+        raise RuntimeError("Unified option panel contains missing rank_y values")
+    print({"unified_option_rows": len(option_panel), "label_basis_rows": basis_counts}, flush=True)
+
     # Stage A/B: exec cell 17 but redirect META_DIR / TEMPORAL paths into smoke_tech dir
     src17 = "".join(nb["cells"][17]["source"])
     # Force META_DIR after it is defined
@@ -192,6 +220,7 @@ print({"META_DIR": str(META_DIR), "OPTION_PANEL_PATH": str(OPTION_PANEL_PATH)}, 
         "n_families": int(fam["strategy_source"].nunique()),
         "n_technical_families": int(tech["strategy_source"].nunique()),
         "technical_families": tech["strategy_source"].tolist(),
+        "label_basis_rows": basis_counts,
         "meta_dir": str(meta_dir),
         "summary_exists": summary_path.exists(),
         "selector_exists": selector_path.exists(),
