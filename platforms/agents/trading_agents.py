@@ -99,11 +99,20 @@ def _review_candidates_worker(
     symbols = list(dict.fromkeys(frame["symbol"].astype(str).str.upper()))
     if len(symbols) > 20:
         return _mark_unavailable(frame, ValueError("TradingAgents accepts at most 20 symbols"), trade_date)
+    records_by_symbol = {
+        str(record["symbol"]).upper(): record for record in frame.to_dict(orient="records")
+    }
     request_id = str(uuid.uuid4())
     payload = {
         "request_id": request_id,
         "as_of_date": trade_date,
-        "candidates": [{"symbol": symbol} for symbol in symbols],
+        "candidates": [
+            {
+                "symbol": symbol,
+                "evidence": _agent_evidence(symbol, trade_date, records_by_symbol[symbol]),
+            }
+            for symbol in symbols
+        ],
         "options": {
             "selected_analysts": list(config.selected_analysts),
             "asset_type": config.asset_type,
@@ -165,6 +174,38 @@ def _review_candidates_worker(
             )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _agent_evidence(
+    symbol: str,
+    trade_date: str,
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        from quant_warehouse.export.agent_evidence import build_agent_evidence
+        from quant_warehouse.warehouse.api import Warehouse
+
+        packet = build_agent_evidence(Warehouse(), symbol, trade_date)
+    except Exception as exc:
+        return {
+            "symbol": symbol,
+            "as_of_date": trade_date,
+            "sufficient": False,
+            "missing": ["prices"],
+            "evidence_error": f"{type(exc).__name__}: {exc}",
+        }
+    strategy_context: dict[str, Any] = {}
+    for key, value in candidate.items():
+        if key == "symbol" or isinstance(value, (dict, list, tuple, set)):
+            continue
+        if pd.isna(value):
+            continue
+        if isinstance(value, pd.Timestamp):
+            strategy_context[str(key)] = value.isoformat()
+        elif isinstance(value, (str, int, float, bool)):
+            strategy_context[str(key)] = value
+    packet["strategy_context"] = strategy_context
+    return packet
 
 
 def _validated_worker_decisions(
