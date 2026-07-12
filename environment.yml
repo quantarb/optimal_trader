@@ -15,4 +15,3 @@ dependencies:
       - robin-stocks
       - ib-insync
       - -r requirements-quant-warehouse.txt
-      - -r requirements-tradingagents.txt

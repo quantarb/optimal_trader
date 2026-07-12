@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
 import os
-import sys
+import subprocess
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +20,10 @@ _REPO_DOTENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 @dataclass(frozen=True)
 class TradingAgentsReviewConfig:
-    repo_path: Path | None = None
+    conda_env: str = "tradingagents"
+    worker_command: tuple[str, ...] | None = None
+    worker_env_file: Path | None = None
+    worker_timeout_seconds: float = 900.0
     selected_analysts: tuple[str, ...] = ("market",)
     asset_type: str = "stock"
     llm_provider: str | None = "deepseek"
@@ -47,26 +49,6 @@ class TradingAgentsReviewConfig:
             "prediction_markets": "polymarket",
         }
     )
-
-
-def default_trading_agents_repo(repo_root: Path | None = None) -> Path:
-    root = Path(repo_root or Path.cwd()).resolve()
-    for candidate in (root, *root.parents):
-        sibling = candidate.parent / "TradingAgents"
-        if (sibling / "tradingagents").is_dir():
-            return sibling
-    return root.parent / "TradingAgents"
-
-
-def ensure_tradingagents_importable(repo_path: Path | None = None) -> None:
-    load_repo_env()
-    if "tradingagents" in sys.modules:
-        return
-    if importlib.util.find_spec("tradingagents") is not None:
-        return
-    candidate = Path(repo_path or os.getenv("TRADINGAGENTS_REPO") or default_trading_agents_repo()).expanduser().resolve()
-    if (candidate / "tradingagents").is_dir() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
 
 
 def load_repo_env(path: Path | None = None) -> None:
@@ -103,58 +85,129 @@ def review_trade_candidates(
     review_config = config or TradingAgentsReviewConfig()
     if review_config.fast_symbol_date_only:
         return _review_candidates_fast(frame, as_of_date=as_of_date, config=review_config)
-    ensure_tradingagents_importable(review_config.repo_path)
+    return _review_candidates_worker(frame, as_of_date=as_of_date, config=review_config)
 
-    try:
-        graph_module = importlib.import_module("tradingagents.graph.trading_graph")
-        config_module = importlib.import_module("tradingagents.default_config")
-    except Exception as exc:
-        return _mark_unavailable(frame, exc)
 
-    graph_cls = getattr(graph_module, "TradingAgentsGraph")
-    agent_config = _build_agent_config(getattr(config_module, "DEFAULT_CONFIG", {}) or {}, review_config)
-    def review_record(record: dict[str, Any]) -> dict[str, Any]:
-        graph = graph_cls(
-            selected_analysts=list(review_config.selected_analysts),
-            debug=bool(review_config.debug),
-            config=dict(agent_config),
+def _review_candidates_worker(
+    frame: pd.DataFrame,
+    *,
+    as_of_date: str | None,
+    config: TradingAgentsReviewConfig,
+) -> pd.DataFrame:
+    load_repo_env()
+    trade_date = _review_date(frame.iloc[0].to_dict(), as_of_date)
+    symbols = list(dict.fromkeys(frame["symbol"].astype(str).str.upper()))
+    if len(symbols) > 20:
+        return _mark_unavailable(frame, ValueError("TradingAgents accepts at most 20 symbols"), trade_date)
+    request_id = str(uuid.uuid4())
+    payload = {
+        "request_id": request_id,
+        "as_of_date": trade_date,
+        "candidates": [{"symbol": symbol} for symbol in symbols],
+        "options": {
+            "selected_analysts": list(config.selected_analysts),
+            "asset_type": config.asset_type,
+            "debug": bool(config.debug),
+            "max_workers": int(config.max_workers),
+            "agent_config": _build_agent_config({}, config),
+        },
+    }
+    command = list(
+        config.worker_command
+        or (
+            "conda",
+            "run",
+            "--no-capture-output",
+            "-n",
+            config.conda_env,
+            "python",
+            "-m",
+            "tradingagents.batch_worker",
         )
-        symbol = str(record.get("symbol") or "").strip().upper()
-        trade_date = _review_date(record, as_of_date)
-        row = dict(record)
-        row.update({"llm_provider": "tradingagents", "llm_review_date": trade_date})
-        try:
-            final_state, rating = _propagate(graph, symbol, trade_date, asset_type=review_config.asset_type)
-        except Exception as exc:
-            row.update(
-                {
-                    "llm_decision": "error",
-                    "llm_rating": "",
-                    "llm_reason": f"tradingagents error: {type(exc).__name__}: {exc}",
-                    "llm_raw_decision": "",
-                }
-            )
-        else:
-            normalized_rating = str(rating or "").strip()
-            decision = "approved" if normalized_rating.lower() in APPROVE_RATINGS else "rejected"
-            row.update(
-                {
-                    "llm_decision": decision,
-                    "llm_rating": normalized_rating,
-                    "llm_reason": f"TradingAgents rating: {normalized_rating or 'unknown'}",
-                    "llm_raw_decision": _raw_final_decision(final_state),
-                }
-            )
-        return row
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            timeout=float(config.worker_timeout_seconds),
+            check=False,
+            env=_worker_environment(config.worker_env_file),
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"worker exited {completed.returncode}: {detail[-500:]}")
+        response = json.loads(completed.stdout)
+        if response.get("request_id") != request_id or not isinstance(response.get("decisions"), list):
+            raise ValueError("worker response has an invalid request ID or decisions list")
+        decisions = _validated_worker_decisions(response["decisions"], expected_symbols=set(symbols))
+    except Exception as exc:
+        return _mark_unavailable(frame, exc, trade_date)
 
-    records = frame.to_dict(orient="records")
-    worker_count = max(1, min(int(review_config.max_workers), len(records)))
-    if worker_count == 1:
-        rows = [review_record(record) for record in records]
-    else:
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tradingagents") as executor:
-            rows = list(executor.map(review_record, records))
+    rows: list[dict[str, Any]] = []
+    for record in frame.to_dict(orient="records"):
+        symbol = str(record["symbol"]).upper()
+        result = decisions.get(symbol)
+        row = dict(record)
+        row.update({"llm_provider": "tradingagents_worker", "llm_review_date": trade_date})
+        if result is None:
+            row.update(_hold_fields("TradingAgents worker omitted this symbol"))
+        else:
+            decision = result["decision"]
+            row.update(
+                {
+                    "llm_decision": "approved" if decision == "BUY" else "rejected",
+                    "llm_rating": result.get("rating") or decision.title(),
+                    "llm_reason": result.get("reason") or "TradingAgents worker decision",
+                    "llm_raw_decision": result.get("raw_decision") or decision,
+                }
+            )
+        rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _validated_worker_decisions(
+    rows: Sequence[Mapping[str, Any]], *, expected_symbols: set[str]
+) -> dict[str, dict[str, str]]:
+    decisions: dict[str, dict[str, str]] = {}
+    for value in rows:
+        symbol = str(value.get("symbol") or "").strip().upper()
+        decision = str(value.get("decision") or "").strip().upper()
+        if symbol not in expected_symbols or symbol in decisions:
+            raise ValueError(f"worker returned an unknown or duplicate symbol: {symbol!r}")
+        if decision not in {"BUY", "SELL", "HOLD"}:
+            raise ValueError(f"worker returned an invalid decision for {symbol}: {decision!r}")
+        decisions[symbol] = {key: str(value.get(key) or "") for key in ("decision", "rating", "reason", "raw_decision")}
+    return decisions
+
+
+def _worker_environment(env_file: Path | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    for key in list(env):
+        upper = key.upper()
+        if any(token in upper for token in ("ALPACA", "ROBINHOOD", "BROKER")) or upper.startswith(
+            ("APCA_", "IBKR_", "IB_")
+        ):
+            env.pop(key, None)
+    env.pop("DEEPSEEK_API_KEY", None)
+    configured = env_file or os.getenv("TRADINGAGENTS_ENV_FILE")
+    if configured:
+        env["TRADINGAGENTS_ENV_FILE"] = str(Path(configured).expanduser().resolve())
+    else:
+        repo_root = Path(__file__).resolve().parents[2]
+        sibling_env = repo_root.parent / "TradingAgents" / ".env"
+        env["TRADINGAGENTS_ENV_FILE"] = str(sibling_env.resolve())
+    return env
+
+
+def _hold_fields(reason: str) -> dict[str, str]:
+    return {
+        "llm_decision": "rejected",
+        "llm_rating": "Hold",
+        "llm_reason": reason,
+        "llm_raw_decision": "HOLD",
+    }
 
 
 def _review_candidates_fast(
@@ -274,15 +327,6 @@ def _build_agent_config(default_config: Mapping[str, Any], review_config: Tradin
     return config
 
 
-def _propagate(graph: Any, symbol: str, trade_date: str, *, asset_type: str) -> tuple[Any, str]:
-    try:
-        return graph.propagate(symbol, trade_date, asset_type=asset_type)
-    except TypeError as exc:
-        if "asset_type" not in str(exc):
-            raise
-        return graph.propagate(symbol, trade_date)
-
-
 def _candidate_frame(candidates: pd.DataFrame | Sequence[Mapping[str, Any]]) -> pd.DataFrame:
     frame = candidates.copy() if isinstance(candidates, pd.DataFrame) else pd.DataFrame(list(candidates))
     if frame.empty:
@@ -306,19 +350,14 @@ def _review_date(record: Mapping[str, Any], as_of_date: str | None) -> str:
     return str(pd.Timestamp.today().date())
 
 
-def _raw_final_decision(final_state: Any) -> str:
-    if isinstance(final_state, Mapping):
-        return str(final_state.get("final_trade_decision") or "")
-    return str(final_state or "")
-
-
-def _mark_unavailable(frame: pd.DataFrame, exc: Exception) -> pd.DataFrame:
+def _mark_unavailable(frame: pd.DataFrame, exc: Exception, trade_date: str = "") -> pd.DataFrame:
     out = frame.copy()
-    out["llm_provider"] = "tradingagents"
-    out["llm_decision"] = "unavailable"
-    out["llm_rating"] = ""
+    out["llm_provider"] = "tradingagents_worker"
+    out["llm_decision"] = "rejected"
+    out["llm_rating"] = "Hold"
     out["llm_reason"] = f"tradingagents unavailable: {type(exc).__name__}: {exc}"
-    out["llm_raw_decision"] = ""
+    out["llm_raw_decision"] = "HOLD"
+    out["llm_review_date"] = trade_date
     return out
 
 
