@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import py_compile
 from types import SimpleNamespace
 
@@ -812,3 +813,28 @@ def test_submit_alpaca_option_orders_uses_option_quantity_limit_without_side_eff
         runtime.submit_alpaca_orders(client, plan, asset_type="option")
 
     assert client.submitted == []
+def test_resolve_option_training_panel_selects_exact_unified_contract(tmp_path):
+    compatible = tmp_path / "verified"
+    compatible.mkdir()
+    panel = compatible / "option_candidate_panel_unified.parquet"
+    pd.DataFrame(
+        {"rank_y": [1.0], "label_basis": ["realized_exit_return"]}
+    ).to_parquet(panel, index=False)
+    (compatible / "run_summary.json").write_text(
+        json.dumps({"status": "ok", "min_market_cap": 10_000_000_000}),
+        encoding="utf-8",
+    )
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    pd.DataFrame({"rank_y": [1.0]}).to_parquet(
+        legacy / "option_candidate_panel_unified.parquet", index=False
+    )
+    (legacy / "run_summary.json").write_text(
+        json.dumps({"status": "ok", "min_market_cap": 10_000_000_000}),
+        encoding="utf-8",
+    )
+
+    assert runtime.resolve_option_training_panel(
+        tmp_path, min_market_cap=10_000_000_000
+    ) == panel

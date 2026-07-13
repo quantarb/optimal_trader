@@ -114,6 +114,41 @@ def load_equity_artifacts(artifact_dir: Path) -> dict[str, pd.DataFrame]:
     }
 
 
+def resolve_option_training_panel(artifact_dir: Path, *, min_market_cap: int) -> Path:
+    """Return the newest successful unified option panel for an exact universe."""
+
+    root = Path(artifact_dir).expanduser().resolve()
+    matches: list[tuple[int, Path]] = []
+    for summary_path in root.glob("*/run_summary.json"):
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if summary.get("status") != "ok":
+            continue
+        if int(summary.get("min_market_cap", -1)) != int(min_market_cap):
+            continue
+        panel = summary_path.parent / "option_candidate_panel_unified.parquet"
+        if not panel.exists():
+            continue
+        try:
+            # Inspect the Parquet schema without materializing the panel.
+            import pyarrow.parquet as pq
+
+            columns = set(pq.ParquetFile(panel).schema.names)
+        except (OSError, ValueError):
+            continue
+        if {"rank_y", "label_basis"}.issubset(columns):
+            matches.append((summary_path.stat().st_mtime_ns, panel))
+    if not matches:
+        raise FileNotFoundError(
+            "No successful unified option candidate panel found for "
+            f"min_market_cap={int(min_market_cap)} under {root}. "
+            "Run scripts/run_option_meta.py with this --min-market-cap first."
+        )
+    return max(matches, key=lambda item: item[0])[1]
+
+
 def latest_prices_from_quant_warehouse(
     symbols: Sequence[str],
     *,

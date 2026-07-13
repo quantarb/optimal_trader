@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Execute trading_app_v2_equity_meta_model.ipynb for a given min market cap.
+"""Train the trading-app equity stack on all data and score latest complete EOD.
 
 Uses the notebook's own cells (all feature families incl. technicals). Does not
 reimplement training — only drives the existing notebook path.
 
-Examples:
-  python scripts/run_equity_meta_notebook.py --min-market-cap 1000000000000 --tag 1t --smoke
-  python scripts/run_equity_meta_notebook.py --min-market-cap 100000000000 --tag 100b
-  python scripts/run_equity_meta_notebook.py --min-market-cap 10000000000 --tag 10b
+Example:
+  python scripts/run_equity_meta_notebook.py --min-market-cap 10000000000 --tag daily
 """
 from __future__ import annotations
 
@@ -36,11 +34,6 @@ def main() -> int:
         help="Faster path: skip FMP refresh, symbol-level backtesting.py, reuse caches when valid",
     )
     parser.add_argument(
-        "--skip-anchored-wfo",
-        action="store_true",
-        help="Skip anchored WFO (faster smoke)",
-    )
-    parser.add_argument(
         "--rebuild-feature-family-cache",
         action="store_true",
     )
@@ -50,18 +43,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--label-mode",
-        choices=("all_events", "oracle_only", "congress_buy_only"),
-        default="all_events",
+        choices=("oracle_only",),
+        default="oracle_only",
         help=(
-            "all_events: notebook default (oracle + all event families incl. congress buy/sell). "
-            "oracle_only: no event labels. "
-            "congress_buy_only: oracle + congress buy events only (no sells, no other events)."
+            "Production contract: train the equity family models and meta-stack on all "
+            "available oracle trades only."
         ),
-    )
-    parser.add_argument(
-        "--skip-symbol-level-bt",
-        action="store_true",
-        help="Skip symbol-level backtesting.py (faster A/B).",
     )
     parser.add_argument(
         "--oracle-ye-k-max",
@@ -171,7 +158,13 @@ def main() -> int:
     g["INCLUDE_TECHNICAL_FEATURE_FAMILIES"] = True
     g["REQUIRE_ALL_REQUESTED_FEATURE_FAMILIES"] = True
     g["RUN_EQUITY_META_EXPERIMENT"] = True
-    g["RUN_BACKTESTS"] = True
+    # The trading app is an operational fit/score workflow. Research evaluation
+    # (validation, backtests and WFO) belongs in separate research runners.
+    g["RUN_BACKTESTS"] = False
+    g["RUN_ANCHORED_WFO"] = False
+    g["RUN_SYMBOL_LEVEL_BACKTESTING_PY"] = False
+    g["SAVE_LARGE_INTERMEDIATE_CSVS"] = False
+    g["INCLUDE_FAMILY_SCORE_RANK_FEATURES"] = False
     g["REBUILD_FEATURE_FAMILY_CACHE"] = bool(args.rebuild_feature_family_cache)
     g["REBUILD_FAMILY_SCORE_CACHE"] = bool(args.rebuild_family_score_cache)
     g["REUSE_FAMILY_SCORE_CACHE"] = not bool(args.rebuild_family_score_cache)
@@ -213,12 +206,6 @@ def main() -> int:
         # Labels change ⇒ family scores must retrain.
         g["REBUILD_FAMILY_SCORE_CACHE"] = True
         g["REUSE_FAMILY_SCORE_CACHE"] = False
-
-    if args.smoke or args.skip_anchored_wfo:
-        g["RUN_ANCHORED_WFO"] = False
-    if args.smoke or args.skip_symbol_level_bt:
-        g["RUN_SYMBOL_LEVEL_BACKTESTING_PY"] = False
-        g["SAVE_LARGE_INTERMEDIATE_CSVS"] = False
 
     # Rebuild artifact key/dir after MIN_MARKET_CAP override
     g["RUN_ARTIFACT_KEY"] = f"mcap_{int(g['MIN_MARKET_CAP'])}_train_{g['BASE_TRAIN_END']}_seed_{g['RANDOM_SEED']}"
@@ -394,8 +381,32 @@ def main() -> int:
     if tech_rows.empty or not tech_rows["features"].gt(0).any():
         raise RuntimeError("No technical feature families with features>0 — notebook FE path incomplete")
 
+    # Pick the latest date shared by the broad feature set. Using the modal
+    # family maximum prevents one stale or prematurely dated family from
+    # moving the operational cutoff away from the latest complete EOD session.
+    family_max_dates = []
+    for row in idx.loc[idx["features"].gt(0)].to_dict("records"):
+        date_frame = pd.read_parquet(Path(row["panel_path"]), columns=["date"])
+        maximum = pd.to_datetime(date_frame["date"], errors="coerce").max()
+        if pd.notna(maximum):
+            family_max_dates.append(pd.Timestamp(maximum).normalize())
+    if not family_max_dates:
+        raise RuntimeError("Could not determine latest complete EOD score date")
+    score_date = pd.Series(family_max_dates).mode().max()
+    g["BASE_TRAIN_END"] = score_date.strftime("%Y-%m-%d")
+    g["META_OOS_START"] = g["BASE_TRAIN_END"]
+    g["RUN_ARTIFACT_KEY"] = (
+        f"mcap_{int(g['MIN_MARKET_CAP'])}_full_fit_{g['BASE_TRAIN_END']}_seed_{g['RANDOM_SEED']}"
+    )
+    g["RUN_ARTIFACT_DIR"] = g["META_ARTIFACT_DIR"] / g["RUN_ARTIFACT_KEY"]
+    g["RUN_ARTIFACT_DIR"].mkdir(parents=True, exist_ok=True)
+    print({"training_scope": "all_available_labels", "score_date": g["BASE_TRAIN_END"]}, flush=True)
+
     exec_cell(13, label="experiment_plan")
-    exec_cell(15, label="train_base_family_models")
+    cell15 = nb["cells"][15]["source"]
+    cell15 = "".join(cell15) if isinstance(cell15, list) else cell15
+    cell15 = cell15.replace("fit_all_available_data=False", "fit_all_available_data=True")
+    exec_cell(15, label="train_base_family_models_full_data", source_override=cell15)
     print(
         {
             "base_model_rows": len(g.get("base_model_results", [])),
@@ -406,39 +417,78 @@ def main() -> int:
         flush=True,
     )
 
-    exec_cell(17, label="meta_training_matrix")
-    exec_cell(19, label="train_meta_classifier")
-    exec_cell(21, label="secondary_diagnostics")
+    cell17 = nb["cells"][17]["source"]
+    cell17 = "".join(cell17) if isinstance(cell17, list) else cell17
+    cell17 = cell17.replace(
+        'value_cols = ["long_score", "short_score", "net_score"]',
+        'value_cols = ["long_score"]',
+    )
+    exec_cell(17, label="meta_training_matrix_full_data", source_override=cell17)
 
-    if g.get("RUN_BACKTESTS", True):
-        exec_cell(23, label="primary_trading_performance")
+    # Fit only. Deliberately omit train/OOS probability diagnostics.
+    from quant_orchestrator.platforms.ml_frameworks.rapids.random_forest import RapidsRandomForestClassifier
+    meta_started = perf_counter()
+    g["meta_classifier"] = RapidsRandomForestClassifier.fit(
+        g["meta_train"],
+        features=g["meta_feature_cols"],
+        target_col="collapsed_label",
+        random_state=g["RANDOM_SEED"],
+        params=g["META_RF_PARAMS"],
+    )
 
-    if g.get("RUN_ANCHORED_WFO", False):
-        exec_cell(25, label="anchored_wfo")
-    else:
-        for name in ("anchored_wfo_stitched_summary", "anchored_wfo_fold_summary"):
-            g.setdefault(name, pd.DataFrame())
-
-    if g.get("RUN_SYMBOL_LEVEL_BACKTESTING_PY", False):
-        exec_cell(27, label="symbol_level_backtesting_py")
-    else:
-        # Cell 29 always writes these; stub when symbol-level BT is skipped.
-        for name in (
-            "symbol_beat_summary",
-            "symbol_beat_by_group",
-            "symbol_level_backtesting_py",
-        ):
-            g.setdefault(name, pd.DataFrame())
-
-    # Ensure optional frames exist for save cell.
-    for name in (
-        "comparison_strategy_scores",
-        "trade_log",
-        "regime_year_importance_summary",
-    ):
-        g.setdefault(name, pd.DataFrame())
-
-    exec_cell(29, label="save_artifacts")
+    # Score one session only, after every family model has fit on all labels.
+    latest_family_scores = []
+    score_keys = pd.DataFrame(
+        {"symbol": symbols, "date": pd.Timestamp(score_date)}
+    )
+    for (source, family), payload in g["trained_models"].items():
+        panel = g["load_feature_family_panel"](source, family)
+        scores = g["score_trained_family_panel"](
+            panel,
+            payload,
+            source=source,
+            family=family,
+            score_start=pd.Timestamp(score_date),
+            score_keys=score_keys,
+        )
+        if not scores.empty:
+            latest_family_scores.append(scores)
+    if not latest_family_scores:
+        raise RuntimeError(f"No feature-family scores produced for {score_date:%Y-%m-%d}")
+    latest_family_scores = pd.concat(latest_family_scores, ignore_index=True, sort=False)
+    latest_meta_panel, _ = g["build_meta_feature_panel"](latest_family_scores)
+    for column in g["meta_feature_cols"]:
+        if column not in latest_meta_panel.columns:
+            latest_meta_panel[column] = 0.0
+    latest_meta_panel = latest_meta_panel[["symbol", "date", *g["meta_feature_cols"]]]
+    latest_probability = g["meta_classifier"].predict_proba_frame(
+        latest_meta_panel, g["meta_feature_cols"]
+    )
+    from quant_orchestrator.research_tools.ml_trading import build_strategy_score_frame
+    strategy_scores = build_strategy_score_frame(
+        source="stacked",
+        family="meta",
+        prediction_frame=latest_meta_panel,
+        probability_frame=latest_probability,
+        apply_ae_to_exits=False,
+    )
+    strategy_scores["strategy_source"] = "stacked_meta"
+    strategy_scores["score_rank"] = (
+        strategy_scores.groupby("date")["long_score"]
+        .rank(method="first", ascending=False)
+        .astype("int32")
+    )
+    output_dir = g["RUN_ARTIFACT_DIR"]
+    strategy_scores.to_csv(output_dir / "strategy_scores.csv", index=False)
+    g["base_model_results"].to_csv(output_dir / "model_results.csv", index=False)
+    import pickle
+    with (output_dir / "meta_classifier.pkl").open("wb") as handle:
+        pickle.dump(g["meta_classifier"], handle, protocol=pickle.HIGHEST_PROTOCOL)
+    model_dir = output_dir / "family_models"
+    model_dir.mkdir(exist_ok=True)
+    for (source, family), payload in g["trained_models"].items():
+        with (model_dir / f"{source}.{family}.pkl").open("wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     summary = {
         "tag": tag,
@@ -456,20 +506,15 @@ def main() -> int:
             else {}
         ),
         "run_artifact_dir": str(g["RUN_ARTIFACT_DIR"]),
+        "training_scope": "all_available_labels",
+        "score_date": score_date.strftime("%Y-%m-%d"),
+        "score_rows": int(len(strategy_scores)),
+        "model_validation_run": False,
+        "backtest_run": False,
+        "wfo_run": False,
         "elapsed_seconds": perf_counter() - started,
         "smoke": bool(args.smoke),
     }
-    # Capture best trading metrics for k-sweep tables.
-    lb_path = g["RUN_ARTIFACT_DIR"] / "trading_performance_leaderboard.csv"
-    if lb_path.exists() and lb_path.stat().st_size > 10:
-        lb = pd.read_csv(lb_path)
-        if not lb.empty and "sharpe" in lb.columns:
-            best = lb.sort_values("sharpe", ascending=False).iloc[0]
-            summary["best_strategy"] = str(best.get("strategy_source"))
-            summary["best_total_return"] = float(best.get("total_return"))
-            summary["best_sharpe"] = float(best.get("sharpe"))
-            summary["best_max_drawdown"] = float(best.get("max_drawdown"))
-            summary["leaderboard"] = lb.to_dict("records")
     out = g["RUN_ARTIFACT_DIR"] / "notebook_runner_summary.json"
     out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print("\n===== RUN COMPLETE =====", flush=True)
