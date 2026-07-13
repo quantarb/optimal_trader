@@ -248,13 +248,15 @@ def test_load_distinct_alpaca_paper_accounts_returns_three_isolated_clients(monk
     assert len({client.api_key for client in clients.values()}) == 3
 
 
-def test_streamlit_app_submits_each_account_separately(tmp_path):
+def test_streamlit_app_submits_all_accounts_from_one_button(tmp_path):
     app_path = runtime.write_streamlit_leaderboard_app(live_dir=tmp_path)
     script = app_path.read_text(encoding="utf-8")
 
-    assert "Submit Orders By Account" in script
-    assert "Submit {account_label} Orders" in script
-    assert 'key=f"submit_{name}"' in script
+    assert "Submit All Orders" in script
+    assert "Submit All Account Orders" in script
+    assert 'key="submit_all_accounts"' in script
+    assert "confirm_all_accounts" in script
+    assert "submission_results" in script
     assert 'for name, orders in order_frames.items()' not in script
     assert '"alpaca_equity_paper": "equity"' in script
     assert '"alpaca_option_paper": "option"' in script

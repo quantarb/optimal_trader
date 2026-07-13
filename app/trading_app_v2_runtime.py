@@ -2100,7 +2100,7 @@ with orders_tab:
         st.dataframe(frame, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("Submit Orders By Account")
+    st.subheader("Submit All Orders")
     account_prefixes = {{
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
@@ -2123,27 +2123,34 @@ with orders_tab:
                 st.info("No orders for this account.")
                 continue
             st.dataframe(orders, width="stretch", hide_index=True)
-            confirm = st.checkbox(
-                f"I have reviewed only the {{account_label}} orders.",
-                key=f"confirm_{{name}}",
-            )
-            disabled = not confirm or name not in submitters
             if name not in submitters:
                 st.warning("No submitter is configured for this account.")
-            if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
+    confirm_all = st.checkbox(
+        "I have reviewed all displayed orders and want to submit them to every configured account.",
+        key="confirm_all_accounts",
+    )
+    if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+        submission_results = {{}}
+        for name in sorted(order_frames):
+            orders = order_frames[name]
+            if orders.empty or name not in submitters:
+                continue
+            try:
                 if submitters[name] == "alpaca":
-                    client = alpaca_client_from_env(account_prefixes[name])
                     result = submit_alpaca_orders(
-                        client,
+                        alpaca_client_from_env(account_prefixes[name]),
                         orders,
                         asset_type=alpaca_asset_types[name],
                     )
-                elif submitters[name] == "robinhood_option":
-                    result = submit_robinhood_option_orders(orders)
                 else:
-                    result = pd.DataFrame()
-                st.write(f"{{name}}: {{len(result)}} response row(s)")
-                st.dataframe(result, width="stretch", hide_index=True)
+                    result = submit_robinhood_option_orders(orders)
+                submission_results[name] = result
+            except Exception as exc:
+                submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])
+        st.success("Submission attempt completed for all configured accounts.")
+        for name, result in submission_results.items():
+            st.write(f"{{name}}: {{len(result)}} response row(s)")
+            st.dataframe(result, width="stretch", hide_index=True)
 '''
         output.write_text(script, encoding="utf-8")
         return output
@@ -2222,7 +2229,7 @@ with orders_tab:
         st.dataframe(frame, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("Submit Orders By Account")
+    st.subheader("Submit All Orders")
     account_prefixes = {{
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
@@ -2245,27 +2252,34 @@ with orders_tab:
                 st.info("No orders for this account.")
                 continue
             st.dataframe(orders, width="stretch", hide_index=True)
-            confirm = st.checkbox(
-                f"I have reviewed only the {{account_label}} orders.",
-                key=f"confirm_{{name}}",
-            )
-            disabled = not confirm or name not in submitters
             if name not in submitters:
                 st.warning("No submitter is configured for this account.")
-            if st.button(f"Submit {{account_label}} Orders", type="primary", disabled=disabled, key=f"submit_{{name}}"):
+    confirm_all = st.checkbox(
+        "I have reviewed all displayed orders and want to submit them to every configured account.",
+        key="confirm_all_accounts",
+    )
+    if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+        submission_results = {{}}
+        for name in sorted(order_frames):
+            orders = order_frames[name]
+            if orders.empty or name not in submitters:
+                continue
+            try:
                 if submitters[name] == "alpaca":
-                    client = alpaca_client_from_env(account_prefixes[name])
                     result = submit_alpaca_orders(
-                        client,
+                        alpaca_client_from_env(account_prefixes[name]),
                         orders,
                         asset_type=alpaca_asset_types[name],
                     )
-                elif submitters[name] == "robinhood_option":
-                    result = submit_robinhood_option_orders(orders)
                 else:
-                    result = pd.DataFrame()
-                st.write(f"{{name}}: {{len(result)}} response row(s)")
-                st.dataframe(result, width="stretch", hide_index=True)
+                    result = submit_robinhood_option_orders(orders)
+                submission_results[name] = result
+            except Exception as exc:
+                submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])
+        st.success("Submission attempt completed for all configured accounts.")
+        for name, result in submission_results.items():
+            st.write(f"{{name}}: {{len(result)}} response row(s)")
+            st.dataframe(result, width="stretch", hide_index=True)
 '''
     output.write_text(script, encoding="utf-8")
     return output
