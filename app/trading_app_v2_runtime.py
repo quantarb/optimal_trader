@@ -2031,7 +2031,27 @@ def submit_alpaca_orders(
 def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str | None = None) -> pd.DataFrame:
     if orders is None or orders.empty:
         return pd.DataFrame()
-    actionable = validate_order_plan_for_submission(orders, asset_type="option")
+    # Robinhood caps each option order at 100 contracts. Split only at the
+    # submission boundary so the displayed plan still shows the full target.
+    validated_parts: list[pd.DataFrame] = []
+    for _, row in orders.iterrows():
+        row_frame = pd.DataFrame([row.to_dict()])
+        if str(row.get("action") or "").lower().startswith("cancel_"):
+            chunks = [row_frame]
+        else:
+            total = int(pd.to_numeric(pd.Series([row.get("qty")]), errors="coerce").iloc[0])
+            chunks = []
+            while total > 0:
+                chunk = row_frame.copy()
+                size = min(total, 100)
+                chunk.loc[:, "qty"] = size
+                chunks.append(chunk)
+                total -= size
+        for chunk in chunks:
+            validated_parts.append(validate_order_plan_for_submission(chunk, asset_type="option"))
+    actionable = pd.concat(validated_parts, ignore_index=True) if validated_parts else pd.DataFrame()
+    if actionable.empty:
+        return actionable
     broker_orders = actionable.copy()
     # The displayed plan follows Alpaca's schema; translate to Robinhood's
     # chain-symbol/quantity fields only at the broker boundary.

@@ -793,6 +793,32 @@ def test_submission_safety_rejects_duplicate_and_oversized_option_orders():
         runtime.validate_order_plan_for_submission(oversized, asset_type="option", now="2026-07-11T12:00:00Z")
 
 
+def test_robinhood_submission_splits_contracts_at_broker_limit(monkeypatch):
+    captured = []
+
+    def fake_submit(*, orders_df, **kwargs):
+        captured.extend(orders_df.to_dict(orient="records"))
+        return orders_df
+
+    monkeypatch.setattr("platforms.brokers.robinhood.submit_robinhood_option_orders", fake_submit)
+    result = runtime.submit_robinhood_option_orders(
+        pd.DataFrame([{
+            "symbol": "AAPL270115C00100000",
+            "underlying_symbol": "AAPL",
+            "option_type": "call",
+            "action": "buy_to_open_call",
+            "side": "buy",
+            "qty": 263,
+            "limit_price": 0.50,
+            "order_type": "limit",
+            "time_in_force": "gtc",
+            "plan_created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        }])
+    )
+    assert [row["quantity"] for row in captured] == [100, 100, 63]
+    assert len(result) == 3
+
+
 def test_submission_safety_allows_stamped_cancellations_and_valid_orders():
     plan = pd.DataFrame(
         [
