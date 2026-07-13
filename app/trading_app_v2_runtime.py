@@ -2122,16 +2122,6 @@ with orders_tab:
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
     }}
-    for name in sorted(order_frames):
-        orders = order_frames[name]
-        account_label = name.replace("_", " ").title()
-        with st.expander(account_label, expanded=False):
-            if orders.empty:
-                st.info("No orders for this account.")
-                continue
-            st.dataframe(orders, width="stretch", hide_index=True)
-            if name not in submitters:
-                st.warning("No submitter is configured for this account.")
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
@@ -2258,16 +2248,6 @@ with orders_tab:
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
     }}
-    for name in sorted(order_frames):
-        orders = order_frames[name]
-        account_label = name.replace("_", " ").title()
-        with st.expander(account_label, expanded=False):
-            if orders.empty:
-                st.info("No orders for this account.")
-                continue
-            st.dataframe(orders, width="stretch", hide_index=True)
-            if name not in submitters:
-                st.warning("No submitter is configured for this account.")
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
