@@ -2081,6 +2081,23 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str 
     # Authenticate only at the explicit submit boundary; plan regeneration is
     # intentionally non-blocking and does not perform Robinhood login.
     robinhood.robinhood_login()
+    existing_orders = robinhood.load_robinhood_open_option_orders(account_number=account_number)
+    existing_positions = robinhood.load_robinhood_option_positions(account_number=account_number)
+    existing_symbols = {
+        str(value).strip().upper()
+        for frame in (existing_orders, existing_positions)
+        for value in frame.get("symbol", pd.Series(dtype=str)).tolist()
+    }
+    duplicate_mask = broker_orders.apply(
+        lambda row: (
+            str(row.get("underlying_symbol") or row.get("symbol") or "").strip().upper() in existing_symbols
+            and str(row.get("side") or "").strip().lower() == "buy"
+        ),
+        axis=1,
+    )
+    broker_orders = broker_orders.loc[~duplicate_mask].copy()
+    if broker_orders.empty:
+        return pd.DataFrame()
 
     return _submit(orders_df=broker_orders, account_number=account_number, time_in_force="gtc")
 
