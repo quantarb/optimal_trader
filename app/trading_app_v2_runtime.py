@@ -2276,7 +2276,7 @@ with orders_tab:
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
-        st.rerun()
+        st.success("Plan regenerated. The refreshed state will be shown on the next interaction.")
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
@@ -2419,7 +2419,7 @@ with orders_tab:
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
-        st.rerun()
+        st.success("Plan regenerated. The refreshed state will be shown on the next interaction.")
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
