@@ -2095,9 +2095,16 @@ with option_tab:
 
 with orders_tab:
     order_frames = read_embedded_orders()
-    for name, frame in sorted(order_frames.items()):
-        st.subheader(name.replace("_", " ").title())
-        st.dataframe(frame, width="stretch", hide_index=True)
+    account_names = sorted(order_frames)
+    account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
+    for account_tab, name in zip(account_tabs, account_names):
+        with account_tab:
+            frame = order_frames[name]
+            st.subheader(name.replace("_", " ").title())
+            if frame.empty:
+                st.info("No orders for this account.")
+            else:
+                st.dataframe(frame, width="stretch", hide_index=True)
 
     st.divider()
     st.subheader("Submit All Orders")
@@ -2223,10 +2230,17 @@ with option_tab:
 with orders_tab:
     order_frames = {{}}
     for path in sorted(LIVE_DIR.glob("*_orders.csv")):
-        st.subheader(path.stem.replace("_", " ").title())
-        frame = read_csv_if_nonempty(path)
-        order_frames[path.stem.removesuffix("_orders")] = frame
-        st.dataframe(frame, width="stretch", hide_index=True)
+        order_frames[path.stem.removesuffix("_orders")] = read_csv_if_nonempty(path)
+    account_names = sorted(order_frames)
+    account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
+    for account_tab, name in zip(account_tabs, account_names):
+        with account_tab:
+            frame = order_frames[name]
+            st.subheader(name.replace("_", " ").title())
+            if frame.empty:
+                st.info("No orders for this account.")
+            else:
+                st.dataframe(frame, width="stretch", hide_index=True)
 
     st.divider()
     st.subheader("Submit All Orders")
