@@ -2064,6 +2064,57 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str 
     return _submit(orders_df=broker_orders, account_number=account_number, time_in_force="gtc")
 
 
+def regenerate_order_plan_from_account_state(
+    order_frames: Mapping[str, pd.DataFrame],
+    *,
+    max_positions: int = 20,
+) -> dict[str, pd.DataFrame]:
+    """Refresh a displayed plan without submitting orders.
+
+    Alpaca plans are suppressed when the account already has capacity occupied
+    by open orders/positions. Robinhood rows are retained but repriced from
+    fresh Robinhood bid/ask quotes.
+    """
+    refreshed = {str(name): frame.copy() for name, frame in order_frames.items()}
+    account_prefixes = {
+        "alpaca_equity_paper": "EQUITY",
+        "alpaca_option_paper": "OPTION",
+        "alpaca_llm_paper": "LLM",
+    }
+    for name, prefix in account_prefixes.items():
+        if name not in refreshed:
+            continue
+        client = alpaca_client_from_env(prefix)
+        occupied = len(client.get_open_orders()) + len(client.get_positions())
+        if occupied >= int(max_positions):
+            refreshed[name] = refreshed[name].iloc[0:0].copy()
+
+    robinhood_name = "robinhood_option_real"
+    if robinhood_name in refreshed and not refreshed[robinhood_name].empty:
+        from platforms.brokers import robinhood
+
+        robinhood.robinhood_login()
+        rh = robinhood._require_robin_stocks()
+        fresh = refreshed[robinhood_name].copy()
+        for idx, row in fresh.iterrows():
+            try:
+                market = robinhood._lookup_robinhood_option_market_row(
+                    rh,
+                    symbol=str(row.get("underlying_symbol") or "").upper(),
+                    expiry_date=str(row.get("expiry_date") or ""),
+                    strike=float(row.get("strike_price")),
+                    option_type=str(row.get("option_type") or "call").lower(),
+                )
+                prices = robinhood._option_market_price_fields(market)
+                fresh.at[idx, "bid_price"] = prices.get("bid_price")
+                fresh.at[idx, "ask_price"] = prices.get("ask_price")
+            except Exception as exc:
+                fresh.at[idx, "skip_reason"] = f"quote_refresh_failed: {type(exc).__name__}: {exc}"
+        discount = float(pd.to_numeric(fresh.get("discount_pct", 90.0), errors="coerce").dropna().iloc[0]) if "discount_pct" in fresh.columns and pd.to_numeric(fresh["discount_pct"], errors="coerce").notna().any() else 90.0
+        refreshed[robinhood_name] = apply_option_limit_policy(fresh, time_in_force="gtc", discount_pct=discount)
+    return refreshed
+
+
 def write_streamlit_leaderboard_app(
     *,
     live_dir: Path,
@@ -2101,7 +2152,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
 
 EMBEDDED_DATA = {payload_literal}
 
@@ -2156,6 +2207,8 @@ with option_tab:
 
 with orders_tab:
     order_frames = read_embedded_orders()
+    if "regenerated_order_frames" in st.session_state:
+        order_frames = st.session_state["regenerated_order_frames"]
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2183,6 +2236,10 @@ with orders_tab:
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
     }}
+    if st.button("Regenerate Plan", key="regenerate_plan"):
+        with st.spinner("Refreshing account state and Robinhood quotes..."):
+            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames)
+        st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
@@ -2225,7 +2282,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
 
 
 def read_csv_if_nonempty(path: Path) -> pd.DataFrame:
@@ -2282,6 +2339,8 @@ with orders_tab:
     order_frames = {{}}
     for path in sorted(LIVE_DIR.glob("*_orders.csv")):
         order_frames[path.stem.removesuffix("_orders")] = read_csv_if_nonempty(path)
+    if "regenerated_order_frames" in st.session_state:
+        order_frames = st.session_state["regenerated_order_frames"]
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2309,6 +2368,10 @@ with orders_tab:
         **{{name: "alpaca" for name in account_prefixes}},
         "robinhood_option_real": "robinhood_option",
     }}
+    if st.button("Regenerate Plan", key="regenerate_plan"):
+        with st.spinner("Refreshing account state and Robinhood quotes..."):
+            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames)
+        st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
