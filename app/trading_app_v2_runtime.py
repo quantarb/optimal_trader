@@ -1560,6 +1560,30 @@ def _first_positive(row: Mapping[str, Any], keys: Sequence[str]) -> float | None
     return None
 
 
+def _option_contract_quantity(
+    *,
+    account_value: float,
+    option_price: float | None,
+    max_underlyings: int,
+    contract_multiplier: int = 100,
+) -> int:
+    """Return contracts for one equal-dollar option sleeve.
+
+    Option quotes are per share, whereas Alpaca quantities are contracts. The
+    standard 100-share multiplier is applied so each entry targets
+    ``account_value / max_underlyings`` dollars of premium.
+    """
+    value = _number(account_value, default=float("nan"))
+    price = _number(option_price, default=float("nan"))
+    capacity = int(max_underlyings)
+    multiplier = int(contract_multiplier)
+    if capacity <= 0 or multiplier <= 0:
+        raise ValueError("max_underlyings and contract_multiplier must be positive")
+    if not math.isfinite(value) or value <= 0 or not math.isfinite(price) or price <= 0:
+        return 0
+    return max(0, int(math.floor((value / capacity) / (price * multiplier))))
+
+
 def build_llm_review_orders(
     *,
     leaderboard: pd.DataFrame,
@@ -1605,24 +1629,56 @@ def build_ranked_alpaca_option_orders(
     selected["underlying_symbol"] = selected["symbol"].astype(str).str.upper()
     if "contract_symbol" not in selected.columns:
         raise KeyError("option rankings require contract_symbol")
-    selected["qty"] = 1
-    selected_contracts = selected.to_dict(orient="records")
     client = alpaca_client_from_env(account_prefix)
+    account = client.get_account()
+    account_value = float(account.get("equity") or account.get("portfolio_value") or account.get("cash") or 0.0)
+    if account_value <= 0:
+        raise ValueError(f"Alpaca account {account_prefix!r} has no positive equity/portfolio value")
     current_positions = _enrich_alpaca_option_records(client, client.get_positions())
     normalized_decisions = decisions.copy()
-    available_underlyings = set(selected["underlying_symbol"].astype(str).str.upper())
     held_underlyings = {
         str(row.get("underlying_symbol") or "").strip().upper()
         for row in current_positions
         if str(row.get("underlying_symbol") or "").strip()
     }
     normalized_decisions["symbol"] = normalized_decisions["symbol"].astype(str).str.upper()
-    normalized_decisions = normalized_decisions.loc[
-        normalized_decisions["symbol"].isin(available_underlyings | held_underlyings)
-    ].copy()
     if decision_col != "direction":
         normalized_decisions["decision"] = normalized_decisions[decision_col]
     planner = build_llm_option_order_plan if llm else build_directional_option_order_plan
+    contract_symbols = list(dict.fromkeys(
+        [str(value).strip().upper() for value in selected["contract_symbol"].tolist()]
+        + [str(row.get("contract_symbol") or row.get("symbol") or "").strip().upper() for row in current_positions]
+    ))
+    snapshots = client.get_option_snapshots(contract_symbols)
+    quote_rows = []
+    for contract_symbol in contract_symbols:
+        bid, ask, _mark = _option_quote(snapshots.get(contract_symbol, {}))
+        quote_rows.append({"symbol": contract_symbol, "bid_price": bid, "ask_price": ask})
+    quote_frame = pd.DataFrame(quote_rows)
+    quote_by_symbol = quote_frame.set_index("symbol").to_dict(orient="index") if not quote_frame.empty else {}
+    sized_rows: list[dict[str, Any]] = []
+    for row in selected.to_dict(orient="records"):
+        quote = quote_by_symbol.get(str(row["contract_symbol"]).upper(), {})
+        # Use ask for a conservative budget; bid is only a missing-ask fallback.
+        price = _first_positive(quote, ("ask_price", "bid_price"))
+        quantity = _option_contract_quantity(
+            account_value=account_value,
+            option_price=price,
+            max_underlyings=int(max_underlyings),
+        )
+        if quantity <= 0:
+            continue
+        row["qty"] = quantity
+        row["target_notional"] = float(account_value) / int(max_underlyings)
+        row["estimated_entry_notional"] = float(price) * 100.0 * quantity
+        sized_rows.append(row)
+    selected_contracts = sized_rows
+    available_underlyings = {str(row["underlying_symbol"]).upper() for row in sized_rows}
+    normalized_decisions = normalized_decisions.loc[
+        normalized_decisions["symbol"].isin(available_underlyings | held_underlyings)
+    ].copy()
+    # Re-run reconciliation after sizing so an unpriceable/over-budget contract
+    # is omitted rather than accidentally falling back to a one-contract order.
     raw_orders = planner(
         normalized_decisions.to_dict(orient="records"),
         selected_contracts,
@@ -1635,14 +1691,10 @@ def build_ranked_alpaca_option_orders(
     contract_symbols = intents.loc[
         ~intents["action"].astype(str).str.startswith("cancel_"), "symbol"
     ].astype(str).str.upper().unique().tolist()
-    snapshots = client.get_option_snapshots(contract_symbols)
-    quote_rows = []
-    for contract_symbol in contract_symbols:
-        bid, ask, _mark = _option_quote(snapshots.get(contract_symbol, {}))
-        quote_rows.append({"symbol": contract_symbol, "bid_price": bid, "ask_price": ask})
+    quote_frame = quote_frame.loc[quote_frame["symbol"].isin(contract_symbols)].copy()
     return generate_live_option_limit_prices(
         intents,
-        pd.DataFrame(quote_rows),
+        quote_frame,
         time_in_force="day",
     )
 

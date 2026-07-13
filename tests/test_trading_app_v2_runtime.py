@@ -95,6 +95,18 @@ def test_directional_option_plan_keeps_exact_ranker_selection_and_caps_candidate
         build_directional_option_order_plan(directions, selections)
 
 
+@pytest.mark.parametrize(
+    ("price", "expected"),
+    [(1.25, 40), (2.50, 20), (60.0, 0), (None, 0)],
+)
+def test_option_contract_quantity_targets_one_twentieth_of_account(price, expected):
+    assert runtime._option_contract_quantity(
+        account_value=100_000.0,
+        option_price=price,
+        max_underlyings=20,
+    ) == expected
+
+
 def test_llm_option_plan_reverses_opposites_and_retains_same_type_or_hold():
     plan = build_llm_option_order_plan(
         [
