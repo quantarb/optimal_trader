@@ -1302,6 +1302,7 @@ def build_robinhood_option_orders(
     account_number: str | None = None,
     current_option_positions: pd.DataFrame | None = None,
     pending_option_orders: pd.DataFrame | None = None,
+    strategy_allocation: float = 100_000.0,
 ) -> dict[str, pd.DataFrame]:
     """Reconcile Robinhood option account state before creating new live orders."""
 
@@ -1397,7 +1398,17 @@ def build_robinhood_option_orders(
         symbol = str(target.get("symbol") or "").strip().upper()
         if not symbol or symbol in held_target_symbols or symbol in pending_buy_symbols:
             continue
-        quantity = int(_number(target.get("quantity", target.get("target_contracts"))))
+        bid = _first_positive(target, ("bid_price", "bid"))
+        discounted_bid = bid * (1.0 - float(gate_discount_pct) / 100.0) if bid is not None else None
+        quantity = option_contract_quantity(
+            account_value=float(strategy_allocation),
+            option_price=discounted_bid,
+            max_underlyings=20,
+        )
+        if quantity <= 0:
+            # Preserve an explicitly sized target only when no live bid is
+            # available; otherwise never fall back to an oversized one-lot.
+            quantity = int(_number(target.get("quantity", target.get("target_contracts")))) if bid is None else 0
         if quantity <= 0:
             continue
         option_type = str(target.get("option_type") or "call").strip().lower()
