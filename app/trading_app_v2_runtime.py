@@ -2068,6 +2068,7 @@ def regenerate_order_plan_from_account_state(
     order_frames: Mapping[str, pd.DataFrame],
     *,
     max_positions: int = 20,
+    account_state: Mapping[str, pd.DataFrame] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Refresh a displayed plan without submitting orders.
 
@@ -2085,7 +2086,10 @@ def regenerate_order_plan_from_account_state(
         if name not in refreshed:
             continue
         client = alpaca_client_from_env(prefix)
-        occupied = len(client.get_open_orders()) + len(client.get_positions())
+        if account_state is not None:
+            occupied = len(account_state.get(f"{name}_orders", pd.DataFrame())) + len(account_state.get(f"{name}_positions", pd.DataFrame()))
+        else:
+            occupied = len(client.get_open_orders()) + len(client.get_positions())
         # Regeneration is a reconciliation pass, not a second entry pass:
         # any existing Alpaca order/position means there is nothing new to
         # submit for that account in this snapshot.
@@ -2116,6 +2120,25 @@ def regenerate_order_plan_from_account_state(
         discount = float(pd.to_numeric(fresh.get("discount_pct", 90.0), errors="coerce").dropna().iloc[0]) if "discount_pct" in fresh.columns and pd.to_numeric(fresh["discount_pct"], errors="coerce").notna().any() else 90.0
         refreshed[robinhood_name] = apply_option_limit_policy(fresh, time_in_force="gtc", discount_pct=discount)
     return refreshed
+
+
+def load_account_state_snapshot() -> dict[str, pd.DataFrame]:
+    """Load existing broker orders and positions for frontend reconciliation."""
+    state: dict[str, pd.DataFrame] = {}
+    for name, prefix in {
+        "alpaca_equity_paper": "EQUITY",
+        "alpaca_option_paper": "OPTION",
+        "alpaca_llm_paper": "LLM",
+    }.items():
+        client = alpaca_client_from_env(prefix)
+        state[f"{name}_orders"] = pd.DataFrame(client.get_open_orders())
+        state[f"{name}_positions"] = pd.DataFrame(client.get_positions())
+    from platforms.brokers import robinhood
+
+    robinhood.robinhood_login()
+    state["robinhood_option_real_orders"] = robinhood.load_robinhood_open_option_orders()
+    state["robinhood_option_real_positions"] = robinhood.load_robinhood_option_positions()
+    return state
 
 
 def write_streamlit_leaderboard_app(
@@ -2155,7 +2178,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
 
 EMBEDDED_DATA = {payload_literal}
 
@@ -2190,7 +2213,7 @@ cols[1].metric("Selected", f"{{selected:,}}")
 cols[2].metric("Eligible", f"{{eligible:,}}")
 cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
 
-symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders"])
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders / Positions"])
 
 with symbol_tab:
     score_table = read_embedded_frame("symbol_scores")
@@ -2212,6 +2235,15 @@ with orders_tab:
     order_frames = read_embedded_orders()
     if "regenerated_order_frames" in st.session_state:
         order_frames = st.session_state["regenerated_order_frames"]
+    existing_state = st.session_state.get("existing_account_state", {{}})
+    if existing_state:
+        st.subheader("Existing Broker State")
+        for account_name in sorted({{name.removesuffix("_orders").removesuffix("_positions") for name in existing_state}}):
+            with st.expander(account_name.replace("_", " ").title(), expanded=False):
+                st.caption("Existing open orders")
+                st.dataframe(existing_state.get(f"{{account_name}}_orders", pd.DataFrame()), width="stretch", hide_index=True)
+                st.caption("Existing positions")
+                st.dataframe(existing_state.get(f"{{account_name}}_positions", pd.DataFrame()), width="stretch", hide_index=True)
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2241,7 +2273,9 @@ with orders_tab:
     }}
     if st.button("Regenerate Plan", key="regenerate_plan"):
         with st.spinner("Refreshing account state and Robinhood quotes..."):
-            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames)
+            state = load_account_state_snapshot()
+            st.session_state["existing_account_state"] = state
+            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
         st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
@@ -2285,7 +2319,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
 
 
 def read_csv_if_nonempty(path: Path) -> pd.DataFrame:
@@ -2318,7 +2352,7 @@ cols[1].metric("Selected", f"{{selected:,}}")
 cols[2].metric("Eligible", f"{{eligible:,}}")
 cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
 
-symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders"])
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders / Positions"])
 
 with symbol_tab:
     symbol_scores_path = LIVE_DIR / "symbol_scores.csv"
@@ -2344,6 +2378,15 @@ with orders_tab:
         order_frames[path.stem.removesuffix("_orders")] = read_csv_if_nonempty(path)
     if "regenerated_order_frames" in st.session_state:
         order_frames = st.session_state["regenerated_order_frames"]
+    existing_state = st.session_state.get("existing_account_state", {{}})
+    if existing_state:
+        st.subheader("Existing Broker State")
+        for account_name in sorted({{name.removesuffix("_orders").removesuffix("_positions") for name in existing_state}}):
+            with st.expander(account_name.replace("_", " ").title(), expanded=False):
+                st.caption("Existing open orders")
+                st.dataframe(existing_state.get(f"{{account_name}}_orders", pd.DataFrame()), width="stretch", hide_index=True)
+                st.caption("Existing positions")
+                st.dataframe(existing_state.get(f"{{account_name}}_positions", pd.DataFrame()), width="stretch", hide_index=True)
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2373,7 +2416,9 @@ with orders_tab:
     }}
     if st.button("Regenerate Plan", key="regenerate_plan"):
         with st.spinner("Refreshing account state and Robinhood quotes..."):
-            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames)
+            state = load_account_state_snapshot()
+            st.session_state["existing_account_state"] = state
+            st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
         st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
