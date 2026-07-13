@@ -1643,7 +1643,7 @@ def build_ranked_alpaca_option_orders(
     decision_col: str = "direction",
     llm: bool = False,
     max_underlyings: int = 20,
-    strategy_allocation: float | None = None,
+    strategy_allocation: float | None = 100_000.0,
 ) -> pd.DataFrame:
     """Reconcile prior-day symbol/contract selections, then price with live Alpaca quotes."""
 
