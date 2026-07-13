@@ -873,6 +873,25 @@ def test_submit_alpaca_option_orders_uses_option_quantity_limit_without_side_eff
         runtime.submit_alpaca_orders(client, plan, asset_type="option")
 
     assert client.submitted == []
+
+
+def test_submit_alpaca_orders_skips_existing_open_order_and_position_duplicates():
+    class FakeClient:
+        def get_open_orders(self):
+            return [{"symbol": "AAPL", "side": "buy", "type": "market"}]
+
+        def get_positions(self):
+            return [{"symbol": "MSFT", "qty": "2"}]
+
+        def submit_orders(self, orders):
+            return orders
+
+    now = pd.Timestamp.now(tz="UTC").isoformat()
+    plan = pd.DataFrame([
+        {"symbol": "AAPL", "side": "buy", "qty": 1, "order_type": "market", "plan_created_at": now},
+        {"symbol": "MSFT", "side": "buy", "qty": 1, "order_type": "market", "plan_created_at": now},
+    ])
+    assert runtime.submit_alpaca_orders(FakeClient(), plan, asset_type="equity").empty
 def test_resolve_option_training_panel_selects_exact_unified_contract(tmp_path):
     compatible = tmp_path / "verified"
     compatible.mkdir()

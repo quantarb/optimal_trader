@@ -2023,7 +2023,23 @@ def submit_alpaca_orders(
 
     if orders is None or orders.empty:
         return pd.DataFrame()
-    actionable = validate_order_plan_for_submission(orders, asset_type=asset_type)
+    existing_orders = list(client.get_open_orders()) if hasattr(client, "get_open_orders") else []
+    existing_positions = list(client.get_positions()) if hasattr(client, "get_positions") else []
+    open_keys = {
+        (str(row.get("symbol") or "").upper(), str(row.get("side") or "").lower(), str(row.get("type") or row.get("order_type") or "").lower())
+        for row in existing_orders
+    }
+    held_symbols = {str(row.get("symbol") or "").upper() for row in existing_positions}
+    candidate = orders.copy()
+    duplicate_mask = candidate.apply(
+        lambda row: (
+            (str(row.get("symbol") or "").upper(), str(row.get("side") or "").lower(), str(row.get("order_type") or "").lower()) in open_keys
+            or (str(row.get("symbol") or "").upper() in held_symbols and str(row.get("side") or "").lower() == "buy")
+        ),
+        axis=1,
+    )
+    candidate = candidate.loc[~duplicate_mask].copy()
+    actionable = validate_order_plan_for_submission(candidate, asset_type=asset_type)
     responses = client.submit_orders(actionable.to_dict(orient="records"))
     return pd.DataFrame(responses)
 
