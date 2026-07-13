@@ -2086,7 +2086,10 @@ def regenerate_order_plan_from_account_state(
             continue
         client = alpaca_client_from_env(prefix)
         occupied = len(client.get_open_orders()) + len(client.get_positions())
-        if occupied >= int(max_positions):
+        # Regeneration is a reconciliation pass, not a second entry pass:
+        # any existing Alpaca order/position means there is nothing new to
+        # submit for that account in this snapshot.
+        if occupied > 0:
             refreshed[name] = refreshed[name].iloc[0:0].copy()
 
     robinhood_name = "robinhood_option_real"
