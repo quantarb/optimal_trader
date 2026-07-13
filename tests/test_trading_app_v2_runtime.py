@@ -801,6 +801,7 @@ def test_robinhood_submission_splits_contracts_at_broker_limit(monkeypatch):
         return orders_df
 
     monkeypatch.setattr("platforms.brokers.robinhood.submit_robinhood_option_orders", fake_submit)
+    monkeypatch.setattr("platforms.brokers.robinhood.robinhood_login", lambda: {"logged_in": True})
     result = runtime.submit_robinhood_option_orders(
         pd.DataFrame([{
             "symbol": "AAPL270115C00100000",

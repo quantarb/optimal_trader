@@ -2060,6 +2060,11 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str 
     if "qty" in broker_orders.columns:
         broker_orders["quantity"] = broker_orders["qty"]
     from platforms.brokers.robinhood import submit_robinhood_option_orders as _submit
+    from platforms.brokers import robinhood
+
+    # Authenticate only at the explicit submit boundary; plan regeneration is
+    # intentionally non-blocking and does not perform Robinhood login.
+    robinhood.robinhood_login()
 
     return _submit(orders_df=broker_orders, account_number=account_number, time_in_force="gtc")
 
