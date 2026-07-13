@@ -2269,6 +2269,11 @@ with orders_tab:
         key="confirm_all_accounts",
     )
     if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+        # Reconcile one final time immediately before any broker side effect;
+        # this prevents a stale embedded plan from duplicating Alpaca orders.
+        with st.spinner("Reconciling current account state before submission..."):
+            submission_state = load_account_state_snapshot()
+            order_frames = regenerate_order_plan_from_account_state(order_frames, account_state=submission_state)
         submission_results = {{}}
         for name in sorted(order_frames):
             orders = order_frames[name]
@@ -2412,6 +2417,9 @@ with orders_tab:
         key="confirm_all_accounts",
     )
     if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+        with st.spinner("Reconciling current account state before submission..."):
+            submission_state = load_account_state_snapshot()
+            order_frames = regenerate_order_plan_from_account_state(order_frames, account_state=submission_state)
         submission_results = {{}}
         for name in sorted(order_frames):
             orders = order_frames[name]
