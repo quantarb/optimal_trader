@@ -1347,9 +1347,12 @@ def build_robinhood_option_orders(
                 continue
             sell_row = {
                 "symbol": symbol,
+                "underlying_symbol": str(position.get("underlying_symbol") or symbol).strip().upper(),
                 "action": "sell_to_close_put" if str(position.get("option_type") or "").lower() == "put" else "sell_to_close_call",
                 "reason": "Existing Robinhood option position is no longer the target contract.",
                 "quantity": quantity,
+                "qty": quantity,
+                "side": "sell",
                 "expiry_date": str(position.get("expiry_date") or ""),
                 "strike_price": _number(position.get("strike_price")),
                 "option_type": str(position.get("option_type") or "call").strip().lower(),
@@ -1415,10 +1418,12 @@ def build_robinhood_option_orders(
         buy_row = {
             **target.to_dict(),
             "symbol": symbol,
+            "underlying_symbol": symbol,
             "action": f"buy_to_open_{option_type}",
             "reason": "New current top-K trading_app_v2 Robinhood option target.",
             "quantity": quantity,
             "qty": quantity,
+            "side": "buy",
             "option_type": option_type,
             "order_type": "limit",
             "time_in_force": "gtc",
@@ -1460,16 +1465,22 @@ def build_robinhood_option_orders(
     # Keep the Robinhood view aligned with Alpaca: execution-critical fields
     # come first, while the wide research/features payload remains available to
     # the right for auditability.
-    # Robinhood's submitter uses ``symbol`` as the underlying chain symbol and
-    # ``contract_symbol`` as the concrete contract. Keep one canonical field
-    # for each concept in the displayed/exported order plan.
-    actions = actions.drop(
-        columns=[column for column in ("underlying_symbol", "expiration", "strike", "qty") if column in actions.columns]
-    )
+    # Normalize the exported schema to Alpaca's order schema. Robinhood's API
+    # still receives its underlying chain symbol through the adapter below.
+    if "underlying_symbol" not in actions.columns:
+        actions["underlying_symbol"] = actions.get("symbol", "")
+    if "contract_symbol" in actions.columns:
+        actions["symbol"] = actions["contract_symbol"].where(
+            actions["contract_symbol"].astype(str).str.strip().ne(""), actions["symbol"]
+        )
+    if "qty" not in actions.columns and "quantity" in actions.columns:
+        actions["qty"] = actions["quantity"]
+    actions = actions.drop(columns=[column for column in ("contract_symbol", "quantity", "expiration", "strike") if column in actions.columns])
     display_priority = [
-        "contract_symbol", "symbol", "option_type", "expiry_date", "dte", "strike_price",
-        "side", "action", "quantity", "bid_price", "ask_price",
-        "limit_price", "limit_order_price", "order_type", "time_in_force",
+        "symbol", "underlying_symbol", "option_type", "action", "side", "qty",
+        "bid_price", "ask_price", "skip_submit", "skip_reason", "order_type", "time_in_force",
+        "limit_price", "limit_order_price", "price", "limit_price_source", "live_quote_priced_at",
+        "expiry_date", "dte", "strike_price",
         "discount_pct", "skip_submit", "skip_reason", "reason",
     ]
     ordered_columns = [column for column in display_priority if column in actions.columns]
@@ -2021,9 +2032,16 @@ def submit_robinhood_option_orders(orders: pd.DataFrame, *, account_number: str 
     if orders is None or orders.empty:
         return pd.DataFrame()
     actionable = validate_order_plan_for_submission(orders, asset_type="option")
+    broker_orders = actionable.copy()
+    # The displayed plan follows Alpaca's schema; translate to Robinhood's
+    # chain-symbol/quantity fields only at the broker boundary.
+    if "underlying_symbol" in broker_orders.columns:
+        broker_orders["symbol"] = broker_orders["underlying_symbol"]
+    if "qty" in broker_orders.columns:
+        broker_orders["quantity"] = broker_orders["qty"]
     from platforms.brokers.robinhood import submit_robinhood_option_orders as _submit
 
-    return _submit(orders_df=actionable, account_number=account_number, time_in_force="gtc")
+    return _submit(orders_df=broker_orders, account_number=account_number, time_in_force="gtc")
 
 
 def write_streamlit_leaderboard_app(

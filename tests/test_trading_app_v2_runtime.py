@@ -727,6 +727,9 @@ def test_robinhood_option_orders_reconcile_before_new_entries():
     assert float(actions.loc[2, "limit_order_price"]) == 7.0
     assert actions.loc[2, "limit_price_source"] == "bid_price"
     assert float(actions.loc[2, "discount_pct"]) == 90.0
+    assert list(actions.columns[:6]) == ["symbol", "underlying_symbol", "option_type", "action", "side", "qty"]
+    assert "quantity" not in actions.columns
+    assert "contract_symbol" not in actions.columns
 
 
 def test_robinhood_100_gate_blocks_only_robinhood_copy():
