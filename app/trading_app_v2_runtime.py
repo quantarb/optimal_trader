@@ -2098,25 +2098,7 @@ def regenerate_order_plan_from_account_state(
 
     robinhood_name = "robinhood_option_real"
     if robinhood_name in refreshed and not refreshed[robinhood_name].empty:
-        from platforms.brokers import robinhood
-
-        robinhood.robinhood_login()
-        rh = robinhood._require_robin_stocks()
         fresh = refreshed[robinhood_name].copy()
-        for idx, row in fresh.iterrows():
-            try:
-                market = robinhood._lookup_robinhood_option_market_row(
-                    rh,
-                    symbol=str(row.get("underlying_symbol") or "").upper(),
-                    expiry_date=str(row.get("expiry_date") or ""),
-                    strike=float(row.get("strike_price")),
-                    option_type=str(row.get("option_type") or "call").lower(),
-                )
-                prices = robinhood._option_market_price_fields(market)
-                fresh.at[idx, "bid_price"] = prices.get("bid_price")
-                fresh.at[idx, "ask_price"] = prices.get("ask_price")
-            except Exception as exc:
-                fresh.at[idx, "skip_reason"] = f"quote_refresh_failed: {type(exc).__name__}: {exc}"
         discount = float(pd.to_numeric(fresh.get("discount_pct", 90.0), errors="coerce").dropna().iloc[0]) if "discount_pct" in fresh.columns and pd.to_numeric(fresh["discount_pct"], errors="coerce").notna().any() else 90.0
         refreshed[robinhood_name] = apply_option_limit_policy(fresh, time_in_force="gtc", discount_pct=discount)
     return refreshed
@@ -2133,11 +2115,11 @@ def load_account_state_snapshot() -> dict[str, pd.DataFrame]:
         client = alpaca_client_from_env(prefix)
         state[f"{name}_orders"] = pd.DataFrame(client.get_open_orders())
         state[f"{name}_positions"] = pd.DataFrame(client.get_positions())
-    from platforms.brokers import robinhood
-
-    robinhood.robinhood_login()
-    state["robinhood_option_real_orders"] = robinhood.load_robinhood_open_option_orders()
-    state["robinhood_option_real_positions"] = robinhood.load_robinhood_option_positions()
+    # Robinhood authentication can block for an extended period. Keep its
+    # state out of this synchronous refresh; its displayed plan is repriced
+    # from the cached quote fields and submission remains an explicit action.
+    state["robinhood_option_real_orders"] = pd.DataFrame()
+    state["robinhood_option_real_positions"] = pd.DataFrame()
     return state
 
 
