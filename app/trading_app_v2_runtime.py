@@ -1460,10 +1460,15 @@ def build_robinhood_option_orders(
     # Keep the Robinhood view aligned with Alpaca: execution-critical fields
     # come first, while the wide research/features payload remains available to
     # the right for auditability.
+    # Robinhood's submitter uses ``symbol`` as the underlying chain symbol and
+    # ``contract_symbol`` as the concrete contract. Keep one canonical field
+    # for each concept in the displayed/exported order plan.
+    actions = actions.drop(
+        columns=[column for column in ("underlying_symbol", "expiration", "strike", "qty") if column in actions.columns]
+    )
     display_priority = [
-        "contract_symbol", "symbol", "underlying_symbol", "option_type",
-        "expiration", "expiry_date", "dte", "strike", "strike_price",
-        "side", "action", "qty", "quantity", "bid_price", "ask_price",
+        "contract_symbol", "symbol", "option_type", "expiry_date", "dte", "strike_price",
+        "side", "action", "quantity", "bid_price", "ask_price",
         "limit_price", "limit_order_price", "order_type", "time_in_force",
         "discount_pct", "skip_submit", "skip_reason", "reason",
     ]
