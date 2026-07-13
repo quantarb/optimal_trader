@@ -1457,6 +1457,20 @@ def build_robinhood_option_orders(
     else:
         actions["skip_submit"] = pd.Series(dtype=bool)
 
+    # Keep the Robinhood view aligned with Alpaca: execution-critical fields
+    # come first, while the wide research/features payload remains available to
+    # the right for auditability.
+    display_priority = [
+        "contract_symbol", "symbol", "underlying_symbol", "option_type",
+        "expiration", "expiry_date", "dte", "strike", "strike_price",
+        "side", "action", "qty", "quantity", "bid_price", "ask_price",
+        "limit_price", "limit_order_price", "order_type", "time_in_force",
+        "discount_pct", "skip_submit", "skip_reason", "reason",
+    ]
+    ordered_columns = [column for column in display_priority if column in actions.columns]
+    ordered_columns.extend(column for column in actions.columns if column not in ordered_columns)
+    actions = actions.loc[:, ordered_columns]
+
     summary = pd.DataFrame(
         [
             {
