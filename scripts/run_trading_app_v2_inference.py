@@ -92,7 +92,7 @@ def main() -> int:
     )
     robinhood_plan = build_robinhood_option_orders(
         target_contracts=robinhood_targets,
-        gate_discount_pct=90.0,
+        discount_pct=90.0,
         current_option_positions=pd.DataFrame(),
         pending_option_orders=pd.DataFrame(),
     )

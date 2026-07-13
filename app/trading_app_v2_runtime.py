@@ -1298,7 +1298,7 @@ def build_alpaca_option_trade_plan(
 def build_robinhood_option_orders(
     *,
     target_contracts: pd.DataFrame,
-    gate_discount_pct: float,
+    discount_pct: float,
     account_number: str | None = None,
     current_option_positions: pd.DataFrame | None = None,
     pending_option_orders: pd.DataFrame | None = None,
@@ -1399,7 +1399,7 @@ def build_robinhood_option_orders(
         if not symbol or symbol in held_target_symbols or symbol in pending_buy_symbols:
             continue
         bid = _first_positive(target, ("bid_price", "bid"))
-        discounted_bid = bid * (1.0 - float(gate_discount_pct) / 100.0) if bid is not None else None
+        discounted_bid = bid * (1.0 - float(discount_pct) / 100.0) if bid is not None else None
         quantity = option_contract_quantity(
             account_value=float(strategy_allocation),
             option_price=discounted_bid,
@@ -1426,9 +1426,9 @@ def build_robinhood_option_orders(
         priced = apply_option_limit_policy(
             pd.DataFrame([buy_row]),
             time_in_force="gtc",
-            buy_discount_pct=min(float(gate_discount_pct), 99.99),
+            discount_pct=min(float(discount_pct), 99.99),
         )
-        priced = apply_robinhood_submission_gate(priced, gate_discount_pct=gate_discount_pct)
+        priced = apply_robinhood_submission_gate(priced, discount_pct=discount_pct)
         action_rows.extend(priced.to_dict(orient="records"))
 
     actions = pd.DataFrame(action_rows)
@@ -1468,7 +1468,7 @@ def build_robinhood_option_orders(
                 "orders_to_cancel": int(actions["action"].astype(str).str.startswith("cancel_").sum()) if not actions.empty else 0,
                 "positions_to_exit": int(actions["action"].astype(str).str.startswith("sell_to_close").sum()) if not actions.empty else 0,
                 "orders_to_open": int(actions["action"].astype(str).str.startswith("buy_to_open").sum()) if not actions.empty else 0,
-                "gate_discount_pct": float(gate_discount_pct),
+                "discount_pct": float(discount_pct),
             }
         ]
     )
@@ -1485,17 +1485,17 @@ def build_robinhood_option_orders(
 def apply_robinhood_submission_gate(
     orders: pd.DataFrame,
     *,
-    gate_discount_pct: float,
+    discount_pct: float,
 ) -> pd.DataFrame:
     """Apply a Robinhood-only gate without mutating any paper-account plan."""
 
-    gate = float(gate_discount_pct)
+    gate = float(discount_pct)
     if not 0.0 <= gate <= 100.0:
-        raise ValueError("gate_discount_pct must be in [0, 100]")
+        raise ValueError("discount_pct must be in [0, 100]")
     out = pd.DataFrame() if orders is None else orders.copy()
     if out.empty:
         return out
-    out["gate_discount_pct"] = gate
+    out["discount_pct"] = gate
     if "skip_submit" not in out.columns:
         out["skip_submit"] = False
     if "skip_reason" not in out.columns:
@@ -1532,6 +1532,10 @@ def _normalize_robinhood_target_contracts(target_contracts: pd.DataFrame) -> pd.
         out["expiry_date"] = out["expiration_date"]
     if "quantity" not in out.columns and "target_contracts" in out.columns:
         out["quantity"] = out["target_contracts"]
+    if "quantity" not in out.columns:
+        # Quantity is recomputed from the live discounted bid by the planner;
+        # retain the target rows through normalization with a neutral placeholder.
+        out["quantity"] = pd.Series(1, index=out.index, dtype="int64")
     if "limit_price" not in out.columns:
         if "limit_order_price" in out.columns:
             out["limit_price"] = out["limit_order_price"]
@@ -1772,7 +1776,7 @@ def apply_option_limit_policy(
     orders: pd.DataFrame,
     *,
     time_in_force: str | None = "gtc",
-    buy_discount_pct: float = 0.0,
+    discount_pct: float = 0.0,
     priced_at: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Set option limit prices from the executable side of the quote.
@@ -1780,9 +1784,9 @@ def apply_option_limit_policy(
     Buy-to-open orders bid. Sell-to-close orders ask. Cancels pass through.
     """
 
-    discount = float(buy_discount_pct)
+    discount = float(discount_pct)
     if not 0.0 <= discount < 100.0:
-        raise ValueError("buy_discount_pct must be in [0, 100)")
+        raise ValueError("discount_pct must be in [0, 100)")
     if orders is None or orders.empty:
         return pd.DataFrame() if orders is None else orders.copy()
     work = orders.copy()
@@ -1830,7 +1834,7 @@ def apply_option_limit_policy(
         work.at[idx, "price"] = float(limit_price)
         work.at[idx, "limit_price_source"] = source
         work.at[idx, "live_quote_priced_at"] = price_timestamp.isoformat()
-        work.at[idx, "buy_discount_pct"] = discount if pricing_side == "buy" else 0.0
+        work.at[idx, "discount_pct"] = discount if pricing_side == "buy" else 0.0
         work.at[idx, "skip_submit"] = False
         work.at[idx, "skip_reason"] = ""
     return work
@@ -1840,7 +1844,7 @@ def generate_live_option_limit_prices(
     order_intents: pd.DataFrame,
     live_quotes: pd.DataFrame,
     *,
-    buy_discount_pct: float = 0.0,
+    discount_pct: float = 0.0,
     time_in_force: str = "gtc",
     priced_at: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
@@ -1870,7 +1874,7 @@ def generate_live_option_limit_prices(
     return apply_option_limit_policy(
         priced,
         time_in_force=time_in_force,
-        buy_discount_pct=buy_discount_pct,
+        discount_pct=discount_pct,
         priced_at=priced_at,
     )
 

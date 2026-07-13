@@ -717,7 +717,7 @@ def test_robinhood_option_orders_reconcile_before_new_entries():
         target_contracts=target_contracts,
         current_option_positions=current_positions,
         pending_option_orders=pending_orders,
-        gate_discount_pct=90.0,
+        discount_pct=90.0,
     )
     actions = plan["actions"]
 
@@ -726,7 +726,7 @@ def test_robinhood_option_orders_reconcile_before_new_entries():
     assert actions.loc[1, "limit_price_source"] == "ask_price"
     assert float(actions.loc[2, "limit_order_price"]) == 7.0
     assert actions.loc[2, "limit_price_source"] == "bid_price"
-    assert float(actions.loc[2, "buy_discount_pct"]) == 90.0
+    assert float(actions.loc[2, "discount_pct"]) == 90.0
 
 
 def test_robinhood_100_gate_blocks_only_robinhood_copy():
@@ -736,7 +736,7 @@ def test_robinhood_100_gate_blocks_only_robinhood_copy():
 
     robinhood_orders = runtime.apply_robinhood_submission_gate(
         paper_orders,
-        gate_discount_pct=100.0,
+        discount_pct=100.0,
     )
 
     assert "skip_submit" not in paper_orders.columns
