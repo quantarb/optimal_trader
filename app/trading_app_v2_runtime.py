@@ -1584,6 +1584,22 @@ def _option_contract_quantity(
     return max(0, int(math.floor((value / capacity) / (price * multiplier))))
 
 
+def option_contract_quantity(
+    *,
+    account_value: float,
+    option_price: float | None,
+    max_underlyings: int = 20,
+    contract_multiplier: int = 100,
+) -> int:
+    """Public sizing helper for Alpaca and discounted Robinhood targets."""
+    return _option_contract_quantity(
+        account_value=account_value,
+        option_price=option_price,
+        max_underlyings=max_underlyings,
+        contract_multiplier=contract_multiplier,
+    )
+
+
 def build_llm_review_orders(
     *,
     leaderboard: pd.DataFrame,
@@ -1616,6 +1632,7 @@ def build_ranked_alpaca_option_orders(
     decision_col: str = "direction",
     llm: bool = False,
     max_underlyings: int = 20,
+    strategy_allocation: float | None = None,
 ) -> pd.DataFrame:
     """Reconcile prior-day symbol/contract selections, then price with live Alpaca quotes."""
 
@@ -1634,6 +1651,11 @@ def build_ranked_alpaca_option_orders(
     account_value = float(account.get("equity") or account.get("portfolio_value") or account.get("cash") or 0.0)
     if account_value <= 0:
         raise ValueError(f"Alpaca account {account_prefix!r} has no positive equity/portfolio value")
+    if strategy_allocation is not None:
+        strategy_allocation = float(strategy_allocation)
+        if strategy_allocation <= 0:
+            raise ValueError("strategy_allocation must be positive when provided")
+        account_value = min(account_value, strategy_allocation)
     current_positions = _enrich_alpaca_option_records(client, client.get_positions())
     normalized_decisions = decisions.copy()
     held_underlyings = {
@@ -1707,6 +1729,7 @@ def build_llm_ranked_option_orders(
     top_k: int = 20,
     as_of_date: str | None = None,
     trading_agents_config: Any | None = None,
+    strategy_allocation: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     from platforms.agents.trading_agents import review_trade_candidates
 
@@ -1729,6 +1752,7 @@ def build_llm_ranked_option_orders(
         decision_col="decision",
         llm=True,
         max_underlyings=int(top_k),
+        strategy_allocation=strategy_allocation,
     )
     return orders, reviewed
 

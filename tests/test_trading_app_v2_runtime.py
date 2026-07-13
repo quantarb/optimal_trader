@@ -107,6 +107,16 @@ def test_option_contract_quantity_targets_one_twentieth_of_account(price, expect
     ) == expected
 
 
+def test_discounted_robinhood_bid_sizing_targets_five_thousand_dollars():
+    # $5 bid at a 90% gate is a $0.50 limit; 100 shares/contract means 100
+    # contracts consume the intended $5,000 sleeve.
+    assert runtime.option_contract_quantity(
+        account_value=100_000.0,
+        option_price=5.0 * 0.10,
+        max_underlyings=20,
+    ) == 100
+
+
 def test_llm_option_plan_reverses_opposites_and_retains_same_type_or_hold():
     plan = build_llm_option_order_plan(
         [

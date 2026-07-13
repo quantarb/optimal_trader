@@ -20,6 +20,7 @@ from app.trading_app_v2_runtime import (
     load_equity_artifacts,
     save_live_artifacts,
     select_optionable_leaderboard,
+    option_contract_quantity,
     write_streamlit_leaderboard_app,
 )
 
@@ -58,6 +59,7 @@ def main() -> int:
         option_rankings=option_rankings,
         decisions=option_leaderboard[["symbol", "direction"]],
         account_prefix="OPTION",
+        strategy_allocation=100_000.0,
     )
     llm_orders, llm_reviews = build_llm_ranked_option_orders(
         leaderboard=option_leaderboard,
@@ -65,6 +67,7 @@ def main() -> int:
         account_prefix="LLM",
         top_k=args.top_k,
         as_of_date=score_date,
+        strategy_allocation=100_000.0,
     )
     orders["alpaca_llm_paper"] = llm_orders
 
@@ -75,12 +78,18 @@ def main() -> int:
         ((robinhood_targets["direction"] == "long") & (robinhood_targets["option_type"] == "call"))
         | ((robinhood_targets["direction"] == "short") & (robinhood_targets["option_type"] == "put"))
     ].copy()
-    robinhood_targets["quantity"] = 1
     robinhood_targets["expiry_date"] = robinhood_targets["expiration"]
     robinhood_targets["strike_price"] = robinhood_targets["strike"]
     robinhood_targets["combined_score"] = robinhood_targets["pred_meta_stack_rank"]
     robinhood_targets["bid_price"] = pd.to_numeric(robinhood_targets.get("bid"), errors="coerce")
     robinhood_targets["ask_price"] = pd.to_numeric(robinhood_targets.get("ask"), errors="coerce")
+    robinhood_targets["quantity"] = robinhood_targets["bid_price"].map(
+        lambda bid: option_contract_quantity(
+            account_value=100_000.0,
+            option_price=(float(bid) * 0.10) if pd.notna(bid) and float(bid) > 0 else None,
+            max_underlyings=args.top_k,
+        )
+    )
     robinhood_plan = build_robinhood_option_orders(
         target_contracts=robinhood_targets,
         gate_discount_pct=90.0,
