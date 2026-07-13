@@ -1164,7 +1164,7 @@ def build_alpaca_option_trade_plan(
                     "qty": qty,
                     "quantity": qty,
                     "order_type": "limit",
-                    "time_in_force": "day",
+                    "time_in_force": "gtc",
                     "bid_price": bid,
                     "ask_price": ask,
                     "mark_price": mark,
@@ -1264,7 +1264,7 @@ def build_alpaca_option_trade_plan(
                 "side": "buy",
                 "qty": quantity,
                 "order_type": "limit",
-                "time_in_force": "day",
+                "time_in_force": "gtc",
                 "reason": "New current top-K trading_app_v2 option position.",
             }
         )
@@ -1728,7 +1728,7 @@ def build_ranked_alpaca_option_orders(
     return generate_live_option_limit_prices(
         intents,
         quote_frame,
-        time_in_force="day",
+        time_in_force="gtc",
     )
 
 
@@ -1771,7 +1771,7 @@ def build_llm_ranked_option_orders(
 def apply_option_limit_policy(
     orders: pd.DataFrame,
     *,
-    time_in_force: str | None = None,
+    time_in_force: str | None = "gtc",
     buy_discount_pct: float = 0.0,
     priced_at: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
@@ -1841,7 +1841,7 @@ def generate_live_option_limit_prices(
     live_quotes: pd.DataFrame,
     *,
     buy_discount_pct: float = 0.0,
-    time_in_force: str = "day",
+    time_in_force: str = "gtc",
     priced_at: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Join live quotes to already-selected contracts and generate limit prices.

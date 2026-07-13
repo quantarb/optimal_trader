@@ -541,6 +541,12 @@ def test_apply_option_limit_policy_uses_bid_ask_ticks_and_preserves_cancels():
     assert pd.isna(priced.loc[2].get("limit_order_price"))
 
 
+def test_option_limit_policy_defaults_to_gtc():
+    orders = pd.DataFrame([{"symbol": "AAPL_C", "action": "buy_to_open_call", "side": "buy", "bid_price": 1.0, "ask_price": 1.1}])
+    priced = runtime.apply_option_limit_policy(orders)
+    assert priced.loc[0, "time_in_force"] == "gtc"
+
+
 def test_live_option_pricing_does_not_change_prior_day_contract_selection():
     intents = pd.DataFrame(
         [
