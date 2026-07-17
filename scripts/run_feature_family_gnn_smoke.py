@@ -22,6 +22,10 @@ for repo in (REPO_ROOT, WORKSPACE_ROOT / "quant-warehouse", WORKSPACE_ROOT / "qu
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
 
+from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
+    HitsLabelSpec,
+    build_hits_labels,
+)
 from quant_warehouse.warehouse.api import Warehouse
 from quant_orchestrator.platforms.backtesting_frameworks.shared_book import (
     SharedBookCostModel,
@@ -30,8 +34,9 @@ from quant_orchestrator.platforms.backtesting_frameworks.shared_book import (
 
 TRAIN_START, TRAIN_END = pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")
 TEST_START, TEST_END = pd.Timestamp("2025-01-01"), pd.Timestamp("2025-12-31")
-MIN_RETURN = float(os.getenv("GNN_MIN_RETURN", "0.01"))
-MAX_HOLD = int(os.getenv("GNN_MAX_HOLD", "60"))
+MAX_HOLD = int(os.getenv("GNN_MAX_HOLD", "120"))
+HITS_ITERATIONS = int(os.getenv("GNN_HITS_ITERATIONS", "50"))
+HITS_TAIL_QUANTILE = float(os.getenv("GNN_HITS_TAIL_QUANTILE", "0.20"))
 LOOKBACK = int(os.getenv("GNN_LOOKBACK", "10"))
 EPOCHS = int(os.getenv("GNN_EPOCHS", "12"))
 HIDDEN = int(os.getenv("GNN_HIDDEN", "48"))
@@ -40,7 +45,7 @@ SEED = 20260716
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
-OUT = REPO_ROOT / "artifacts" / "graph_oracle_feature_family_gnn"
+OUT = REPO_ROOT / "artifacts" / "graph_oracle_feature_family_gnn_improved_hits"
 OUT.mkdir(parents=True, exist_ok=True)
 TIER_CONFIGS = {
     "1T": (1_000_000_000_000, "equity_meta_model_1t"),
@@ -61,38 +66,10 @@ def normalize_prices(raw: pd.DataFrame) -> pd.DataFrame:
     return frame[["date", "open", "high", "low", "close"]].dropna().sort_values("date").drop_duplicates("date").reset_index(drop=True)
 
 
-def hits_year(frame: pd.DataFrame) -> pd.DataFrame:
-    """Continuous long/short HITS labels for one symbol-year."""
-    frame = frame.sort_values("date").reset_index(drop=True)
-    n = len(frame)
-    high = frame.high.to_numpy(float)
-    low = frame.low.to_numpy(float)
-    valid = np.triu(np.ones((n, n), dtype=bool), 1)
-    horizon = np.arange(n)[None, :] - np.arange(n)[:, None]
-    valid &= horizon <= MAX_HOLD
-    out = {"date": frame.date.to_numpy()}
-    for side, returns in {
-        "long": low[None, :] / high[:, None] - 1.0,
-        "short": low[:, None] / high[None, :] - 1.0,
-    }.items():
-        weights = np.where(valid, np.maximum(returns - MIN_RETURN, 0.0), 0.0)
-        hub = np.ones(n, dtype=float)
-        authority = np.ones(n, dtype=float)
-        for _ in range(50):
-            authority = weights.T @ hub
-            authority /= np.linalg.norm(authority) or 1.0
-            hub = weights @ authority
-            hub /= np.linalg.norm(hub) or 1.0
-        # Rescale each side to [0, 1] for stable node-head training.
-        out[f"{side}_hub"] = hub / (hub.max() or 1.0)
-        out[f"{side}_authority"] = authority / (authority.max() or 1.0)
-    return pd.DataFrame(out)
-
-
 def build_price_and_labels(symbols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     warehouse = Warehouse()
     node_rows: list[pd.DataFrame] = []
-    label_rows: list[pd.DataFrame] = []
+    price_frames: dict[str, pd.DataFrame] = {}
     for i, symbol in enumerate(symbols, 1):
         raw = warehouse.read_prices(symbol, provider="fmp", start="2023-01-01", end="2025-12-31")
         if raw is None or raw.empty:
@@ -104,18 +81,22 @@ def build_price_and_labels(symbols: list[str]) -> tuple[pd.DataFrame, pd.DataFra
         prices = prices.loc[prices.date.between(TRAIN_START, TEST_END)].copy()
         if len(prices) < 30:
             continue
+        price_frames[symbol] = prices.copy()
         prices.insert(0, "symbol", symbol)
         node_rows.append(prices)
-        for year, part in prices.groupby(prices.date.dt.year):
-            if year not in (2024, 2025):
-                continue
-            h = hits_year(part.drop(columns="symbol"))
-            h.insert(0, "symbol", symbol)
-            label_rows.append(h)
         if i % 100 == 0:
             print({"prices_loaded": i, "usable_symbols": len(node_rows)}, flush=True)
     prices = pd.concat(node_rows, ignore_index=True) if node_rows else pd.DataFrame()
-    labels = pd.concat(label_rows, ignore_index=True) if label_rows else pd.DataFrame()
+    labels = build_hits_labels(
+        price_frames,
+        spec=HitsLabelSpec(
+            max_hold=MAX_HOLD,
+            iterations=HITS_ITERATIONS,
+            tail_quantile=HITS_TAIL_QUANTILE,
+            start_date=str(TRAIN_START.date()),
+            end_date=str(TEST_END.date()),
+        ),
+    )
     return prices, labels
 
 
@@ -205,7 +186,9 @@ def fit_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFram
     y = labels.copy(); y.symbol = y.symbol.astype(str).str.upper(); y.date = pd.to_datetime(y.date).dt.normalize()
     base = base.merge(y, on=["symbol", "date"], how="left")
     target_cols = ["long_hub", "long_authority", "short_hub", "short_authority"]
+    tail_cols = [f"{column}_tail" for column in target_cols]
     base[target_cols] = base[target_cols].fillna(0.0).astype("float32")
+    base[tail_cols] = base[tail_cols].fillna(False).astype(bool)
     train_mask = base.date.between(TRAIN_START, TRAIN_END)
     med = base.loc[train_mask, feature_cols].apply(pd.to_numeric, errors="coerce").median().replace([np.inf, -np.inf], np.nan).fillna(0.0)
     xdf = base[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(med).fillna(0.0)
@@ -224,11 +207,14 @@ def fit_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFram
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(os.getenv("GNN_LR", "0.002")), weight_decay=1e-4)
     x = torch.tensor(base[feature_cols].to_numpy(dtype=np.float32))
     ha_y = torch.tensor(base[target_cols].to_numpy(dtype=np.float32))
+    ha_mask = torch.tensor(base[tail_cols].to_numpy(dtype=np.float32))
     edge_train_mask = torch.ones(len(pair_src), dtype=torch.bool)
     for epoch in range(EPOCHS):
         optimizer.zero_grad()
         _, ha_hat, edge_hat = model(x, temporal_edges, temporal_attr, pair_src, pair_dst)
-        node_loss = nn.functional.smooth_l1_loss(ha_hat[train_nodes], ha_y[train_nodes])
+        node_errors = nn.functional.smooth_l1_loss(ha_hat[train_nodes], ha_y[train_nodes], reduction="none")
+        node_mask = ha_mask[train_nodes]
+        node_loss = (node_errors * node_mask).sum() / node_mask.sum().clamp_min(1.0)
         edge_loss = nn.functional.smooth_l1_loss(edge_hat[edge_train_mask], pair_y[edge_train_mask]) if edge_hat is not None and len(pair_src) else torch.tensor(0.0)
         loss = node_loss + float(os.getenv("GNN_EDGE_LOSS_WEIGHT", "0.25")) * edge_loss
         loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
@@ -294,7 +280,7 @@ def run_tier(tier: str) -> pd.DataFrame:
             cost_models={"family_common": SharedBookCostModel(0.5, 5.0)},
         )
         if not summary.empty:
-            summary["tier"] = tier; summary["family"] = family; summary["label_source"] = "gnn_hub_authority"; summaries.append(summary)
+            summary["tier"] = tier; summary["family"] = family; summary["label_source"] = "gnn_sparse_hits"; summaries.append(summary)
     result = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
     result.to_csv(OUT / f"{tier.lower()}_train_2024_test_2025_results.csv", index=False)
     if predictions:
