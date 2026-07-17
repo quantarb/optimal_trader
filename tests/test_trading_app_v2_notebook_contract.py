@@ -31,16 +31,14 @@ def test_notebook_trades_only_the_equity_meta_stack():
     assert "min_train_rows=MIN_FAMILY_TRAIN_ROWS" in source
 
 
-def test_historical_option_backfill_runs_after_live_artifacts_with_a_daily_bound():
+def test_option_downloads_are_limited_to_score_date_refresh():
     source = _source()
 
-    save_position = source.index("saved_live_paths = save_live_artifacts(")
-    frontend_position = source.index("streamlit_app = write_streamlit_leaderboard_app(")
-    backfill_position = source.rindex("backfill_thetadata_for_oracle_trade_windows(")
-    assert save_position < frontend_position < backfill_position
-    assert "max_trades=THETADATA_ORACLE_BACKFILL_MAX_TRADES" in source
-    assert 'TRADING_APP_V2_OPTION_BACKFILL_MAX_TRADES", "25"' in source
-    assert "failed_after_live_artifacts" in source
+    assert "backfill_thetadata_eod_for_score_date(" in source
+    assert "backfill_thetadata_for_oracle_trade_windows(" not in source
+    assert "backfill_thetadata_options_for_oracle_trade_ranges(" not in source
+    assert "THETADATA_ORACLE_BACKFILL_MAX_TRADES" not in source
+    assert "thetadata_historical_backfill_summary.json" not in source
 
 
 def test_notebook_uses_only_requested_ye_k1_through_k3_labels():
