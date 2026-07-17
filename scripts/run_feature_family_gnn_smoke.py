@@ -37,6 +37,7 @@ TEST_START, TEST_END = pd.Timestamp("2025-01-01"), pd.Timestamp("2025-12-31")
 MAX_HOLD = int(os.getenv("GNN_MAX_HOLD", "120"))
 HITS_ITERATIONS = int(os.getenv("GNN_HITS_ITERATIONS", "50"))
 HITS_TAIL_QUANTILE = float(os.getenv("GNN_HITS_TAIL_QUANTILE", "0.20"))
+GNN_VARIANT = os.getenv("GNN_VARIANT", "long_only").strip().lower()
 LOOKBACK = int(os.getenv("GNN_LOOKBACK", "10"))
 EPOCHS = int(os.getenv("GNN_EPOCHS", "12"))
 HIDDEN = int(os.getenv("GNN_HIDDEN", "48"))
@@ -245,6 +246,8 @@ def fit_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFram
 
 
 def run_tier(tier: str) -> pd.DataFrame:
+    if GNN_VARIANT not in {"long_only", "short_only"}:
+        raise ValueError("GNN_VARIANT must be 'long_only' or 'short_only'")
     started = perf_counter()
     index = pd.read_csv(feature_dir(tier) / "index.csv")
     requested = tuple(x.strip() for x in os.getenv("GNN_FAMILIES", "").split(",") if x.strip())
@@ -273,7 +276,7 @@ def run_tier(tier: str) -> pd.DataFrame:
             next_returns=next_returns,
             symbols=tuple(close.columns),
             dates=dates,
-            variants=("long_short", "long_only"),
+            variants=(GNN_VARIANT,),
             top_k_values=(20,),
             entry_threshold=0.5,
             exit_threshold=0.5,
@@ -282,9 +285,9 @@ def run_tier(tier: str) -> pd.DataFrame:
         if not summary.empty:
             summary["tier"] = tier; summary["family"] = family; summary["label_source"] = "gnn_sparse_hits"; summaries.append(summary)
     result = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
-    result.to_csv(OUT / f"{tier.lower()}_train_2024_test_2025_results.csv", index=False)
+    result.to_csv(OUT / f"{tier.lower()}_{GNN_VARIANT}_train_2024_test_2025_results.csv", index=False)
     if predictions:
-        pd.concat(predictions, ignore_index=True).to_parquet(OUT / f"{tier.lower()}_train_2024_test_2025_predictions.parquet", index=False)
+        pd.concat(predictions, ignore_index=True).to_parquet(OUT / f"{tier.lower()}_{GNN_VARIANT}_train_2024_test_2025_predictions.parquet", index=False)
     print(result.groupby(["variant", "label_source"], as_index=False).agg(families=("family", "nunique"), mean_return=("total_return", "mean"), median_return=("total_return", "median"), mean_sharpe=("sharpe", "mean")).round(4) if not result.empty else result)
     print({"tier": tier, "seconds": round(perf_counter() - started, 1), "result_rows": len(result)}, flush=True)
     return result
@@ -297,7 +300,7 @@ def main() -> None:
         raise ValueError(f"unknown GNN_TIERS: {unknown}")
     all_results = [run_tier(tier) for tier in requested]
     combined = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
-    combined.to_csv(OUT / "all_train_2024_test_2025_results.csv", index=False)
+    combined.to_csv(OUT / f"all_{GNN_VARIANT}_train_2024_test_2025_results.csv", index=False)
     if not combined.empty:
         print(combined.groupby(["tier", "variant"], as_index=False).agg(families=("family", "nunique"), mean_return=("total_return", "mean"), median_return=("total_return", "median"), min_return=("total_return", "min"), max_return=("total_return", "max"), mean_sharpe=("sharpe", "mean")).round(4).to_string(index=False))
 
