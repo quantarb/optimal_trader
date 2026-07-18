@@ -175,16 +175,16 @@ def select_top_bottom_rows(frame: pd.DataFrame, target: str) -> pd.DataFrame:
     return out.loc[mask].copy()
 
 
-def backtest_scores(scores: pd.DataFrame, close: pd.DataFrame, variant: str, dates: pd.DatetimeIndex, threshold: float) -> dict:
+def backtest_scores(scores: pd.DataFrame, close: pd.DataFrame, variant: str, dates: pd.DatetimeIndex, threshold: float, top_k: int = 20, cost_bps: float = 5.5) -> dict:
     symbols = tuple(close.columns)
     if variant == "long":
         fields = ["symbol", "date", "long_score", "short_score", "long_exit_score", "short_exit_score"]
     else:
         fields = ["symbol", "date", "long_score", "short_score", "long_exit_score", "short_exit_score"]
-    weights, trades = build_shared_book_weights(scores[fields], symbols, dates, top_k=20, variant="long_only" if variant == "long" else "short_only", entry_threshold=threshold, exit_threshold=threshold, planner="threshold")
+    weights, trades = build_shared_book_weights(scores[fields], symbols, dates, top_k=top_k, variant="long_only" if variant == "long" else "short_only", entry_threshold=threshold, exit_threshold=threshold, planner="threshold")
     next_returns = close.pct_change().shift(-1)
-    returns, equity, _ = run_shared_book_backtest(weights, next_returns, cost_bps=5.5)
-    row = shared_book_performance_metrics(returns, equity, weights, trades, framework="shared_book", variant=variant, top_k=20, cost_bps=5.5)
+    returns, equity, _ = run_shared_book_backtest(weights, next_returns, cost_bps=cost_bps)
+    row = shared_book_performance_metrics(returns, equity, weights, trades, framework="shared_book", variant=variant, top_k=top_k, cost_bps=cost_bps)
     row["trades"] = int(len(trades))
     return row
 

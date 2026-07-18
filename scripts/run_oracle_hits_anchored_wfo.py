@@ -29,7 +29,12 @@ DATA_START = pd.Timestamp(os.getenv("WFO_DATA_START", "2015-01-01"))
 DATA_END = pd.Timestamp(os.getenv("WFO_DATA_END", "2025-12-31"))
 RF_ESTIMATORS = int(os.getenv("WFO_RF_ESTIMATORS", "40"))
 HITS_WEIGHTING = os.getenv("WFO_HITS_WEIGHTING", "clip")
-OUT = REPO_ROOT / "artifacts" / "oracle_hits_anchored_wfo"
+VARIANTS = tuple(x.strip() for x in os.getenv("WFO_VARIANTS", "long,short").split(",") if x.strip())
+ORACLE_THRESHOLDS = tuple(float(x) for x in os.getenv("WFO_ORACLE_THRESHOLDS", str(base.ORACLE_THRESHOLD)).split(",") if x.strip())
+HITS_THRESHOLDS = tuple(float(x) for x in os.getenv("WFO_HITS_THRESHOLDS", str(base.HITS_THRESHOLD)).split(",") if x.strip())
+TOP_KS = tuple(int(x) for x in os.getenv("WFO_TOP_KS", "20").split(",") if x.strip())
+PORTFOLIO_COST_BPS = float(os.getenv("WFO_PORTFOLIO_COST_BPS", "5.5"))
+OUT = Path(os.getenv("WFO_OUT", str(REPO_ROOT / "artifacts" / "oracle_hits_anchored_wfo")))
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -127,7 +132,7 @@ def run_family(row: pd.Series, prices: pd.DataFrame, labels: pd.DataFrame, close
     dates = pd.DatetimeIndex(close.index[(close.index >= test_start) & (close.index <= test_end)])
     result = []
 
-    for side in ("long", "short"):
+    for side in VARIANTS:
         scores = oracle_scores(train, test, features, side)
         if scores is None:
             continue
@@ -135,12 +140,14 @@ def run_family(row: pd.Series, prices: pd.DataFrame, labels: pd.DataFrame, close
         pred = test[["symbol", "date"]].copy()
         pred["long_score"], pred["short_score"] = (entry, 0.0) if side == "long" else (0.0, entry)
         pred["long_exit_score"], pred["short_exit_score"] = (0.0, exit_) if side == "long" else (exit_, 0.0)
-        metrics = base.backtest_scores(pred, close, side, dates, base.ORACLE_THRESHOLD)
-        metrics.update({"tier": tier, "year": year, "train_end": train_end, "model": "oracle_separate", "variant": side, "family": family, "source": source, "train_rows": len(train)})
-        result.append(metrics)
+        for threshold in ORACLE_THRESHOLDS:
+            for top_k in TOP_KS:
+                metrics = base.backtest_scores(pred, close, side, dates, threshold, top_k, PORTFOLIO_COST_BPS)
+                metrics.update({"tier": tier, "year": year, "train_end": train_end, "model": "oracle_separate", "variant": side, "family": family, "source": source, "train_rows": len(train), "entry_threshold": threshold, "exit_threshold": threshold, "portfolio_top_k": top_k})
+                result.append(metrics)
 
     components = {}
-    for side in ("long", "short"):
+    for side in VARIANTS:
         for role in ("hub", "authority"):
             target = f"{side}_{role}" if HITS_WEIGHTING == "clip" else f"{side}_{role}_rank"
             values = hits_score(train, test, features, target, family, year)
@@ -153,9 +160,11 @@ def run_family(row: pd.Series, prices: pd.DataFrame, labels: pd.DataFrame, close
         hub, authority = components[(side, "hub")], components[(side, "authority")]
         pred["long_score"], pred["short_score"] = (hub, 0.0) if side == "long" else (0.0, hub)
         pred["long_exit_score"], pred["short_exit_score"] = (0.0, authority) if side == "long" else (authority, 0.0)
-        metrics = base.backtest_scores(pred, close, side, dates, base.HITS_THRESHOLD)
-        metrics.update({"tier": tier, "year": year, "train_end": train_end, "model": "hits_two_per_side", "variant": side, "family": family, "source": source, "train_rows": len(train), "tail_quantile": base.HITS_TAIL_QUANTILE})
-        result.append(metrics)
+        for threshold in HITS_THRESHOLDS:
+            for top_k in TOP_KS:
+                metrics = base.backtest_scores(pred, close, side, dates, threshold, top_k, PORTFOLIO_COST_BPS)
+                metrics.update({"tier": tier, "year": year, "train_end": train_end, "model": "hits_two_per_side", "variant": side, "family": family, "source": source, "train_rows": len(train), "tail_quantile": base.HITS_TAIL_QUANTILE, "entry_threshold": threshold, "exit_threshold": threshold, "portfolio_top_k": top_k})
+                result.append(metrics)
     return result
 
 
@@ -181,7 +190,7 @@ def main() -> None:
     all_rows = [run_tier(tier) for tier in tiers]
     out = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
     out.to_csv(OUT / "all_results.csv", index=False)
-    summary = out.groupby(["tier", "year", "model", "variant"], as_index=False).agg(
+    summary = out.groupby(["tier", "year", "model", "variant", "entry_threshold", "portfolio_top_k"], as_index=False).agg(
         families=("family", "nunique"), mean_return=("total_return", "mean"), median_return=("total_return", "median"),
         min_return=("total_return", "min"), max_return=("total_return", "max"), mean_sharpe=("sharpe", "mean"),
     ) if not out.empty else out
