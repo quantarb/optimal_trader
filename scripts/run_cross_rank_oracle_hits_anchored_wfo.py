@@ -30,8 +30,8 @@ FIRST_YEAR = int(os.getenv("CROSS_RANK_FIRST_YEAR", "2021"))
 LAST_YEAR = int(os.getenv("CROSS_RANK_LAST_YEAR", "2025"))
 RF_ESTIMATORS = int(os.getenv("CROSS_RANK_RF_ESTIMATORS", "40"))
 TOP_K = int(os.getenv("CROSS_RANK_TOP_K", "10"))
-ORACLE_THRESHOLD = float(os.getenv("CROSS_RANK_ORACLE_THRESHOLD", "0.5"))
-HITS_THRESHOLD = float(os.getenv("CROSS_RANK_HITS_THRESHOLD", "0.8"))
+ORACLE_THRESHOLD = float(os.getenv("CROSS_RANK_ORACLE_THRESHOLD", str(wfo.base.ORACLE_THRESHOLD)))
+HITS_THRESHOLD = float(os.getenv("CROSS_RANK_HITS_THRESHOLD", str(wfo.base.HITS_THRESHOLD)))
 # The production HITS graph uses a longer edge horizon, but materializing all
 # cross-sectional edge groups for rank labels is quadratic.  A 20-session
 # candidate horizon keeps this ranker test memory-safe and matches the short
@@ -214,6 +214,9 @@ def run_tier(tier: str) -> pd.DataFrame:
         for _, meta in index.iterrows():
             rows.extend(run_family(meta, prices, labels, close, year, tier))
         print({"tier": tier, "year": year, "rows": len(rows), "seconds": round(perf_counter() - t0, 1)}, flush=True)
+        # Preserve completed anchored-WFO years so long tier runs can be
+        # inspected or resumed without waiting for the remaining years.
+        pd.DataFrame(rows).to_parquet(OUT / f"{tier.lower()}_results_through_{year}.parquet", index=False)
     out = pd.DataFrame(rows)
     out.to_parquet(OUT / f"{tier.lower()}_results.parquet", index=False)
     return out
