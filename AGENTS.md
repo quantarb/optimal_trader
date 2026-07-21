@@ -37,3 +37,10 @@
 - Remove superseded one-off scale scripts instead of retaining wrappers that can drift from the canonical runner.
 - Curated technical feature families are part of the default equity model contract at every scale. Do not create a technical/non-technical script split or an opt-out that silently removes them.
 - Scripts must call the current public optimized APIs in `quant-warehouse` and `quant-orchestrator`; do not copy notebook cells, private feature builders, model training loops, or full-panel filtering implementations into scripts.
+
+## Temporal Semantics For Research And Backtests
+
+- Do not call a model non-deployable merely because its historical training labels were generated from future outcomes within the historical training window. This applies to Oracle trades, congressional trades, HITS-derived trades, event graphs, and any other future-outcome-derived target. Such labels are valid supervised-learning targets when every input and label used for training is available by the training cutoff and the model is applied only after that cutoff.
+- For example, generating Oracle, congressional-event, or HITS trade labels from 2024 data, training on 2024 features and labels, and predicting 2025 with 2025-available features is a valid point-in-time 2025 deployment test. This is conceptually the same as computing a 200-day moving average from historical prices and applying it later.
+- Distinguish historical label generation from leakage: using future 2024 outcomes to label 2024 training rows is acceptable for a 2025 test; using future 2025 prices or undisclosed 2025 event outcomes to create 2025 predictions, or directly executing known 2025 future-derived trades, is leakage.
+- Before making a temporal-validity claim, identify the train cutoff, test/deployment period, feature availability time, label availability time, and any disclosure or reporting lag. Do not repeat a blanket claim that Oracle-derived supervised models are non-deployable without checking those boundaries.
