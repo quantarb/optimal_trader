@@ -53,13 +53,20 @@ HIDDEN = int(os.getenv("GNN_HIDDEN", "48"))
 MOE_EXPERTS = int(os.getenv("GNN_MOE_EXPERTS", "0"))
 MOE_TOP_K = max(1, int(os.getenv("GNN_MOE_TOP_K", "2")))
 PAIR_PER_SOURCE = int(os.getenv("GNN_PAIR_PER_SOURCE", "8"))
+GNN_DEVICE_NAME = os.getenv("GNN_DEVICE", "auto").strip().lower()
+if GNN_DEVICE_NAME == "auto":
+    GNN_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+else:
+    GNN_DEVICE = torch.device(GNN_DEVICE_NAME)
+if GNN_DEVICE.type == "cuda":
+    torch.set_float32_matmul_precision("high")
 SEED = 20260716
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
 OUT = REPO_ROOT / "artifacts" / "graph_oracle_feature_family_gnn_improved_hits"
 OUT.mkdir(parents=True, exist_ok=True)
-CACHE_VERSION = "wfo_full_history_targets_v1"
+CACHE_VERSION = "wfo_full_history_targets_v3_baseline_mtl"
 GRAPH_CACHE: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]] = {}
 TIER_CONFIGS = {
     "1T": (1_000_000_000_000, "equity_meta_model_1t"),
@@ -161,6 +168,19 @@ EVENT_TARGETS = {
     "is_sec_10k_filed": ("filing", "sec_10k_filed", None),
     "is_sec_form4_filed": ("filing", "sec_form4_filed", None),
 }
+GRAPH_EVENT_TARGETS = {
+    "is_long_hub_event": "long_hub",
+    "is_long_authority_event": "long_authority",
+    "is_long_pagerank_event": "long_pagerank",
+    "is_short_hub_event": "short_hub",
+    "is_short_authority_event": "short_authority",
+    "is_short_pagerank_event": "short_pagerank",
+}
+# The baseline MTL configuration uses one shared prototypical head for the
+# company/event targets.  The six continuous graph targets remain node
+# regression targets below; graph percentile events are intentionally not
+# separate event tasks in this comparison.
+ALL_EVENT_TARGETS = EVENT_TARGETS
 AUX_TARGET_COLS = ("sector_target", "industry_target", "year_target")
 AUX_CLASS_DIMS: dict[str, int] = {"sector_target": 1, "industry_target": 1, "year_target": 1}
 
@@ -185,12 +205,16 @@ def add_auxiliary_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFra
     symbols_upper = out.symbol.astype(str).str.upper()
     out["sector_target"] = symbols_upper.map(lambda value: sector_codes.get(profiles.get(value, ("", ""))[0], -1)).astype("int64")
     out["industry_target"] = symbols_upper.map(lambda value: industry_codes.get(profiles.get(value, ("", ""))[1], -1)).astype("int64")
-    out["year_target"] = pd.to_datetime(out.date, errors="coerce").dt.year.fillna(-1).astype("int64")
+    dates = pd.to_datetime(out.date, errors="coerce")
+    out["year_target"] = dates.dt.year.fillna(-1).astype("int64")
     # Year labels are made contiguous so the classification head can use CE.
     years = sorted(value for value in out["year_target"].unique() if value >= 0)
     year_codes = {value: i for i, value in enumerate(years)}
     out["year_target"] = out["year_target"].map(lambda value: year_codes.get(int(value), -1)).astype("int64")
-    AUX_CLASS_DIMS.update({"sector_target": max(1, len(sectors)), "industry_target": max(1, len(industries)), "year_target": max(1, len(years))})
+    AUX_CLASS_DIMS.update({
+        "sector_target": max(1, len(sectors)), "industry_target": max(1, len(industries)),
+        "year_target": max(1, len(years)),
+    })
     return out
 
 
@@ -230,6 +254,19 @@ def add_event_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
         return labels
     extra = pd.concat(rows, ignore_index=True)
     return labels.merge(extra, on=["symbol", "date"], how="left")
+
+
+def add_graph_event_labels(labels: pd.DataFrame) -> pd.DataFrame:
+    """Add symbol-level expanding top-decile graph events without lookahead."""
+    out = labels.copy()
+    for target, source in GRAPH_EVENT_TARGETS.items():
+        values = pd.to_numeric(out[source], errors="coerce")
+        prior_values = values.groupby(out.symbol, sort=False).shift(1)
+        thresholds = prior_values.groupby(out.symbol, sort=False).transform(
+            lambda series: series.expanding(min_periods=20).quantile(0.90)
+        )
+        out[target] = values.ge(thresholds).fillna(False).astype("float32")
+    return out
 
 
 def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -344,7 +381,8 @@ class TemporalGNN(nn.Module):
         self.message = nn.Sequential(nn.Linear(hidden + 2, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
         self.update = nn.Sequential(nn.Linear(hidden * 2, hidden), nn.LayerNorm(hidden), nn.ReLU())
         self.edge_head = nn.Sequential(nn.Linear(hidden * 2 + 1, hidden), nn.ReLU(), nn.Linear(hidden, 2))
-        self.ha_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6 + len(EVENT_TARGETS)), nn.Sigmoid())
+        self.node_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6), nn.Sigmoid())
+        self.event_head = EventPrototypeHead(hidden, len(ALL_EVENT_TARGETS))
 
     def encode(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor) -> torch.Tensor:
         h = self.input(x)
@@ -359,12 +397,66 @@ class TemporalGNN(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor, pair_src: torch.Tensor | None = None, pair_dst: torch.Tensor | None = None):
         z = self.encode(x, edge_index, edge_attr)
-        ha = self.ha_head(z)
+        node_targets = self.node_head(z)
+        event_logits = self.event_head(z)
         pair = None
         if pair_src is not None and pair_dst is not None:
             gap = (pair_dst - pair_src).float().unsqueeze(1) / max(1.0, MAX_HOLD)
             pair = self.edge_head(torch.cat([z[pair_src], z[pair_dst], gap], dim=1))
-        return z, ha, pair
+        return z, node_targets, event_logits, pair
+
+
+class EventPrototypeHead(nn.Module):
+    """Shared metric-learning head for independent binary event labels.
+
+    Each event owns a positive prototype in the same learned embedding space.
+    Events remain independent binary tasks: there is no softmax across events,
+    and one node may activate multiple event labels at the same time.
+    """
+
+    def __init__(self, hidden: int, n_events: int, metric_dim: int | None = None):
+        super().__init__()
+        metric_dim = metric_dim or int(os.getenv("GNN_EVENT_METRIC_DIM", "24"))
+        self.embedding = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim))
+        self.prototypes = nn.Parameter(torch.randn(n_events, metric_dim) * 0.02)
+        self.log_temperature = nn.Parameter(torch.tensor(np.log(10.0), dtype=torch.float32))
+        self.bias = nn.Parameter(torch.zeros(n_events))
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        embedding = nn.functional.normalize(self.embedding(h), dim=-1)
+        prototypes = nn.functional.normalize(self.prototypes, dim=-1)
+        temperature = self.log_temperature.exp().clamp(1.0, 50.0)
+        return temperature * embedding @ prototypes.T + self.bias
+
+
+def event_loss_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Class-balanced independent BCE for sparse event labels."""
+    positives = targets.sum(dim=0)
+    negative_count = targets.shape[0] - positives
+    pos_weight = (negative_count / positives.clamp_min(1.0)).clamp_min(1.0).clamp_max(100.0)
+    return nn.functional.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
+
+
+def combine_target_predictions(node_targets: torch.Tensor, event_logits: torch.Tensor) -> torch.Tensor:
+    """Return the historical target-column layout for downstream ranking."""
+    return torch.cat([node_targets, torch.sigmoid(event_logits)], dim=-1)
+
+
+class CategoricalPrototypeHead(nn.Module):
+    """Cosine-prototype classifier for dense categorical auxiliary tasks."""
+
+    def __init__(self, hidden: int, n_classes: int, metric_dim: int | None = None):
+        super().__init__()
+        metric_dim = metric_dim or int(os.getenv("GNN_METRIC_DIM", "24"))
+        self.embedding = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim))
+        self.prototypes = nn.Parameter(torch.randn(n_classes, metric_dim) * 0.02)
+        self.log_temperature = nn.Parameter(torch.tensor(np.log(10.0), dtype=torch.float32))
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        embedding = nn.functional.normalize(self.embedding(h), dim=-1)
+        prototypes = nn.functional.normalize(self.prototypes, dim=-1)
+        temperature = self.log_temperature.exp().clamp(1.0, 50.0)
+        return temperature * embedding @ prototypes.T
 
 
 def family_key(name: str) -> str:
@@ -380,7 +472,8 @@ class SharedFamilyGNN(nn.Module):
         self.message = nn.Sequential(nn.Linear(hidden + 2, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
         self.update = nn.Sequential(nn.Linear(hidden * 2, hidden), nn.LayerNorm(hidden), nn.ReLU())
         self.edge_head = nn.Sequential(nn.Linear(hidden * 2 + 1, hidden), nn.ReLU(), nn.Linear(hidden, 2))
-        self.target_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6 + len(EVENT_TARGETS)), nn.Sigmoid())
+        self.node_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6), nn.Sigmoid())
+        self.event_head = EventPrototypeHead(hidden, len(ALL_EVENT_TARGETS))
 
     def forward_batch(self, xs: list[torch.Tensor], families: list[str], edge_index: torch.Tensor, edge_attr: torch.Tensor, pair_src: torch.Tensor, pair_dst: torch.Tensor):
         h = torch.stack([self.inputs[family_key(name)](x) for x, name in zip(xs, families)])
@@ -394,14 +487,15 @@ class SharedFamilyGNN(nn.Module):
             count = torch.zeros((len(xs), h.shape[1], 1), device=h.device)
             count.scatter_add_(1, edge_index[1].view(1, -1, 1).expand(len(xs), -1, 1), torch.ones((len(xs), len(edge_index[1]), 1), device=h.device))
             h = self.update(torch.cat([h, agg / count.clamp_min(1.0)], dim=2))
-        targets = self.target_head(h)
+        node_targets = self.node_head(h)
+        event_logits = self.event_head(h)
         gap = (pair_dst - pair_src).float().unsqueeze(1) / max(1.0, MAX_HOLD)
         pair = self.edge_head(torch.cat([h[:, pair_src, :], h[:, pair_dst, :], gap.unsqueeze(0).expand(len(xs), -1, -1)], dim=2))
-        return targets, pair
+        return node_targets, event_logits, pair
 
 
 class FusedFamilyGNN(nn.Module):
-    """Fuse every feature family into one node state before message passing."""
+    """Fuse every feature family into one node state on fixed temporal edges."""
 
     def __init__(self, feature_dims: dict[str, int], hidden: int = HIDDEN, aux_dims: dict[str, int] | None = None):
         super().__init__()
@@ -411,29 +505,37 @@ class FusedFamilyGNN(nn.Module):
         self.message = nn.Sequential(nn.Linear(hidden + 2, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
         self.update = nn.Sequential(nn.Linear(hidden * 2, hidden), nn.LayerNorm(hidden), nn.ReLU())
         self.edge_head = nn.Sequential(nn.Linear(hidden * 2 + 1, hidden), nn.ReLU(), nn.Linear(hidden, 2))
-        self.target_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6 + len(EVENT_TARGETS)), nn.Sigmoid())
+        self.node_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6), nn.Sigmoid())
+        self.event_head = EventPrototypeHead(hidden, len(ALL_EVENT_TARGETS))
+        self.aux_heads = nn.ModuleDict({
+            name: CategoricalPrototypeHead(hidden, int(size))
+            for name, size in (aux_dims or {}).items()
+            if name in AUX_TARGET_COLS
+        })
 
     def forward(self, xs: list[torch.Tensor], edge_index: torch.Tensor, edge_attr: torch.Tensor, pair_src: torch.Tensor, pair_dst: torch.Tensor):
         h = self.fusion(torch.cat([self.inputs[family_key(name)](x) for x, name in zip(xs, self.family_names)], dim=1))
         if edge_index.numel():
             messages = self.message(torch.cat([h[edge_index[0]], edge_attr], dim=1))
             agg = torch.zeros_like(h); count = torch.zeros((len(h), 1), device=h.device)
-            agg.index_add_(0, edge_index[1], messages); count.index_add_(0, edge_index[1], torch.ones((len(messages), 1), device=h.device))
+            agg.index_add_(0, edge_index[1], messages)
+            count.index_add_(0, edge_index[1], torch.ones((len(messages), 1), device=h.device))
             h = self.update(torch.cat([h, agg / count.clamp_min(1.0)], dim=1))
-        targets = self.target_head(h)
+        node_targets = self.node_head(h)
+        event_logits = self.event_head(h)
         gap = (pair_dst - pair_src).float().unsqueeze(1) / max(1.0, MAX_HOLD)
         pair = self.edge_head(torch.cat([h[pair_src], h[pair_dst], gap], dim=1))
-        return targets, pair
+        aux_logits = {name: head(h) for name, head in self.aux_heads.items()}
+        return node_targets, event_logits, pair, aux_logits
 
 
 class FusedFamilyMoEGNN(nn.Module):
-    """Fused GNN with sqrt(families) shared experts and edge gating.
+    """Fused GNN with sqrt(families) shared experts on fixed temporal edges.
 
     The graph aggregation is performed once.  MoE routing is used for the
     family projections and the node update, so this is not one graph trunk
     per family or per expert.  Residual updates preserve the pre-message
-    node state, while the edge gate learns how much each temporal edge should
-    contribute to its destination node.
+    node state while temporal edges remain fixed and unweighted.
     """
 
     def __init__(self, feature_dims: dict[str, int], hidden: int = HIDDEN, aux_dims: dict[str, int] | None = None):
@@ -453,7 +555,6 @@ class FusedFamilyMoEGNN(nn.Module):
         ])
         self.family_gate = nn.Linear(hidden, 1)
         self.message = nn.Sequential(nn.Linear(hidden + 2, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
-        self.edge_gate = nn.Sequential(nn.Linear(hidden * 2 + 2, hidden), nn.ReLU(), nn.Linear(hidden, 1))
         self.update_router = nn.Linear(hidden * 2, self.n_experts)
         self.update_experts = nn.ModuleList([
             nn.Sequential(nn.Linear(hidden * 2, hidden), nn.GELU(), nn.Linear(hidden, hidden))
@@ -461,15 +562,16 @@ class FusedFamilyMoEGNN(nn.Module):
         ])
         self.update_norm = nn.LayerNorm(hidden)
         self.edge_head = nn.Sequential(nn.Linear(hidden * 2 + 1, hidden), nn.ReLU(), nn.Linear(hidden, 2))
-        self.target_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6 + len(EVENT_TARGETS)), nn.Sigmoid())
+        self.node_head = nn.Sequential(nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, 6), nn.Sigmoid())
+        self.event_head = EventPrototypeHead(hidden, len(ALL_EVENT_TARGETS))
         metric_dim = int(os.getenv("GNN_METRIC_DIM", "24"))
         self.sector_metric = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim)) if "sector_target" in self.aux_dims else None
         self.industry_metric = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim)) if "industry_target" in self.aux_dims else None
+        self.year_metric = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim)) if "year_target" in self.aux_dims else None
         self.aux_prototypes = nn.ParameterDict({
             name: nn.Parameter(torch.randn(int(size), metric_dim) * 0.02)
-            for name, size in self.aux_dims.items() if name in {"sector_target", "industry_target", "year_target"}
+            for name, size in self.aux_dims.items() if name in set(AUX_TARGET_COLS)
         })
-        self.year_metric = nn.Sequential(nn.Linear(hidden, metric_dim), nn.LayerNorm(metric_dim)) if "year_target" in self.aux_dims else None
         self.prototype_temperature = nn.Parameter(torch.tensor(10.0))
 
     def _sparse_experts(self, values: torch.Tensor, router: nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
@@ -500,15 +602,12 @@ class FusedFamilyMoEGNN(nn.Module):
         balance_loss = self._balance_loss(family_probs)
         if edge_index.numel():
             source = h[edge_index[0]]
-            destination = h[edge_index[1]]
-            edge_input = torch.cat([source, destination, edge_attr], dim=1)
             messages = self.message(torch.cat([source, edge_attr], dim=1))
-            weights = torch.sigmoid(self.edge_gate(edge_input))
             agg = torch.zeros_like(h)
-            denom = torch.zeros((len(h), 1), device=h.device)
-            agg.index_add_(0, edge_index[1], messages * weights)
-            denom.index_add_(0, edge_index[1], weights)
-            aggregate = agg / denom.clamp_min(1e-6)
+            count = torch.zeros((len(h), 1), device=h.device)
+            agg.index_add_(0, edge_index[1], messages)
+            count.index_add_(0, edge_index[1], torch.ones((len(messages), 1), device=h.device))
+            aggregate = agg / count.clamp_min(1.0)
             update_input = torch.cat([h, aggregate], dim=1)
             update_router_probs = torch.softmax(self.update_router(update_input), dim=-1)
             top_values, top_indices = torch.topk(update_router_probs, k=self.top_k, dim=-1)
@@ -520,7 +619,8 @@ class FusedFamilyMoEGNN(nn.Module):
                     update.index_add_(0, rows, expert(update_input[rows]) * top_values[rows, slots].unsqueeze(1))
             h = self.update_norm(h + update)
             balance_loss = balance_loss + self._balance_loss(update_router_probs)
-        targets = self.target_head(h)
+        node_targets = self.node_head(h)
+        event_logits = self.event_head(h)
         gap = (pair_dst - pair_src).float().unsqueeze(1) / max(1.0, MAX_HOLD)
         pair = self.edge_head(torch.cat([h[pair_src], h[pair_dst], gap], dim=1))
         aux_logits = {}
@@ -537,7 +637,7 @@ class FusedFamilyMoEGNN(nn.Module):
             year_embedding = nn.functional.normalize(self.year_metric(h), dim=1)
             year_prototypes = nn.functional.normalize(self.aux_prototypes["year_target"], dim=1)
             aux_logits["year_target"] = temperature * year_embedding @ year_prototypes.T
-        return targets, pair, balance_loss, aux_logits
+        return node_targets, event_logits, pair, balance_loss, aux_logits
 
 
 def prepare_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFrame, family: str, test_year: int) -> dict:
@@ -560,7 +660,7 @@ def prepare_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.Data
         "long_hub", "long_authority", "short_hub", "short_authority",
         "long_pagerank", "short_pagerank",
     ]
-    event_cols = list(EVENT_TARGETS)
+    event_cols = list(ALL_EVENT_TARGETS)
     all_target_cols = target_cols + event_cols
     base[list(AUX_TARGET_COLS)] = base[list(AUX_TARGET_COLS)].apply(pd.to_numeric, errors="coerce").fillna(-1).astype("int64")
     tail_cols = [f"{column}_tail" for column in target_cols]
@@ -618,17 +718,12 @@ def fit_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFram
     edge_train_mask = torch.ones(len(pair_src), dtype=torch.bool)
     for epoch in range(EPOCHS):
         optimizer.zero_grad()
-        _, ha_hat, edge_hat = model(x, temporal_edges, temporal_attr, pair_src, pair_dst)
-        node_errors = nn.functional.smooth_l1_loss(ha_hat[train_nodes, :len(target_cols)], ha_y[train_nodes, :len(target_cols)], reduction="none")
+        _, node_hat, event_logits, edge_hat = model(x, temporal_edges, temporal_attr, pair_src, pair_dst)
+        node_errors = nn.functional.smooth_l1_loss(node_hat[train_nodes], ha_y[train_nodes, :6], reduction="none")
         node_mask = ha_mask[train_nodes]
         node_loss = (node_errors * node_mask).sum() / node_mask.sum().clamp_min(1.0)
-        event_pred = ha_hat[train_nodes, len(target_cols):]
-        event_true = ha_y[train_nodes, len(target_cols):]
-        event_weight = torch.ones_like(event_true)
-        for col in range(event_true.shape[1]):
-            positives = event_true[:, col].sum()
-            event_weight[:, col] += (positives.new_tensor(len(event_true)) / positives.clamp_min(1.0) - 1.0) * event_true[:, col]
-        event_loss = nn.functional.binary_cross_entropy(event_pred, event_true, weight=event_weight)
+        event_true = ha_y[train_nodes, 6:]
+        event_loss = event_loss_from_logits(event_logits[train_nodes], event_true)
         edge_loss = nn.functional.smooth_l1_loss(edge_hat[edge_train_mask], pair_y[edge_train_mask]) if edge_hat is not None and len(pair_src) else torch.tensor(0.0)
         loss = node_loss + float(os.getenv("GNN_EVENT_LOSS_WEIGHT", "1.0")) * event_loss + float(os.getenv("GNN_EDGE_LOSS_WEIGHT", "0.25")) * edge_loss
         loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
@@ -636,9 +731,9 @@ def fit_family(panel: pd.DataFrame, price_map: pd.DataFrame, labels: pd.DataFram
             print({"family": family, "epoch": epoch + 1, "loss": round(float(loss.detach()), 5), "node_loss": round(float(node_loss.detach()), 5), "event_loss": round(float(event_loss.detach()), 5), "edge_loss": round(float(edge_loss.detach()), 5)}, flush=True)
     model.eval()
     with torch.no_grad():
-        _, ha_hat, _ = model(x, temporal_edges, temporal_attr)
+        _, node_hat, event_logits, _ = model(x, temporal_edges, temporal_attr)
     pred = base[["symbol", "date"]].copy()
-    pred[all_target_cols] = ha_hat.numpy()
+    pred[all_target_cols] = combine_target_predictions(node_hat, event_logits).numpy()
     pred = pred.loc[pred.date.between(test_start, test_end)].copy()
     # HITS is a relative score.  Calibrate predictions cross-sectionally so
     # the existing shared-book threshold has the same interpretation as the
@@ -757,7 +852,7 @@ def run_tier_shared(tier: str) -> pd.DataFrame:
             for start in range(0, len(prepared), chunk_size):
                 batch = prepared[start:start + chunk_size]
                 optimizer.zero_grad()
-                predicted, pair_pred = model.forward_batch(
+                node_pred, event_logits, pair_pred = model.forward_batch(
                     [item["x"] for item in batch], [item["family"] for item in batch],
                     graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
                 losses = []
@@ -765,15 +860,10 @@ def run_tier_shared(tier: str) -> pd.DataFrame:
                     train_nodes = item["train_nodes"]
                     target_cols = item["target_cols"]
                     graph_count = 6
-                    node_errors = nn.functional.smooth_l1_loss(predicted[i, train_nodes, :graph_count], item["ha_y"][train_nodes, :graph_count], reduction="none")
+                    node_errors = nn.functional.smooth_l1_loss(node_pred[i, train_nodes], item["ha_y"][train_nodes, :graph_count], reduction="none")
                     node_loss = (node_errors * item["ha_mask"][train_nodes]).sum() / item["ha_mask"][train_nodes].sum().clamp_min(1.0)
                     event_true = item["ha_y"][train_nodes, graph_count:]
-                    event_pred = predicted[i, train_nodes, graph_count:]
-                    event_weight = torch.ones_like(event_true)
-                    for col in range(event_true.shape[1]):
-                        positives = event_true[:, col].sum()
-                        event_weight[:, col] += (positives.new_tensor(len(event_true)) / positives.clamp_min(1.0) - 1.0) * event_true[:, col]
-                    event_loss = nn.functional.binary_cross_entropy(event_pred, event_true, weight=event_weight)
+                    event_loss = event_loss_from_logits(event_logits[i, train_nodes], event_true)
                     edge_loss = nn.functional.smooth_l1_loss(pair_pred[i], item["pair_y"])
                     losses.append(node_loss + float(os.getenv("GNN_EVENT_LOSS_WEIGHT", "1.0")) * event_loss + float(os.getenv("GNN_EDGE_LOSS_WEIGHT", "0.25")) * edge_loss)
                 loss = torch.stack(losses).mean()
@@ -789,7 +879,8 @@ def run_tier_shared(tier: str) -> pd.DataFrame:
             prediction_batches = []
             for start in range(0, len(prepared), chunk_size):
                 batch = prepared[start:start + chunk_size]
-                prediction_batches.append(model.forward_batch([item["x"] for item in batch], [item["family"] for item in batch], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])[0].cpu().numpy())
+                node_pred, event_logits, _ = model.forward_batch([item["x"] for item in batch], [item["family"] for item in batch], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
+                prediction_batches.append(combine_target_predictions(node_pred, event_logits).cpu().numpy())
         for batch_start, values in zip(range(0, len(prepared), chunk_size), prediction_batches):
             for offset, item in enumerate(prepared[batch_start:batch_start + chunk_size]):
                 pred = item["base"][["symbol", "date"]].copy()
@@ -837,28 +928,47 @@ def run_tier_fused(tier: str) -> pd.DataFrame:
         node_hashes = {int(pd.util.hash_pandas_object(item["base"][["symbol", "date"]], index=False).sum()) for item in prepared}
         if len(node_hashes) != 1: raise RuntimeError("Feature families do not share the same symbol/date node index")
         graph = prepared[0]; feature_dims = {item["family"]: len(item["features"]) for item in prepared}
-        model = (FusedFamilyMoEGNN(feature_dims) if use_moe else FusedFamilyGNN(feature_dims)).train(); optimizer = torch.optim.AdamW(model.parameters(), lr=float(os.getenv("GNN_LR", "0.002")), weight_decay=1e-4)
-        print({"tier": tier, "year": test_year, "fused_families": len(prepared), "nodes": len(graph["base"]), "train_nodes": len(graph["train_nodes"]), "architecture": run_label, "experts": getattr(model, "n_experts", 1)}, flush=True)
+        model = (FusedFamilyMoEGNN(feature_dims, aux_dims=AUX_CLASS_DIMS) if use_moe else FusedFamilyGNN(feature_dims, aux_dims=AUX_CLASS_DIMS)).to(GNN_DEVICE).train(); optimizer = torch.optim.AdamW(model.parameters(), lr=float(os.getenv("GNN_LR", "0.002")), weight_decay=1e-4)
+        xs = [item["x"].to(GNN_DEVICE) for item in prepared]
+        temporal_edges = graph["temporal_edges"].to(GNN_DEVICE)
+        temporal_attr = graph["temporal_attr"].to(GNN_DEVICE)
+        pair_src = graph["pair_src"].to(GNN_DEVICE)
+        pair_dst = graph["pair_dst"].to(GNN_DEVICE)
+        pair_y = graph["pair_y"].to(GNN_DEVICE)
+        train_nodes = torch.as_tensor(graph["train_nodes"], dtype=torch.long, device=GNN_DEVICE)
+        graph_y = graph["ha_y"].to(GNN_DEVICE)
+        graph_mask = graph["ha_mask"].to(GNN_DEVICE)
+        aux_y = graph["aux_y"].to(GNN_DEVICE)
+        aux_mask = graph["aux_mask"].to(GNN_DEVICE)
+        print({"tier": tier, "year": test_year, "fused_families": len(prepared), "nodes": len(graph["base"]), "train_nodes": len(graph["train_nodes"]), "architecture": run_label, "experts": getattr(model, "n_experts", 1), "device": str(GNN_DEVICE)}, flush=True)
         for epoch in range(EPOCHS):
             optimizer.zero_grad()
-            model_output = model([item["x"] for item in prepared], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
-            predicted, pair_pred = model_output[:2]
-            balance_loss = model_output[2] if len(model_output) > 2 else torch.tensor(0.0, device=predicted.device)
-            train_nodes = graph["train_nodes"]; graph_count = 6
-            node_errors = nn.functional.smooth_l1_loss(predicted[train_nodes, :graph_count], graph["ha_y"][train_nodes, :graph_count], reduction="none")
-            node_loss = (node_errors * graph["ha_mask"][train_nodes]).sum() / graph["ha_mask"][train_nodes].sum().clamp_min(1.0)
-            event_true = graph["ha_y"][train_nodes, graph_count:]; event_pred = predicted[train_nodes, graph_count:]; event_weight = torch.ones_like(event_true)
-            for col in range(event_true.shape[1]):
-                positives = event_true[:, col].sum(); event_weight[:, col] += (positives.new_tensor(len(event_true)) / positives.clamp_min(1.0) - 1.0) * event_true[:, col]
-            event_loss = nn.functional.binary_cross_entropy(event_pred, event_true, weight=event_weight)
-            edge_loss = nn.functional.smooth_l1_loss(pair_pred, graph["pair_y"])
-            loss = node_loss + float(os.getenv("GNN_EVENT_LOSS_WEIGHT", "1.0")) * event_loss + float(os.getenv("GNN_EDGE_LOSS_WEIGHT", "0.25")) * edge_loss + float(os.getenv("GNN_MOE_BALANCE_WEIGHT", "0.01")) * balance_loss
+            model_output = model(xs, temporal_edges, temporal_attr, pair_src, pair_dst)
+            if use_moe:
+                node_pred, event_logits, pair_pred, balance_loss, aux_logits = model_output
+            else:
+                node_pred, event_logits, pair_pred, aux_logits = model_output
+                balance_loss = torch.tensor(0.0, device=node_pred.device)
+            graph_count = 6
+            node_errors = nn.functional.smooth_l1_loss(node_pred[train_nodes], graph_y[train_nodes, :graph_count], reduction="none")
+            node_loss = (node_errors * graph_mask[train_nodes]).sum() / graph_mask[train_nodes].sum().clamp_min(1.0)
+            event_true = graph_y[train_nodes, graph_count:]
+            event_loss = event_loss_from_logits(event_logits[train_nodes], event_true)
+            edge_loss = nn.functional.smooth_l1_loss(pair_pred, pair_y)
+            aux_loss = torch.tensor(0.0, device=node_pred.device)
+            for aux_name, logits in aux_logits.items():
+                aux_index = AUX_TARGET_COLS.index(aux_name)
+                mask = aux_mask[train_nodes, aux_index]
+                if mask.any():
+                    aux_true = aux_y[train_nodes, aux_index][mask]
+                    aux_loss = aux_loss + nn.functional.cross_entropy(logits[train_nodes][mask], aux_true)
+            loss = node_loss + float(os.getenv("GNN_EVENT_LOSS_WEIGHT", "1.0")) * event_loss + float(os.getenv("GNN_EDGE_LOSS_WEIGHT", "0.25")) * edge_loss + float(os.getenv("GNN_MOE_BALANCE_WEIGHT", "0.01")) * balance_loss + float(os.getenv("GNN_AUX_LOSS_WEIGHT", "0.10")) * aux_loss
             loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
             if epoch == 0 or epoch == EPOCHS - 1: print({"tier": tier, "year": test_year, "epoch": epoch + 1, "fused_loss": round(float(loss.detach()), 5), "moe_balance": round(float(balance_loss.detach()), 5)}, flush=True)
         model.eval(); test_start = pd.Timestamp(f"{test_year}-01-01"); test_end = pd.Timestamp(f"{test_year}-12-31")
         with torch.no_grad():
-            model_output = model([item["x"] for item in prepared], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
-            values = model_output[0]
+            model_output = model(xs, temporal_edges, temporal_attr, pair_src, pair_dst)
+            values = combine_target_predictions(model_output[0], model_output[1]).cpu()
         pred = graph["base"][["symbol", "date"]].copy(); pred[graph["target_cols"]] = values.cpu().numpy(); pred = pred.loc[pred.date.between(test_start, test_end)].copy()
         for col in graph["target_cols"]: pred[col] = pred.groupby("date")[col].rank(pct=True, method="average")
         pred["long_score"], pred["long_exit_score"] = pred["long_hub"], pred["long_authority"]; pred["short_score"], pred["short_exit_score"] = pred["short_hub"], pred["short_authority"]
@@ -947,16 +1057,14 @@ def run_tier_fused_streaming(tier: str) -> pd.DataFrame:
                     continue
                 graph = prepared[0]
                 model_output = model([item["x"] for item in prepared], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
-                predicted, pair_pred, balance_loss, aux_logits = model_output
+                node_pred, event_logits, pair_pred, balance_loss, aux_logits = model_output
                 train_nodes = graph["train_nodes"]; graph_count = 6
-                node_errors = nn.functional.smooth_l1_loss(predicted[train_nodes, :graph_count], graph["ha_y"][train_nodes, :graph_count], reduction="none")
+                node_errors = nn.functional.smooth_l1_loss(node_pred[train_nodes], graph["ha_y"][train_nodes, :graph_count], reduction="none")
                 node_loss = (node_errors * graph["ha_mask"][train_nodes]).sum() / graph["ha_mask"][train_nodes].sum().clamp_min(1.0)
-                event_true = graph["ha_y"][train_nodes, graph_count:]; event_pred = predicted[train_nodes, graph_count:]; event_weight = torch.ones_like(event_true)
-                for col in range(event_true.shape[1]):
-                    positives = event_true[:, col].sum(); event_weight[:, col] += (positives.new_tensor(len(event_true)) / positives.clamp_min(1.0) - 1.0) * event_true[:, col]
-                event_loss = nn.functional.binary_cross_entropy(event_pred, event_true, weight=event_weight)
+                event_true = graph["ha_y"][train_nodes, graph_count:]
+                event_loss = event_loss_from_logits(event_logits[train_nodes], event_true)
                 edge_loss = nn.functional.smooth_l1_loss(pair_pred, graph["pair_y"])
-                aux_loss = torch.tensor(0.0, device=predicted.device)
+                aux_loss = torch.tensor(0.0, device=node_pred.device)
                 for aux_name, logits in aux_logits.items():
                     aux_index = AUX_TARGET_COLS.index(aux_name)
                     mask = graph["aux_mask"][train_nodes, aux_index]
@@ -980,7 +1088,9 @@ def run_tier_fused_streaming(tier: str) -> pd.DataFrame:
             if not prepared:
                 continue
             graph = prepared[0]
-            with torch.no_grad(): values = model([item["x"] for item in prepared], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])[0]
+            with torch.no_grad():
+                model_output = model([item["x"] for item in prepared], graph["temporal_edges"], graph["temporal_attr"], graph["pair_src"], graph["pair_dst"])
+                values = combine_target_predictions(model_output[0], model_output[1])
             pred = graph["base"][['symbol', 'date']].copy(); pred[graph["target_cols"]] = values.cpu().numpy(); pred = pred.loc[pred.date.between(test_start, test_end)].copy()
             year_predictions.append(pred); target_cols = graph["target_cols"]
             del prepared
