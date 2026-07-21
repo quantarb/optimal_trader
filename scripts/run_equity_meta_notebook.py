@@ -291,7 +291,7 @@ def main() -> int:
         if events is not None and not events.empty:
             ev = events.copy()
             if "event_type" in ev.columns:
-                buy = ev.loc[ev["event_type"].astype(str).eq("congress_buy")].copy()
+                buy = ev.loc[ev["event_type"].astype(str).isin(["congressman_buy", "senator_buy"])].copy()
             else:
                 buy = ev.loc[ev["label_source"].astype(str).str.contains("congress_buy", na=False)].copy()
             if not buy.empty:

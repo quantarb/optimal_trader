@@ -124,10 +124,10 @@ def add_pagerank_labels(price_frames: dict[str, pd.DataFrame], labels: pd.DataFr
 
 
 EVENT_TARGETS = {
-    "is_congressman_buy": ("congress", "congress_buy", "house"),
-    "is_congressman_sell": ("congress", "congress_sell", "house"),
-    "is_senator_buy": ("congress", "congress_buy", "senate"),
-    "is_senator_sell": ("congress", "congress_sell", "senate"),
+    "is_congressman_buy": ("congress", "congressman_buy", None),
+    "is_congressman_sell": ("congress", "congressman_sell", None),
+    "is_senator_buy": ("congress", "senator_buy", None),
+    "is_senator_sell": ("congress", "senator_sell", None),
     "is_insider_buy": ("insider", "insider_buy", None),
     "is_insider_sell": ("insider", "insider_sell", None),
     "is_analyst_upgrade": ("analyst_rating", "analyst_upgrade", None),
@@ -144,8 +144,22 @@ EVENT_TARGETS = {
     "is_dividend_cut": ("dividend", "dividend_cut", None),
     "is_forward_split": ("split", "forward_split", None),
     "is_reverse_split": ("split", "reverse_split", None),
-    "is_earnings_beat": ("earnings", "earnings_beat", None),
-    "is_earnings_miss": ("earnings", "earnings_miss", None),
+    "is_earnings_reported": ("earnings", "earnings_reported", None),
+    "is_eps_beat": ("earnings", "eps_beat", None),
+    "is_eps_miss": ("earnings", "eps_miss", None),
+    "is_revenue_beat": ("earnings", "revenue_beat", None),
+    "is_revenue_miss": ("earnings", "revenue_miss", None),
+    "is_dividend_declared": ("dividend", "dividend_declared", None),
+    "is_dividend_ex_date": ("dividend", "dividend_ex_date", None),
+    "is_dividend_record_date": ("dividend", "dividend_record_date", None),
+    "is_dividend_payment_date": ("dividend", "dividend_payment_date", None),
+    "is_forward_split": ("split", "forward_split", None),
+    "is_reverse_split": ("split", "reverse_split", None),
+    "is_ipo_trading_started": ("profile", "ipo_trading_started", None),
+    "is_sec_8k_filed": ("filing", "sec_8k_filed", None),
+    "is_sec_10q_filed": ("filing", "sec_10q_filed", None),
+    "is_sec_10k_filed": ("filing", "sec_10k_filed", None),
+    "is_sec_form4_filed": ("filing", "sec_form4_filed", None),
 }
 AUX_TARGET_COLS = ("sector_target", "industry_target", "year_target")
 AUX_CLASS_DIMS: dict[str, int] = {"sector_target": 1, "industry_target": 1, "year_target": 1}

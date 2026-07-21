@@ -128,7 +128,7 @@ def _build_congress_labels(symbols: list[str]) -> tuple[pd.DataFrame, pd.DataFra
         return empty, pd.DataFrame(diag)
     congress = pd.concat(pair_frames, ignore_index=True)
     etype = congress["event_type"].astype(str)
-    mapped = etype.map({"congress_buy": "oracle_long", "congress_sell": "oracle_short"})
+    mapped = etype.map({"congressman_buy": "oracle_long", "senator_buy": "oracle_long", "congressman_sell": "oracle_short", "senator_sell": "oracle_short"})
     out = pd.DataFrame(
         {
             "symbol": congress["symbol"].astype(str).str.upper(),

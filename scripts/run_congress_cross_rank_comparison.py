@@ -59,7 +59,7 @@ def congress_events(symbols: list[str], prices: pd.DataFrame) -> pd.DataFrame:
         chamber = pair.get("actor_chamber", pd.Series("unknown", index=pair.index)).astype(str).str.lower()
         pair = pair.loc[chamber.isin({"house", "senate"})].copy()
         pair["date"] = pd.to_datetime(pair["event_date"], errors="coerce").dt.normalize()
-        pair["side"] = pair["event_type"].map({"congress_buy": "buy", "congress_sell": "sell"})
+        pair["side"] = pair["event_type"].map({"congressman_buy": "buy", "congressman_sell": "sell", "senator_buy": "buy", "senator_sell": "sell"})
         pair = pair.dropna(subset=["date", "side"])
         if pair.empty:
             continue

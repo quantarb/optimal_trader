@@ -99,7 +99,7 @@ def congress_labels(symbols: list[str], wh: Warehouse, prices: dict[str, pd.Data
             continue
         pair["symbol"] = symbol
         pair["date"] = pd.to_datetime(pair["event_date"], errors="coerce").dt.normalize()
-        pair["label"] = pair["event_type"].map({"congress_buy": "buy", "congress_sell": "sell"})
+        pair["label"] = pair["event_type"].map({"congressman_buy": "buy", "congressman_sell": "sell", "senator_buy": "buy", "senator_sell": "sell"})
         pair = pair.dropna(subset=["date", "label"])
         rows.append(pair[["symbol", "date", "label", "actor_chamber"]])
     if not rows:

@@ -85,7 +85,7 @@ def normalize_event_rows(symbol: str, pairs: pd.DataFrame) -> pd.DataFrame:
     if pair.empty:
         return pd.DataFrame(columns=["symbol", "date", "buy", "sell", "buy_count", "sell_count"])
     pair["date"] = pd.to_datetime(pair["event_date"], errors="coerce").dt.normalize()
-    pair["side"] = pair["event_type"].map({"congress_buy": "buy", "congress_sell": "sell"})
+    pair["side"] = pair["event_type"].map({"congressman_buy": "buy", "congressman_sell": "sell", "senator_buy": "buy", "senator_sell": "sell"})
     pair = pair.dropna(subset=["date", "side"])
     if pair.empty:
         return pd.DataFrame(columns=["symbol", "date", "buy", "sell", "buy_count", "sell_count"])
