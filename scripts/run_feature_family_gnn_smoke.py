@@ -27,6 +27,7 @@ for repo in (REPO_ROOT, WORKSPACE_ROOT / "quant-warehouse", WORKSPACE_ROOT / "qu
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     HitsLabelSpec,
     build_hits_labels,
+    build_hold_timing_hits_labels,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.store import (
     build_event_pairs_from_historical_data,
@@ -46,6 +47,15 @@ DATA_END = pd.Timestamp(f"{LAST_TEST_YEAR}-12-31")
 MAX_HOLD = int(os.getenv("GNN_MAX_HOLD", "120"))
 HITS_ITERATIONS = int(os.getenv("GNN_HITS_ITERATIONS", "50"))
 HITS_TAIL_QUANTILE = float(os.getenv("GNN_HITS_TAIL_QUANTILE", "0.20"))
+SPEED_HORIZONS = tuple(
+    int(value) for value in os.getenv("GNN_SPEED_HORIZONS", "5,20,60,120").split(",") if value.strip()
+)
+SPEED_TARGET_COLS = [
+    f"{side}_{score}_{horizon}d"
+    for horizon in SPEED_HORIZONS
+    for side in ("long", "short")
+    for score in ("hub", "authority")
+]
 GNN_VARIANT = os.getenv("GNN_VARIANT", "long_only").strip().lower()
 LOOKBACK = int(os.getenv("GNN_LOOKBACK", "10"))
 EPOCHS = int(os.getenv("GNN_EPOCHS", "12"))
@@ -279,7 +289,7 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
         prices = pd.read_parquet(prices_path)
         labels = pd.read_parquet(labels_path)
         required = set(EVENT_TARGETS) | {"long_hub", "long_authority", "short_hub", "short_authority", "long_pagerank", "short_pagerank"}
-        if required.issubset(labels.columns):
+        if required.issubset(labels.columns) and set(SPEED_TARGET_COLS).issubset(labels.columns):
             if not set(AUX_TARGET_COLS).issubset(labels.columns):
                 labels = add_auxiliary_labels(symbols, labels)
             print({"tier": tier, "cache": "hit", "prices": str(prices_path), "labels": str(labels_path)}, flush=True)
@@ -317,6 +327,18 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
             end_date=str(DATA_END.date()),
         ),
     )
+    speed_labels = build_hold_timing_hits_labels(
+        price_frames,
+        hold_days=SPEED_HORIZONS,
+        spec=HitsLabelSpec(
+            max_hold=MAX_HOLD,
+            iterations=HITS_ITERATIONS,
+            tail_quantile=HITS_TAIL_QUANTILE,
+            start_date=str(DATA_START.date()),
+            end_date=str(DATA_END.date()),
+        ),
+    )
+    labels = labels.merge(speed_labels, on=["symbol", "date"], how="left")
     labels = add_pagerank_labels(price_frames, labels)
     labels = add_event_labels(symbols, labels)
     labels = add_auxiliary_labels(symbols, labels)
