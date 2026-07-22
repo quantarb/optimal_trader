@@ -27,7 +27,7 @@ for repo in (REPO_ROOT, WORKSPACE_ROOT / "quant-warehouse", WORKSPACE_ROOT / "qu
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     HitsLabelSpec,
     build_hits_labels,
-    build_hold_timing_hits_labels,
+    build_inverse_holding_time_hits_labels,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.store import (
     build_event_pairs_from_historical_data,
@@ -51,10 +51,8 @@ SPEED_HORIZONS = tuple(
     int(value) for value in os.getenv("GNN_SPEED_HORIZONS", "5,20,60,120").split(",") if value.strip()
 )
 SPEED_TARGET_COLS = [
-    f"{side}_{score}_{horizon}d"
-    for horizon in SPEED_HORIZONS
-    for side in ("long", "short")
-    for score in ("hub", "authority")
+    "speed_long_hub", "speed_long_authority", "speed_short_hub",
+    "speed_short_authority", "speed_long_pagerank", "speed_short_pagerank",
 ]
 GNN_VARIANT = os.getenv("GNN_VARIANT", "long_only").strip().lower()
 LOOKBACK = int(os.getenv("GNN_LOOKBACK", "10"))
@@ -76,7 +74,7 @@ np.random.seed(SEED)
 
 OUT = REPO_ROOT / "artifacts" / "graph_oracle_feature_family_gnn_improved_hits"
 OUT.mkdir(parents=True, exist_ok=True)
-CACHE_VERSION = "wfo_full_history_targets_v3_baseline_mtl"
+CACHE_VERSION = "wfo_full_history_targets_v5_single_inverse_time_speed_graph"
 GRAPH_CACHE: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]] = {}
 TIER_CONFIGS = {
     "1T": (1_000_000_000_000, "equity_meta_model_1t"),
@@ -138,6 +136,38 @@ def add_pagerank_labels(price_frames: dict[str, pd.DataFrame], labels: pd.DataFr
         return labels
     extra = pd.concat(additions, ignore_index=True)
     return labels.merge(extra, on=["symbol", "date"], how="left")
+
+
+def add_speed_pagerank_labels(price_frames: dict[str, pd.DataFrame], labels: pd.DataFrame) -> pd.DataFrame:
+    """Add PageRank targets from the single inverse-holding-time graph."""
+    additions: list[pd.DataFrame] = []
+    for symbol, raw in price_frames.items():
+        frame = normalize_prices(raw)
+        for _, year_frame in frame.groupby(frame.date.dt.year, sort=True):
+            year_frame = year_frame.reset_index(drop=True)
+            n = len(year_frame)
+            if n < 2:
+                continue
+            high = year_frame.high.to_numpy(float)
+            low = year_frame.low.to_numpy(float)
+            index = np.arange(n)
+            valid = np.triu(np.ones((n, n), dtype=bool), 1)
+            valid &= (index[None, :] - index[:, None]) <= MAX_HOLD
+            long_return = low[None, :] / high[:, None] - 1.0
+            short_return = low[:, None] / high[None, :] - 1.0
+            holding_days = index[None, :] - index[:, None]
+            long_w = np.zeros((n, n), dtype=float)
+            short_w = np.zeros((n, n), dtype=float)
+            np.divide(1.0, holding_days, out=long_w, where=valid & (long_return > 0))
+            np.divide(1.0, holding_days, out=short_w, where=valid & (short_return > 0))
+            additions.append(pd.DataFrame({
+                "symbol": symbol.upper(), "date": year_frame.date,
+                "speed_long_pagerank": _pagerank(long_w),
+                "speed_short_pagerank": _pagerank(short_w),
+            }))
+    if not additions:
+        return labels
+    return labels.merge(pd.concat(additions, ignore_index=True), on=["symbol", "date"], how="left")
 
 
 EVENT_TARGETS = {
@@ -327,9 +357,8 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
             end_date=str(DATA_END.date()),
         ),
     )
-    speed_labels = build_hold_timing_hits_labels(
+    speed_labels = build_inverse_holding_time_hits_labels(
         price_frames,
-        hold_days=SPEED_HORIZONS,
         spec=HitsLabelSpec(
             max_hold=MAX_HOLD,
             iterations=HITS_ITERATIONS,
@@ -338,6 +367,13 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
             end_date=str(DATA_END.date()),
         ),
     )
+    speed_labels = speed_labels.rename(columns={
+        "long_hub": "speed_long_hub",
+        "long_authority": "speed_long_authority",
+        "short_hub": "speed_short_hub",
+        "short_authority": "speed_short_authority",
+    })
+    speed_labels = add_speed_pagerank_labels(price_frames, speed_labels)
     labels = labels.merge(speed_labels, on=["symbol", "date"], how="left")
     labels = add_pagerank_labels(price_frames, labels)
     labels = add_event_labels(symbols, labels)

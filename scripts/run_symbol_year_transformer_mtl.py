@@ -21,6 +21,7 @@ spec.loader.exec_module(gnn)
 from quant_warehouse.ingest.macro_fetch import fetch_economy_calendar_range
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     build_macro_event_label_panel,
+    build_macro_family_label_panel,
 )
 
 FIRST_TEST_YEAR = int(os.getenv("TRANSFORMER_FIRST_TEST_YEAR", "2021"))
@@ -39,6 +40,8 @@ GRADNORM_LR = float(os.getenv("TRANSFORMER_GRADNORM_LR", "0.025"))
 BATCH_SIZE = int(os.getenv("TRANSFORMER_BATCH_SIZE", "32"))
 LR = float(os.getenv("TRANSFORMER_LR", "0.002"))
 MACRO_ENABLED = os.getenv("TRANSFORMER_MACRO", "0") == "1"
+CROSS_SECTIONAL_ENABLED = os.getenv("TRANSFORMER_CROSS_SECTIONAL", "0") == "1"
+CROSS_SECTIONAL_TOKEN_TASKS = os.getenv("TRANSFORMER_CROSS_TOKEN_TASKS", "1") == "1"
 MACRO_COUNTRIES = tuple(x.strip().upper() for x in os.getenv("TRANSFORMER_MACRO_COUNTRIES", "US").split(",") if x.strip())
 DEVICE_NAME = os.getenv("TRANSFORMER_DEVICE", "auto").strip().lower()
 if DEVICE_NAME == "auto":
@@ -67,6 +70,10 @@ SPEED_TARGET_COLS = list(gnn.SPEED_TARGET_COLS)
 EVENT_COLS = list(gnn.ALL_EVENT_TARGETS)
 AUX_COLS = list(gnn.AUX_TARGET_COLS)
 MACRO_EVENT_COLS: list[str] = []
+MACRO_FAMILY_MODE = os.getenv("TRANSFORMER_MACRO_FAMILY", "0") == "1"
+MACRO_FAMILY_COLS: list[str] = []
+MACRO_DIRECTION_COLS: list[str] = []
+MACRO_SURPRISE_COLS: list[str] = []
 
 
 def causal_mask(length: int, device: torch.device | None = None) -> torch.Tensor:
@@ -106,7 +113,10 @@ class TransformerMTL(nn.Module):
         self.graph_head = nn.Linear(HIDDEN, len(TARGET_COLS))
         self.speed_head = nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
         self.event_head = gnn.EventPrototypeHead(HIDDEN, len(EVENT_COLS))
-        self.aux_heads = nn.ModuleDict({
+        # These labels describe the symbol/year document, not each daily
+        # token.  The document representation is taken from the final valid
+        # causal token below, so the prediction cannot see future tokens.
+        self.document_aux_heads = nn.ModuleDict({
             name: PrototypeHead(HIDDEN, max(1, int(size)))
             for name, size in aux_dims.items()
         })
@@ -114,7 +124,7 @@ class TransformerMTL(nn.Module):
         # Each MTL head gets a learned task embedding. A shared router maps
         # task identity to trunk weights, so task grouping is learned rather
         # than assigned by hand. The router starts at equal weights.
-        task_names = ["graph", "speed", "event"] + [f"aux:{name}" for name in self.aux_heads]
+        task_names = ["graph", "speed", "event"] + [f"aux_doc:{name}" for name in self.document_aux_heads]
         if self.macro_head is not None:
             task_names.append("macro")
         self.task_names = task_names
@@ -180,12 +190,12 @@ class TransformerMTL(nn.Module):
             if parameter.requires_grad
         ]
 
-    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor):
+    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor, causal: bool = True):
         length = x.shape[1]
         if length > self.position.shape[0]:
             raise ValueError(f"document length {length} exceeds positional capacity {self.position.shape[0]}")
         h = self.input(x) + self.position[:length].unsqueeze(0)
-        mask = causal_mask(length, x.device)
+        mask = causal_mask(length, x.device) if causal else None
         trunk_states = [
             encoder(h, mask=mask, src_key_padding_mask=padding_mask)
             for encoder in self.encoders
@@ -194,12 +204,32 @@ class TransformerMTL(nn.Module):
         speed_h = self._task_state("speed", trunk_states)
         event_h = self._task_state("event", trunk_states)
         macro_h = self._task_state("macro", trunk_states) if self.macro_head is not None else None
-        aux_h = {
-            name: self._task_state(f"aux:{name}", trunk_states)
-            for name in self.aux_heads
+        if macro_h is not None and not causal:
+            valid = (~padding_mask).unsqueeze(-1)
+            macro_h = (macro_h * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+        document_aux_h = {
+            name: self._task_state(f"aux_doc:{name}", trunk_states)
+            for name in self.document_aux_heads
         }
+        if causal:
+            lengths = (~padding_mask).sum(dim=1).clamp_min(1) - 1
+            batch_index = torch.arange(x.shape[0], device=x.device)
+            document_aux_h = {
+                name: state[batch_index, lengths]
+                for name, state in document_aux_h.items()
+            }
+        else:
+            valid = (~padding_mask).unsqueeze(-1)
+            document_aux_h = {
+                name: (state * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
+                for name, state in document_aux_h.items()
+            }
         macro_logits = self.macro_head(macro_h) if macro_h is not None else None
-        return self.graph_head(graph_h), self.speed_head(speed_h), self.event_head(event_h), {name: head(aux_h[name]) for name, head in self.aux_heads.items()}, macro_logits
+        return (
+            self.graph_head(graph_h), self.speed_head(speed_h), self.event_head(event_h),
+            {}, {name: head(document_aux_h[name]) for name, head in self.document_aux_heads.items()},
+            macro_logits,
+        )
 
 
 class TwoTowerTransformer(nn.Module):
@@ -304,6 +334,44 @@ def _make_docs(base: pd.DataFrame, test_year: int, train: bool) -> list[dict[str
             "macro_events": frame[MACRO_EVENT_COLS].to_numpy(np.float32) if MACRO_EVENT_COLS else np.zeros((len(frame), 0), dtype=np.float32),
             "aux": frame[AUX_COLS].to_numpy(np.int64),
             "graph_mask": np.stack(frame["__graph_mask__"].to_numpy()),
+            "kind": "symbol_year",
+            "task_mask": np.ones(5, dtype=np.float32),
+        })
+    return docs
+
+
+def _make_cross_sectional_docs(base: pd.DataFrame, test_year: int, train: bool) -> list[dict[str, np.ndarray]]:
+    """Build one document per date containing all symbols in the universe.
+
+    These documents use bidirectional same-date attention.  Their token-level
+    graph and speed targets are reused from the per-symbol temporal labels;
+    no cross-sectional graph is constructed.  Macro and year remain pooled
+    document-level tasks.
+    """
+    year = base.date.dt.year
+    selected = base.loc[year < test_year if train else year == test_year].copy()
+    docs: list[dict[str, np.ndarray]] = []
+    for date, frame in selected.groupby("date", sort=True):
+        frame = frame.sort_values("symbol")
+        cross_aux = np.full((len(frame), len(AUX_COLS)), -1, dtype=np.int64)
+        if "year_target" in AUX_COLS:
+            year_index = AUX_COLS.index("year_target")
+            cross_aux[:, year_index] = int(frame["year_target"].iloc[0])
+        docs.append({
+            "symbol": frame.symbol.to_numpy(),
+            "date": frame.date.to_numpy(),
+            "x": np.stack(frame["__x__"].to_numpy()),
+            # Reuse labels generated by the temporal per-symbol graph when
+            # enabled.  No graph is ever constructed over the universe on a
+            # cross-sectional date.
+            "graph": frame[TARGET_COLS].to_numpy(np.float32),
+            "speed": frame[SPEED_TARGET_COLS].to_numpy(np.float32),
+            "events": np.zeros((len(frame), len(EVENT_COLS)), dtype=np.float32),
+            "macro_events": frame[MACRO_EVENT_COLS].iloc[0].to_numpy(np.float32),
+            "aux": cross_aux,
+            "graph_mask": np.stack(frame["__graph_mask__"].to_numpy()) if CROSS_SECTIONAL_TOKEN_TASKS else np.zeros((len(frame), len(TARGET_COLS)), dtype=np.float32),
+            "kind": "cross_sectional",
+            "task_mask": np.array([float(CROSS_SECTIONAL_TOKEN_TASKS), float(CROSS_SECTIONAL_TOKEN_TASKS), 0.0, 1.0, 1.0], dtype=np.float32),
         })
     return docs
 
@@ -317,8 +385,10 @@ def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tenso
     speed = np.zeros((len(docs), length, len(SPEED_TARGET_COLS)), dtype=np.float32)
     events = np.zeros((len(docs), length, len(EVENT_COLS)), dtype=np.float32)
     macro_events = np.zeros((len(docs), length, len(MACRO_EVENT_COLS)), dtype=np.float32)
+    macro_document_events = np.zeros((len(docs), len(MACRO_EVENT_COLS)), dtype=np.float32)
     aux = np.full((len(docs), length, len(AUX_COLS)), -1, dtype=np.int64)
     graph_mask = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
+    task_mask = np.zeros((len(docs), 5), dtype=np.float32)
     for i, item in enumerate(docs):
         n = len(item["x"])
         x[i, :n] = item["x"]
@@ -327,20 +397,24 @@ def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tenso
         speed[i, :n] = item["speed"]
         events[i, :n] = item["events"]
         if MACRO_EVENT_COLS:
-            macro_events[i, :n] = item["macro_events"]
+            if item["kind"] == "cross_sectional":
+                macro_document_events[i] = item["macro_events"]
+            else:
+                macro_events[i, :n] = item["macro_events"]
         aux[i, :n] = item["aux"]
         graph_mask[i, :n] = item["graph_mask"]
+        task_mask[i] = item["task_mask"]
     return (
         torch.from_numpy(x), torch.from_numpy(padding),
         {"graph": torch.from_numpy(graph), "speed": torch.from_numpy(speed), "events": torch.from_numpy(events),
-         "macro_events": torch.from_numpy(macro_events), "aux": torch.from_numpy(aux),
-         "graph_mask": torch.from_numpy(graph_mask)},
+         "macro_events": torch.from_numpy(macro_events), "macro_document_events": torch.from_numpy(macro_document_events), "aux": torch.from_numpy(aux),
+         "graph_mask": torch.from_numpy(graph_mask), "task_mask": torch.from_numpy(task_mask)},
     )
 
 
 def _load_macro_event_panel(dates: pd.Series) -> tuple[pd.DataFrame, list[str]]:
     """Fetch FMP releases once and build labels through quant-warehouse."""
-    cache = OUT / "cache" / f"transformer_macro_event_labels_v3_{gnn.DATA_END:%Y%m%d}.parquet"
+    cache = OUT / "cache" / f"transformer_macro_event_labels_directional_no_unchanged_v6_{gnn.DATA_END:%Y%m%d}.parquet"
     if cache.exists():
         panel = pd.read_parquet(cache)
     else:
@@ -350,15 +424,14 @@ def _load_macro_event_panel(dates: pd.Series) -> tuple[pd.DataFrame, list[str]]:
         if MACRO_COUNTRIES and not events.empty:
             events = events.loc[events.country.astype(str).str.upper().isin(MACRO_COUNTRIES)].copy()
         token_dates = pd.DataFrame({"date": pd.to_datetime(dates, errors="coerce").dt.normalize().unique()})
-        panel = build_macro_event_label_panel(token_dates, events)
+        panel = build_macro_event_label_panel(token_dates, events, directional_only=True)
         cache.parent.mkdir(parents=True, exist_ok=True)
         panel.to_parquet(cache, index=False)
-    macro_cols = [column for column in panel.columns if str(column).startswith("is_")]
-    return panel, macro_cols
+    return panel, [column for column in panel.columns if str(column).startswith("is_")]
 
 
 def _prepare_data(tier: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    global MACRO_EVENT_COLS
+    global MACRO_EVENT_COLS, MACRO_FAMILY_COLS, MACRO_DIRECTION_COLS, MACRO_SURPRISE_COLS
     index = pd.read_csv(gnn.feature_dir(tier) / "index.csv")
     fused, feature_cols = _read_fused_panel(index)
     symbols = sorted(fused.symbol.unique())
@@ -367,9 +440,16 @@ def _prepare_data(tier: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     if MACRO_ENABLED:
         macro_panel, MACRO_EVENT_COLS = _load_macro_event_panel(base["date"])
         base = base.merge(macro_panel, on="date", how="left")
+        MACRO_EVENT_COLS = [column for column in macro_panel.columns if str(column).startswith("is_")]
         base[MACRO_EVENT_COLS] = base[MACRO_EVENT_COLS].fillna(0.0).astype("float32")
+        MACRO_FAMILY_COLS = []
+        MACRO_DIRECTION_COLS = []
+        MACRO_SURPRISE_COLS = []
     else:
         MACRO_EVENT_COLS = []
+        MACRO_FAMILY_COLS = []
+        MACRO_DIRECTION_COLS = []
+        MACRO_SURPRISE_COLS = []
     return base, prices, feature_cols
 
 
@@ -401,80 +481,99 @@ def _train_epoch(
 ) -> float:
     model.train()
     losses: list[float] = []
-    order = np.random.permutation(len(docs))
-    for offset in range(0, len(order), BATCH_SIZE):
-        selected = [docs[i] for i in order[offset:offset + BATCH_SIZE]]
-        x, padding, target = _batch(selected)
-        x = x.to(DEVICE); padding = padding.to(DEVICE)
-        target = {name: value.to(DEVICE) for name, value in target.items()}
-        optimizer.zero_grad()
-        graph_hat, speed_hat, event_logits, aux_logits, macro_logits = model(x, padding)
-        valid = ~padding
-        graph_mask = target["graph_mask"] * valid.unsqueeze(-1)
-        graph_error = nn.functional.smooth_l1_loss(graph_hat, target["graph"], reduction="none")
-        graph_loss = (graph_error * graph_mask).sum() / graph_mask.sum().clamp_min(1.0)
-        speed_error = nn.functional.smooth_l1_loss(speed_hat, target["speed"], reduction="none")
-        speed_loss = (speed_error * valid.unsqueeze(-1)).sum() / valid.sum().clamp_min(1.0)
-        event_loss = gnn.event_loss_from_logits(event_logits[valid], target["events"][valid])
-        macro_loss = torch.tensor(0.0, device=DEVICE)
-        if macro_logits is not None and MACRO_EVENT_COLS:
-            macro_loss = gnn.event_loss_from_logits(macro_logits[valid], target["macro_events"][valid])
-        aux_loss = torch.tensor(0.0, device=DEVICE)
-        for index, name in enumerate(AUX_COLS):
-            mask = valid & target["aux"][:, :, index].ge(0)
-            if mask.any():
-                aux_loss = aux_loss + nn.functional.cross_entropy(aux_logits[name][mask], target["aux"][:, :, index][mask])
-        task_losses = {"graph": graph_loss, "speed": speed_loss, "event": event_loss, "aux": aux_loss}
-        if macro_logits is not None and MACRO_EVENT_COLS:
-            task_losses["macro"] = macro_loss
-        if GRADNORM_ENABLED and gradnorm_optimizer is not None:
-            if model.gradnorm_initial_losses is None:
-                model.gradnorm_initial_losses = torch.stack([
-                    task_losses[name].detach().clamp_min(1e-8)
-                    for name in model.gradnorm_task_names
-                ])
-            weights = model.gradnorm_weights()
-            weighted_losses = [weights[index] * task_losses[name] for index, name in enumerate(model.gradnorm_task_names)]
-            grad_norms: list[torch.Tensor] = []
-            shared_parameters = model.shared_parameters()
-            for weighted_task_loss in weighted_losses:
-                gradients = torch.autograd.grad(
-                    weighted_task_loss,
-                    shared_parameters,
-                    retain_graph=True,
-                    create_graph=True,
-                    allow_unused=True,
-                )
-                grad_norms.append(torch.sqrt(sum(
-                    gradient.pow(2).sum() for gradient in gradients if gradient is not None
-                ).clamp_min(1e-12)))
-            gradient_stack = torch.stack(grad_norms)
-            with torch.no_grad():
-                relative_loss = torch.stack([
-                    task_losses[name].detach().clamp_min(1e-8)
-                    for name in model.gradnorm_task_names
-                ]) / model.gradnorm_initial_losses
-                inverse_rate = relative_loss / relative_loss.mean().clamp_min(1e-8)
-                target_norm = gradient_stack.detach().mean() * inverse_rate.pow(GRADNORM_ALPHA)
-            gradnorm_loss = torch.abs(gradient_stack - target_norm).sum()
-            gradnorm_optimizer.zero_grad()
-            gradnorm_loss.backward(retain_graph=True)
-            gradnorm_optimizer.step()
-            weights = model.gradnorm_weights().detach()
-        else:
-            default_weights = {"graph": 1.0, "speed": float(os.getenv("TRANSFORMER_SPEED_LOSS_WEIGHT", "0.10")), "event": 1.0, "aux": float(os.getenv("TRANSFORMER_AUX_LOSS_WEIGHT", "0.10")), "macro": float(os.getenv("TRANSFORMER_MACRO_LOSS_WEIGHT", "1.0"))}
-            weights = torch.tensor(
-                [default_weights[name] for name in model.gradnorm_task_names],
-                device=DEVICE,
+    for kind in ("symbol_year", "cross_sectional"):
+        kind_indices = [index for index, item in enumerate(docs) if item["kind"] == kind]
+        order = np.random.permutation(kind_indices)
+        for offset in range(0, len(order), BATCH_SIZE):
+            selected = [docs[int(i)] for i in order[offset:offset + BATCH_SIZE]]
+            x, padding, target = _batch(selected)
+            x = x.to(DEVICE); padding = padding.to(DEVICE)
+            target = {name: value.to(DEVICE) for name, value in target.items()}
+            optimizer.zero_grad()
+            graph_hat, speed_hat, event_logits, aux_logits, document_aux_logits, macro_logits = model(
+                x, padding, causal=kind == "symbol_year"
             )
-        loss = sum(
-            weights[index] * task_losses[name]
-            for index, name in enumerate(model.gradnorm_task_names)
-        ) + model.routing_regularization()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        losses.append(float(loss.detach()))
+            valid = ~padding
+            task_valid = target["task_mask"]
+            graph_mask = target["graph_mask"] * valid.unsqueeze(-1) * task_valid[:, 0, None, None]
+            graph_error = nn.functional.smooth_l1_loss(graph_hat, target["graph"], reduction="none")
+            graph_loss = (graph_error * graph_mask).sum() / graph_mask.sum().clamp_min(1.0)
+            speed_valid = valid * task_valid[:, 1, None].bool()
+            speed_error = nn.functional.smooth_l1_loss(speed_hat, target["speed"], reduction="none")
+            speed_loss = (speed_error * speed_valid.unsqueeze(-1)).sum() / speed_valid.sum().clamp_min(1.0)
+            event_valid = valid * task_valid[:, 2, None].bool()
+            event_loss = gnn.event_loss_from_logits(event_logits[event_valid], target["events"][event_valid]) if event_valid.any() else graph_hat.new_zeros(())
+            macro_valid = valid * task_valid[:, 4, None].bool()
+            macro_loss = torch.tensor(0.0, device=DEVICE)
+            if macro_logits is not None and MACRO_EVENT_COLS and macro_valid.any():
+                if kind == "cross_sectional":
+                    macro_loss = gnn.event_loss_from_logits(
+                        macro_logits, target["macro_document_events"]
+                    )
+                else:
+                    macro_loss = gnn.event_loss_from_logits(macro_logits[macro_valid], target["macro_events"][macro_valid])
+            aux_loss = torch.tensor(0.0, device=DEVICE)
+            for index, name in enumerate(AUX_COLS):
+                # Annual causal documents use the final valid token as the
+                # document state.  The target is constant across the daily
+                # tokens, so reading the first valid target avoids duplicating
+                # the document-level supervision across the sequence.
+                if kind in ("symbol_year", "cross_sectional"):
+                    aux_target = target["aux"][:, 0, index]
+                    mask = task_valid[:, 3].bool() & aux_target.ge(0)
+                    if mask.any():
+                        aux_loss = aux_loss + nn.functional.cross_entropy(
+                            document_aux_logits[name][mask], aux_target[mask]
+                        )
+            task_losses = {"graph": graph_loss, "speed": speed_loss, "event": event_loss, "aux": aux_loss}
+        # Keep the optimizer step active when macro prediction is disabled;
+        # the macro branch is optional, while graph/auxiliary training is not.
+        if model.macro_head is None or MACRO_EVENT_COLS:
+            task_losses["macro"] = macro_loss
+            if GRADNORM_ENABLED and gradnorm_optimizer is not None:
+                if model.gradnorm_initial_losses is None:
+                    model.gradnorm_initial_losses = torch.stack([
+                        task_losses[name].detach().clamp_min(1e-8)
+                        for name in model.gradnorm_task_names
+                    ])
+                weights = model.gradnorm_weights()
+                weighted_losses = [weights[index] * task_losses[name] for index, name in enumerate(model.gradnorm_task_names)]
+                grad_norms: list[torch.Tensor] = []
+                shared_parameters = model.shared_parameters()
+                for weighted_task_loss in weighted_losses:
+                    gradients = torch.autograd.grad(
+                        weighted_task_loss, shared_parameters, retain_graph=True,
+                        create_graph=True, allow_unused=True,
+                    )
+                    grad_norms.append(torch.sqrt(sum(
+                        gradient.pow(2).sum() for gradient in gradients if gradient is not None
+                    ).clamp_min(1e-12)))
+                gradient_stack = torch.stack(grad_norms)
+                with torch.no_grad():
+                    relative_loss = torch.stack([
+                        task_losses[name].detach().clamp_min(1e-8)
+                        for name in model.gradnorm_task_names
+                    ]) / model.gradnorm_initial_losses
+                    inverse_rate = relative_loss / relative_loss.mean().clamp_min(1e-8)
+                    target_norm = gradient_stack.detach().mean() * inverse_rate.pow(GRADNORM_ALPHA)
+                gradnorm_loss = torch.abs(gradient_stack - target_norm).sum()
+                gradnorm_optimizer.zero_grad()
+                gradnorm_loss.backward(retain_graph=True)
+                gradnorm_optimizer.step()
+                weights = model.gradnorm_weights().detach()
+            else:
+                default_weights = {"graph": 1.0, "speed": float(os.getenv("TRANSFORMER_SPEED_LOSS_WEIGHT", "0.10")), "event": 1.0, "aux": float(os.getenv("TRANSFORMER_AUX_LOSS_WEIGHT", "0.10")), "macro": float(os.getenv("TRANSFORMER_MACRO_LOSS_WEIGHT", "1.0"))}
+                weights = torch.tensor(
+                    [default_weights[name] for name in model.gradnorm_task_names], device=DEVICE,
+                )
+            loss = sum(
+                weights[index] * task_losses[name]
+                for index, name in enumerate(model.gradnorm_task_names)
+            ) + model.routing_regularization()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            losses.append(float(loss.detach()))
     return float(np.mean(losses)) if losses else 0.0
 
 
@@ -489,8 +588,12 @@ def run_tier(tier: str) -> pd.DataFrame:
         normalized = _normalize(base, feature_cols, test_year)
         train_docs = _make_docs(normalized, test_year, True)
         test_docs = _make_docs(normalized, test_year, False)
+        cross_enabled = CROSS_SECTIONAL_ENABLED and (bool(MACRO_EVENT_COLS) or "year_target" in AUX_COLS)
+        cross_train_docs = _make_cross_sectional_docs(normalized, test_year, True) if cross_enabled else []
+        cross_test_docs = _make_cross_sectional_docs(normalized, test_year, False) if cross_enabled else []
         if not train_docs or not test_docs:
             continue
+        training_docs = train_docs + cross_train_docs
         aux_dims = {name: int(normalized[name].max()) + 1 for name in AUX_COLS}
         model = TransformerMTL(len(feature_cols), aux_dims).to(DEVICE)
         main_parameters = [
@@ -501,9 +604,9 @@ def run_tier(tier: str) -> pd.DataFrame:
         gradnorm_optimizer = torch.optim.Adam(
             [model.gradnorm_log_weights], lr=GRADNORM_LR
         ) if GRADNORM_ENABLED else None
-        print({"tier": tier, "year": test_year, "documents": len(train_docs), "test_documents": len(test_docs), "tokens": sum(len(d["x"]) for d in train_docs), "macro_tasks": len(MACRO_EVENT_COLS), "trunks": TRUNKS, "routing": ROUTING_MODE, "gradnorm": GRADNORM_ENABLED, "architecture": "causal_symbol_year_transformer", "device": str(DEVICE)}, flush=True)
+        print({"tier": tier, "year": test_year, "documents": len(train_docs), "cross_sectional_train_documents": len(cross_train_docs), "test_documents": len(test_docs), "cross_sectional_test_documents": len(cross_test_docs), "tokens": sum(len(d["x"]) for d in train_docs), "macro_tasks": len(MACRO_EVENT_COLS), "trunks": TRUNKS, "routing": ROUTING_MODE, "gradnorm": GRADNORM_ENABLED, "architecture": "mixed_causal_symbol_year_and_bidirectional_cross_sectional_transformer", "device": str(DEVICE)}, flush=True)
         for epoch in range(EPOCHS):
-            loss = _train_epoch(model, train_docs, optimizer, gradnorm_optimizer)
+            loss = _train_epoch(model, training_docs, optimizer, gradnorm_optimizer)
             if epoch == 0 or epoch == EPOCHS - 1:
                 print({"tier": tier, "year": test_year, "epoch": epoch + 1, "transformer_loss": round(loss, 5)}, flush=True)
         print({"tier": tier, "year": test_year, "task_trunk_weights": model.routing_weights(), "gradnorm_weights": model.gradnorm_weight_values()}, flush=True)
@@ -514,7 +617,7 @@ def run_tier(tier: str) -> pd.DataFrame:
                 batch_docs = test_docs[start:start + BATCH_SIZE]
                 x, padding, _ = _batch(batch_docs)
                 x = x.to(DEVICE); padding = padding.to(DEVICE)
-                graph_hat, _, _, _, _ = model(x, padding)
+                graph_hat, _, _, _, _, _ = model(x, padding)
                 values = graph_hat.cpu().numpy()
                 for row, doc in enumerate(batch_docs):
                     n = len(doc["x"])

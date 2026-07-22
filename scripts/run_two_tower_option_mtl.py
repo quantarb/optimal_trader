@@ -35,8 +35,8 @@ class TwoTowerMTL(nn.Module):
     def __init__(self, issuer_dim: int, option_dim: int, aux_dims: dict[str, int], event_dim: int, macro_dim: int, metric_dim: int = 32):
         super().__init__()
         self.issuer = nn.Sequential(nn.Linear(issuer_dim, 64), nn.LayerNorm(64), nn.GELU(), nn.Linear(64, metric_dim))
-        self.option = nn.Sequential(nn.Linear(option_dim, 64), nn.LayerNorm(64), nn.GELU(), nn.Linear(64, metric_dim))
-        self.option_type = nn.Embedding(2, metric_dim)
+        self.call_option = nn.Sequential(nn.Linear(option_dim, 64), nn.LayerNorm(64), nn.GELU(), nn.Linear(64, metric_dim))
+        self.put_option = nn.Sequential(nn.Linear(option_dim, 64), nn.LayerNorm(64), nn.GELU(), nn.Linear(64, metric_dim))
         # The same task heads are applied to both towers.  This forces issuer
         # and option representations to organize the shared embedding space
         # around the same MTL semantics instead of supervising only issuers.
@@ -47,7 +47,9 @@ class TwoTowerMTL(nn.Module):
 
     def forward(self, issuer_x: torch.Tensor, option_x: torch.Tensor, option_type: torch.Tensor):
         issuer_z = nn.functional.normalize(self.issuer(issuer_x), dim=-1)
-        option_z = nn.functional.normalize(self.option(option_x) + self.option_type(option_type), dim=-1)
+        call_z = self.call_option(option_x)
+        put_z = self.put_option(option_x)
+        option_z = nn.functional.normalize(torch.where(option_type[:, None].eq(0), call_z, put_z), dim=-1)
         def tasks(z: torch.Tensor):
             return ({name: head(z) for name, head in self.aux_heads.items()}, self.event_head(z), self.macro_head(z), self.graph_head(z))
         return issuer_z, option_z, tasks(issuer_z), tasks(option_z)
@@ -159,6 +161,8 @@ def main() -> None:
     aux_y = rows[list(gnn.AUX_TARGET_COLS)].fillna(-1).to_numpy(np.int64)
     train_idx = np.flatnonzero(train_mask.to_numpy())
     valid_idx = np.flatnonzero((~train_mask).to_numpy())
+    return_mean = float(returns[train_idx].mean())
+    return_std = max(float(returns[train_idx].std()), 1e-6)
     model = TwoTowerMTL(len(issuer_cols), len(option_features), aux_dims, len(gnn.ALL_EVENT_TARGETS), len(macro_cols)).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.002, weight_decay=1e-4)
     print({"rows": len(rows), "train_rows": len(train_idx), "validation_rows": len(valid_idx), "groups": len(np.unique(groups)), "device": str(DEVICE)}, flush=True)
@@ -169,26 +173,29 @@ def main() -> None:
             issuer_t = torch.from_numpy(issuer_x[idx]).to(DEVICE)
             option_t = torch.from_numpy(option_x[idx]).to(DEVICE)
             type_t = torch.from_numpy(option_type[idx]).to(DEVICE)
-            group_t = torch.from_numpy(groups[idx]).to(DEVICE)
             return_t = torch.from_numpy(returns[idx]).to(DEVICE)
             issuer_z, option_z, issuer_tasks, option_tasks = model(issuer_t, option_t, type_t)
             scores = (issuer_z * option_z).sum(dim=1)
-            loss = pairwise_loss(scores, return_t, group_t) + 0.25 * contrastive_loss(issuer_z, option_z, group_t)
+            target_z = (return_t - return_mean) / return_std
+            # Per-pair compatibility regression is the scalable primary
+            # objective; MTL remains a lower-weight regularizer.
+            loss = nn.functional.mse_loss(scores, target_z)
             aux_target = torch.from_numpy(aux_y[idx]).to(DEVICE)
             event_target = torch.from_numpy(event_y[idx]).to(DEVICE)
             macro_target = torch.from_numpy(macro_y[idx]).to(DEVICE)
             graph_target = torch.from_numpy(graph_y[idx]).to(DEVICE)
             # Every MTL task supervises both towers; metric learning remains
             # the task that explicitly controls issuer-expression distance.
-            loss = loss + task_loss(issuer_tasks, aux_target, event_target, macro_target, graph_target)
-            loss = loss + task_loss(option_tasks, aux_target, event_target, macro_target, graph_target)
+            loss = loss + 0.25 * task_loss(issuer_tasks, aux_target, event_target, macro_target, graph_target)
+            loss = loss + 0.10 * task_loss(option_tasks, aux_target, event_target, macro_target, graph_target)
             optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
             losses.append(float(loss.detach()))
         print({"epoch": epoch + 1, "train_loss": round(float(np.mean(losses)), 5)}, flush=True)
     model.eval()
     with torch.no_grad():
         issuer_z, option_z, _, _ = model(torch.from_numpy(issuer_x[valid_idx]).to(DEVICE), torch.from_numpy(option_x[valid_idx]).to(DEVICE), torch.from_numpy(option_type[valid_idx]).to(DEVICE))
-        scores = (issuer_z * option_z).sum(dim=1).cpu().numpy()
+        issuer_z = issuer_z.cpu().numpy(); option_z = option_z.cpu().numpy()
+        scores = (issuer_z * option_z).sum(axis=1)
     valid_returns = returns[valid_idx]
     valid_groups = groups[valid_idx]
     pairs = []
@@ -196,13 +203,28 @@ def main() -> None:
         idx = np.flatnonzero(valid_groups == group)
         if len(idx) == 2 and valid_returns[idx[0]] != valid_returns[idx[1]]:
             pairs.append(float(np.sign(valid_returns[idx[0]] - valid_returns[idx[1]]) == np.sign(scores[idx[0]] - scores[idx[1]])))
-    ranking = pd.DataFrame({"score": scores, "return": valid_returns}).sort_values("score")
-    k = max(1, len(ranking) // 10)
-    print({"pairwise_accuracy": round(float(np.mean(pairs)) if pairs else float("nan"), 5),
-           "spearman": round(float(pd.Series(scores).corr(pd.Series(valid_returns), method="spearman")), 5),
-           "bottom_decile_return": round(float(ranking.head(k)["return"].mean()), 5),
-           "top_decile_return": round(float(ranking.tail(k)["return"].mean()), 5),
-           "status": "complete"}, flush=True)
+    result = {"pairwise_accuracy": round(float(np.mean(pairs)) if pairs else float("nan"), 5),
+              "spearman": round(float(pd.Series(scores).corr(pd.Series(valid_returns), method="spearman")), 5)}
+    validation_rows = rows.iloc[valid_idx].reset_index(drop=True)
+    rng = np.random.default_rng(SEED)
+    for side, side_id in (("call", 0), ("put", 1)):
+        top_values=[]; random_values=[]; query_count=0
+        side_indices=np.flatnonzero(option_type[valid_idx] == side_id)
+        for _, date_group in validation_rows.iloc[side_indices].groupby("date", sort=False):
+            date_indices=date_group.index.to_numpy()
+            if len(date_indices) < 2: continue
+            for query_index in date_indices:
+                symbol=validation_rows.iloc[query_index].symbol
+                eligible=np.asarray([candidate for candidate in date_indices if validation_rows.iloc[candidate].symbol != symbol], dtype=int)
+                if not len(eligible): continue
+                candidate_scores=option_z[eligible] @ issuer_z[query_index]
+                k=min(5,len(eligible)); top_indices=eligible[np.argsort(-candidate_scores)[:k]]; random_indices=rng.choice(eligible,size=k,replace=False)
+                top_values.extend(valid_returns[top_indices].tolist()); random_values.extend(valid_returns[random_indices].tolist()); query_count+=1
+        result[f"{side}_top5_queries"]=query_count
+        result[f"{side}_top5_change_percent"]=round(float(np.mean(top_values)),5) if top_values else float("nan")
+        result[f"{side}_random5_change_percent"]=round(float(np.mean(random_values)),5) if random_values else float("nan")
+        result[f"{side}_top5_uplift"]=round(result[f"{side}_top5_change_percent"]-result[f"{side}_random5_change_percent"],5)
+    print({**result, "status": "complete"}, flush=True)
 
 
 if __name__ == "__main__":
