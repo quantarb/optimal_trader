@@ -25,10 +25,22 @@ for repo in (REPO_ROOT, WORKSPACE_ROOT / "quant-warehouse", WORKSPACE_ROOT / "qu
         sys.path.insert(0, str(repo))
 
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
+    CORPORATE_EVENT_COLUMNS,
     HitsLabelSpec,
+    HISTORICAL_CONSTITUENT_EVENT_COLUMNS,
+    SUB_SECTOR_TARGET_COLUMN,
     build_hits_labels,
+    build_historical_constituent_event_label_panel,
+    build_historical_sub_sector_target_panel,
+    build_corporate_event_label_panel,
     build_inverse_holding_time_hits_labels,
+    build_return_and_speed_hits_labels,
 )
+from quant_warehouse.ingest.constituent_fetch import (
+    fetch_historical_constituent_events,
+    fetch_index_constituents,
+)
+from quant_warehouse.ingest.corporate_events_fetch import fetch_fmp_corporate_events
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.store import (
     build_event_pairs_from_historical_data,
 )
@@ -74,7 +86,7 @@ np.random.seed(SEED)
 
 OUT = REPO_ROOT / "artifacts" / "graph_oracle_feature_family_gnn_improved_hits"
 OUT.mkdir(parents=True, exist_ok=True)
-CACHE_VERSION = "wfo_full_history_targets_v5_single_inverse_time_speed_graph"
+CACHE_VERSION = "wfo_full_history_targets_v7_shared_edges_constituent_events"
 GRAPH_CACHE: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]] = {}
 TIER_CONFIGS = {
     "1T": (1_000_000_000_000, "equity_meta_model_1t"),
@@ -85,6 +97,9 @@ TIER_CONFIGS = {
 
 def feature_dir(tier: str) -> Path:
     cap, cache = TIER_CONFIGS[tier]
+    override = os.getenv(f"TRANSFORMER_FEATURE_CACHE_{tier}", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return REPO_ROOT / "artifacts" / "trading_app_v2" / cache / f"mcap_{cap}_train_2020-12-31_seed_20260707" / "feature_family_panels"
 
 
@@ -92,7 +107,13 @@ def normalize_prices(raw: pd.DataFrame) -> pd.DataFrame:
     frame = raw.copy().reset_index() if "date" not in raw.columns else raw.copy()
     frame.columns = [str(c).lower() for c in frame.columns]
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-    return frame[["date", "open", "high", "low", "close"]].dropna().sort_values("date").drop_duplicates("date").reset_index(drop=True)
+    if "volume" not in frame.columns and "vol" in frame.columns:
+        frame["volume"] = frame["vol"]
+    if "volume" not in frame.columns:
+        frame["volume"] = np.nan
+    return frame[["date", "open", "high", "low", "close", "volume"]].dropna(
+        subset=["date", "open", "high", "low", "close"]
+    ).sort_values("date").drop_duplicates("date").reset_index(drop=True)
 
 
 def _pagerank(weights: np.ndarray, damping: float = 0.85, iterations: int = 100) -> np.ndarray:
@@ -208,6 +229,14 @@ EVENT_TARGETS = {
     "is_sec_10k_filed": ("filing", "sec_10k_filed", None),
     "is_sec_form4_filed": ("filing", "sec_form4_filed", None),
 }
+EVENT_TARGETS.update({
+    column: ("index_constituent", column, None)
+    for column in HISTORICAL_CONSTITUENT_EVENT_COLUMNS
+})
+EVENT_TARGETS.update({
+    column: ("corporate_event", column, None)
+    for column in CORPORATE_EVENT_COLUMNS
+})
 GRAPH_EVENT_TARGETS = {
     "is_long_hub_event": "long_hub",
     "is_long_authority_event": "long_authority",
@@ -221,8 +250,10 @@ GRAPH_EVENT_TARGETS = {
 # regression targets below; graph percentile events are intentionally not
 # separate event tasks in this comparison.
 ALL_EVENT_TARGETS = EVENT_TARGETS
-AUX_TARGET_COLS = ("sector_target", "industry_target", "year_target")
-AUX_CLASS_DIMS: dict[str, int] = {"sector_target": 1, "industry_target": 1, "year_target": 1}
+AUX_TARGET_COLS = ("sector_target", "industry_target", SUB_SECTOR_TARGET_COLUMN, "year_target")
+AUX_CLASS_DIMS: dict[str, int] = {
+    "sector_target": 1, "industry_target": 1, SUB_SECTOR_TARGET_COLUMN: 1, "year_target": 1,
+}
 
 
 def add_auxiliary_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
@@ -245,6 +276,23 @@ def add_auxiliary_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFra
     symbols_upper = out.symbol.astype(str).str.upper()
     out["sector_target"] = symbols_upper.map(lambda value: sector_codes.get(profiles.get(value, ("", ""))[0], -1)).astype("int64")
     out["industry_target"] = symbols_upper.map(lambda value: industry_codes.get(profiles.get(value, ("", ""))[1], -1)).astype("int64")
+    try:
+        # FMP's current constituent endpoint carries ``subSector``.  The
+        # historical change endpoint carries membership events but does not
+        # consistently include that classification field.
+        constituent_observations = fetch_index_constituents()
+    except Exception:
+        constituent_observations = []
+    sub_sector_panel = build_historical_sub_sector_target_panel(
+        out[["symbol", "date"]], constituent_observations, symbols=symbols,
+    )
+    if SUB_SECTOR_TARGET_COLUMN in out.columns:
+        out = out.drop(columns=[SUB_SECTOR_TARGET_COLUMN])
+    if sub_sector_panel.empty:
+        out[SUB_SECTOR_TARGET_COLUMN] = -1
+    else:
+        out = out.merge(sub_sector_panel, on=["symbol", "date"], how="left", validate="one_to_one")
+        out[SUB_SECTOR_TARGET_COLUMN] = out[SUB_SECTOR_TARGET_COLUMN].fillna(-1).astype("int64")
     dates = pd.to_datetime(out.date, errors="coerce")
     out["year_target"] = dates.dt.year.fillna(-1).astype("int64")
     # Year labels are made contiguous so the classification head can use CE.
@@ -253,6 +301,7 @@ def add_auxiliary_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFra
     out["year_target"] = out["year_target"].map(lambda value: year_codes.get(int(value), -1)).astype("int64")
     AUX_CLASS_DIMS.update({
         "sector_target": max(1, len(sectors)), "industry_target": max(1, len(industries)),
+        SUB_SECTOR_TARGET_COLUMN: max(1, int(pd.to_numeric(out[SUB_SECTOR_TARGET_COLUMN], errors="coerce").max()) + 1),
         "year_target": max(1, len(years)),
     })
     return out
@@ -262,7 +311,11 @@ def add_event_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
     """Add all requested event targets at the symbol-date level."""
     warehouse = Warehouse()
     rows: list[pd.DataFrame] = []
-    families = tuple(sorted({spec[0] for spec in EVENT_TARGETS.values()}))
+    event_pair_targets = {
+        target: spec for target, spec in EVENT_TARGETS.items()
+        if spec[0] not in {"index_constituent", "corporate_event"}
+    }
+    families = tuple(sorted({spec[0] for spec in event_pair_targets.values()}))
     for symbol in symbols:
         events = build_event_pairs_from_historical_data(
             symbol,
@@ -280,20 +333,68 @@ def add_event_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             continue
         chamber = frame["actor_chamber"].astype(str).str.lower()
-        for target, (family, event_type, chamber_name) in EVENT_TARGETS.items():
+        for target, (family, event_type, chamber_name) in event_pair_targets.items():
             mask = frame["event_family"].eq(family) & frame["event_type"].eq(event_type)
             if chamber_name is not None:
                 mask &= chamber.eq(chamber_name)
             frame[target] = mask.astype("float32")
-        grouped = frame.groupby("date", as_index=False)[list(EVENT_TARGETS)].max()
+        grouped = frame.groupby("date", as_index=False)[list(event_pair_targets)].max()
         grouped.insert(0, "symbol", symbol.upper())
         rows.append(grouped)
     if not rows:
-        for target in EVENT_TARGETS:
+        for target in event_pair_targets:
             labels[target] = 0.0
         return labels
     extra = pd.concat(rows, ignore_index=True)
     return labels.merge(extra, on=["symbol", "date"], how="left")
+
+
+def add_constituent_event_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
+    """Add FMP historical index add/remove events at the symbol-date level."""
+    cache = OUT / "cache" / "historical_constituent_events.parquet"
+    if cache.exists():
+        panel = pd.read_parquet(cache)
+    else:
+        raw_events = fetch_historical_constituent_events()
+        panel = build_historical_constituent_event_label_panel(
+            labels[["date"]].drop_duplicates(),
+            raw_events,
+            symbols=symbols,
+        )
+        panel.to_parquet(cache, index=False)
+    if panel.empty:
+        for column in HISTORICAL_CONSTITUENT_EVENT_COLUMNS:
+            labels[column] = 0.0
+        return labels
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
+    panel["symbol"] = panel["symbol"].astype(str).str.upper()
+    panel = panel.loc[panel.symbol.isin({str(symbol).upper() for symbol in symbols})]
+    return labels.merge(panel, on=["symbol", "date"], how="left")
+
+
+def add_corporate_event_labels(symbols: list[str], labels: pd.DataFrame) -> pd.DataFrame:
+    """Add FMP symbol-change, delisting, and M&A issuer events."""
+    # Cache the raw global event feed, then filter/build labels per universe.
+    # A tier-specific label panel would incorrectly omit symbols when a later
+    # 1T/100B run uses a different universe.
+    cache = OUT / "cache" / "historical_corporate_events_raw.parquet"
+    if cache.exists():
+        raw_events = pd.read_parquet(cache)
+    else:
+        raw_events = fetch_fmp_corporate_events()
+        pd.DataFrame(raw_events).to_parquet(cache, index=False)
+    panel = build_corporate_event_label_panel(
+        labels[["date"]].drop_duplicates(),
+        raw_events,
+        symbols=symbols,
+    )
+    if panel.empty:
+        for column in CORPORATE_EVENT_COLUMNS:
+            labels[column] = 0.0
+        return labels
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
+    panel["symbol"] = panel["symbol"].astype(str).str.upper()
+    return labels.merge(panel, on=["symbol", "date"], how="left")
 
 
 def add_graph_event_labels(labels: pd.DataFrame) -> pd.DataFrame:
@@ -318,10 +419,26 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
     if prices_path.exists() and labels_path.exists():
         prices = pd.read_parquet(prices_path)
         labels = pd.read_parquet(labels_path)
-        required = set(EVENT_TARGETS) | {"long_hub", "long_authority", "short_hub", "short_authority", "long_pagerank", "short_pagerank"}
-        if required.issubset(labels.columns) and set(SPEED_TARGET_COLS).issubset(labels.columns):
-            if not set(AUX_TARGET_COLS).issubset(labels.columns):
+        required = (set(EVENT_TARGETS) - set(CORPORATE_EVENT_COLUMNS)) | {"long_hub", "long_authority", "short_hub", "short_authority", "long_pagerank", "short_pagerank"}
+        if (
+            required.issubset(labels.columns)
+            and set(SPEED_TARGET_COLS).issubset(labels.columns)
+            and "volume" in prices.columns
+        ):
+            labels_changed = False
+            auxiliary_missing = not set(AUX_TARGET_COLS).issubset(labels.columns)
+            auxiliary_placeholder = (
+                SUB_SECTOR_TARGET_COLUMN in labels.columns
+                and not pd.to_numeric(labels[SUB_SECTOR_TARGET_COLUMN], errors="coerce").ge(0).any()
+            )
+            if auxiliary_missing or auxiliary_placeholder:
                 labels = add_auxiliary_labels(symbols, labels)
+                labels_changed = True
+            if not set(CORPORATE_EVENT_COLUMNS).issubset(labels.columns):
+                labels = add_corporate_event_labels(symbols, labels)
+                labels_changed = True
+            if labels_changed:
+                labels.to_parquet(labels_path, index=False)
             print({"tier": tier, "cache": "hit", "prices": str(prices_path), "labels": str(labels_path)}, flush=True)
             for column in AUX_TARGET_COLS:
                 AUX_CLASS_DIMS[column] = max(1, int(pd.to_numeric(labels[column], errors="coerce").max()) + 1)
@@ -347,7 +464,7 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
         if i % 100 == 0:
             print({"prices_loaded": i, "usable_symbols": len(node_rows)}, flush=True)
     prices = pd.concat(node_rows, ignore_index=True) if node_rows else pd.DataFrame()
-    labels = build_hits_labels(
+    shared_graph_labels = build_return_and_speed_hits_labels(
         price_frames,
         spec=HitsLabelSpec(
             max_hold=MAX_HOLD,
@@ -357,26 +474,15 @@ def build_price_and_labels(symbols: list[str], tier: str) -> tuple[pd.DataFrame,
             end_date=str(DATA_END.date()),
         ),
     )
-    speed_labels = build_inverse_holding_time_hits_labels(
-        price_frames,
-        spec=HitsLabelSpec(
-            max_hold=MAX_HOLD,
-            iterations=HITS_ITERATIONS,
-            tail_quantile=HITS_TAIL_QUANTILE,
-            start_date=str(DATA_START.date()),
-            end_date=str(DATA_END.date()),
-        ),
-    )
-    speed_labels = speed_labels.rename(columns={
-        "long_hub": "speed_long_hub",
-        "long_authority": "speed_long_authority",
-        "short_hub": "speed_short_hub",
-        "short_authority": "speed_short_authority",
-    })
-    speed_labels = add_speed_pagerank_labels(price_frames, speed_labels)
-    labels = labels.merge(speed_labels, on=["symbol", "date"], how="left")
+    labels = shared_graph_labels
+    # The shared builder already supplied speed HITS scores.  Add only the
+    # speed PageRank channels here; merging the HITS columns again would
+    # create pandas suffixes and hide the expected target names.
+    labels = add_speed_pagerank_labels(price_frames, labels)
     labels = add_pagerank_labels(price_frames, labels)
     labels = add_event_labels(symbols, labels)
+    labels = add_constituent_event_labels(symbols, labels)
+    labels = add_corporate_event_labels(symbols, labels)
     labels = add_auxiliary_labels(symbols, labels)
     prices.to_parquet(prices_path, index=False)
     labels.to_parquet(labels_path, index=False)

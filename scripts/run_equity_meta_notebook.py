@@ -34,12 +34,22 @@ def main() -> int:
         help="Faster path: skip FMP refresh, symbol-level backtesting.py, reuse caches when valid",
     )
     parser.add_argument(
+        "--backfill-fmp-data",
+        action="store_true",
+        help="Backfill missing FMP historical sections for the screened universe before building features.",
+    )
+    parser.add_argument(
         "--rebuild-feature-family-cache",
         action="store_true",
     )
     parser.add_argument(
         "--rebuild-family-score-cache",
         action="store_true",
+    )
+    parser.add_argument(
+        "--disable-technical-feature-families",
+        action="store_true",
+        help="Build only raw/fundamental/context families; the transformer supplies adjusted OHLCV/volume.",
     )
     parser.add_argument(
         "--label-mode",
@@ -154,8 +164,8 @@ def main() -> int:
 
     # Overrides after config cell
     g["MIN_MARKET_CAP"] = int(args.min_market_cap)
-    g["RUN_FMP_REFRESH"] = False
-    g["INCLUDE_TECHNICAL_FEATURE_FAMILIES"] = True
+    g["RUN_FMP_REFRESH"] = bool(args.backfill_fmp_data)
+    g["INCLUDE_TECHNICAL_FEATURE_FAMILIES"] = not bool(args.disable_technical_feature_families)
     g["REQUIRE_ALL_REQUESTED_FEATURE_FAMILIES"] = True
     g["RUN_EQUITY_META_EXPERIMENT"] = True
     # The trading app is an operational fit/score workflow. Research evaluation
@@ -268,6 +278,14 @@ def main() -> int:
     cell9 = nb["cells"][9]["source"]
     if isinstance(cell9, list):
         cell9 = "".join(cell9)
+    # The warehouse now exposes independent event definitions rather than the
+    # removed mirrored EVENT_PAIR_TAXONOMY.  The fresh oracle-only feature
+    # rebuild does not request event labels, so keep the notebook compatible
+    # without reviving the obsolete pair taxonomy.
+    cell9 = cell9.replace(
+        "from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs import EVENT_PAIR_TAXONOMY, EventPairStore",
+        "from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs import EventPairStore\nEVENT_PAIR_TAXONOMY = {}",
+    )
     cell9 = cell9.replace(
         'oracle_trade_k_by_frequency={"YE": tuple(range(1, 13))}',
         f"oracle_trade_k_by_frequency={{'YE': {tuple(ye_ks)!r}}}",
@@ -377,9 +395,10 @@ def main() -> int:
         },
         flush=True,
     )
-    tech_rows = idx.loc[idx["strategy_source"].astype(str).str.contains("technical", case=False, na=False)]
-    if tech_rows.empty or not tech_rows["features"].gt(0).any():
-        raise RuntimeError("No technical feature families with features>0 — notebook FE path incomplete")
+    if g.get("INCLUDE_TECHNICAL_FEATURE_FAMILIES", True):
+        tech_rows = idx.loc[idx["strategy_source"].astype(str).str.contains("technical", case=False, na=False)]
+        if tech_rows.empty or not tech_rows["features"].gt(0).any():
+            raise RuntimeError("No technical feature families with features>0 — notebook FE path incomplete")
 
     # Pick the latest date shared by the broad feature set. Using the modal
     # family maximum prevents one stale or prematurely dated family from
