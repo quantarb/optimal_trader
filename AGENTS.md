@@ -35,6 +35,8 @@
 - Use the exact same code path at every scale. Run the highest threshold first as a smoke test, then lower the threshold only after the prior run succeeds.
 - Artifact directories may include a caller-supplied tag, but tier names must not be embedded in implementation names or control flow.
 - Remove superseded one-off scale scripts instead of retaining wrappers that can drift from the canonical runner.
+- Use one experiment artifact root for every scale. Put runs in `experiment_xyz/1T/`, `experiment_xyz/100B/`, and `experiment_xyz/10B/` subdirectories rather than names such as `experiment_xyz_1t`, `experiment_xyz_100b`, or `experiment_xyz_10b`.
+- Select the universe by passing `min_market_cap` (or the canonical universe configuration parameter); do not duplicate the workflow or implementation per tier.
 - Curated technical feature families are part of the default equity model contract at every scale. Do not create a technical/non-technical script split or an opt-out that silently removes them.
 - Scripts must call the current public optimized APIs in `quant-warehouse` and `quant-orchestrator`; do not copy notebook cells, private feature builders, model training loops, or full-panel filtering implementations into scripts.
 

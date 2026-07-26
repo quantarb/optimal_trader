@@ -21,11 +21,12 @@ def test_causal_mask_blocks_future_tokens_only():
 
 def test_transformer_mtl_shapes():
     model = MODULE.TransformerMTL(6, {"sector_target": 3, "industry_target": 4, "year_target": 2})
-    graph, speed, events, aux, macro = model(torch.randn(2, 5, 6), torch.zeros(2, 5, dtype=torch.bool))
+    outputs = model(torch.randn(2, 5, 6), torch.zeros(2, 5, dtype=torch.bool))
+    graph, speed, events, aux, document_aux, macro = outputs[:6]
     assert graph.shape == (2, 5, 6)
     assert speed.shape == (2, 5, len(MODULE.SPEED_TARGET_COLS))
     assert events.shape[0:2] == (2, 5)
-    assert set(aux) == {"sector_target", "industry_target", "year_target"}
+    assert set(document_aux) == {"sector_target", "industry_target", "year_target"}
     assert macro is None
 
 
