@@ -13,7 +13,7 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 WAREHOUSE = ROOT.parent / "quant-warehouse"
 sys.path.insert(0, str(WAREHOUSE))
-from quant_warehouse.platforms.data_providers.fmp.feature_engineering import build_price_technical_features  # noqa: E402
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering import build_historical_price_eod_features  # noqa: E402
 
 CLASSES = ("preferred", "warrant", "unit", "note_bond", "adr", "ordinary", "etf")
 
@@ -118,7 +118,7 @@ def build(tier: str = "100B") -> Path:
                 prices = raw[instrument_symbol].copy()
                 prices["symbol"] = instrument_symbol
                 try:
-                    built = build_price_technical_features(instrument_symbol, prices)
+                    built = build_historical_price_eod_features(instrument_symbol, prices)
                 except Exception as exc:
                     print({"issuer": issuer, "instrument": instrument_symbol, "error": str(exc)}, flush=True)
                     continue

@@ -1,0 +1,33 @@
+features:
+  use_existing_feature_registry: true
+  include_all_existing_families: true
+  exclude_ta_based_families: true
+  retain_raw_ohlcv: true
+  retain_adjusted_ohlcv: true
+  retain_returns: true
+  retain_market_cap: true
+  retain_float: true
+assets:
+  include: [equity, corporate_bond, preferred, warrant, unit, note_bond, adr, ordinary, etf]
+  exclude: [option, options]
+model:
+  d_model: 256
+  annual_layers: 4
+  quarterly_layers: 4
+  decoder_layers: 6
+  num_heads: 8
+  annual_sequence_length: 5
+  quarterly_sequence_length: 12
+  daily_sequence_length: 256
+  quarterly_condition_on_annual: true
+  separate_cross_attention_by_rate: true
+  shared_instrument_decoder: true
+  asset_specific_adapters: true
+tasks:
+  load_all_current_mtl_tasks: true
+  preserve_existing_task_names: true
+  add_rank_heads_for_every_active_hit_target: true
+walk_forward:
+  first_test_year: 2021
+  last_test_year: 2025
+  tier: 100B

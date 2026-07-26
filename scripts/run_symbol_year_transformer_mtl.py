@@ -26,6 +26,8 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     build_macro_family_label_panel,
     deduplicate_binary_label_columns,
 )
+from quant_warehouse.warehouse.equity_calendar import EquityCalendarStore
+from scripts.multirate_transformer.trading_policy import build_legacy_compatible_scores
 
 FIRST_TEST_YEAR = int(os.getenv("TRANSFORMER_FIRST_TEST_YEAR", "2021"))
 LAST_TEST_YEAR = int(os.getenv("TRANSFORMER_LAST_TEST_YEAR", "2025"))
@@ -90,6 +92,46 @@ NEXT_TOKEN_ENABLED = os.getenv("TRANSFORMER_NEXT_TOKEN", "1") == "1"
 MASKED_TOKEN_WEIGHT = float(os.getenv("TRANSFORMER_MASKED_TOKEN_WEIGHT", "0.05"))
 NEXT_TOKEN_WEIGHT = float(os.getenv("TRANSFORMER_NEXT_TOKEN_WEIGHT", "0.05"))
 MASKED_TOKEN_RATE = min(0.5, max(0.01, float(os.getenv("TRANSFORMER_MASKED_TOKEN_RATE", "0.15"))))
+FAMILY_RECONSTRUCTION_ENABLED = os.getenv("TRANSFORMER_FAMILY_RECONSTRUCTION", "0") == "1"
+FAMILY_RECONSTRUCTION_WEIGHT = float(
+    os.getenv("TRANSFORMER_FAMILY_RECONSTRUCTION_WEIGHT", "0.05")
+)
+FAMILY_RECONSTRUCTION_RATE = min(
+    0.5, max(0.01, float(os.getenv("TRANSFORMER_FAMILY_RECONSTRUCTION_RATE", "0.15")))
+)
+FAMILY_RECONSTRUCTION_PRESENCE_WEIGHT = float(
+    os.getenv("TRANSFORMER_FAMILY_RECONSTRUCTION_PRESENCE_WEIGHT", "0.25")
+)
+# Earnings-specific heads are removed from the active model.  The old code
+# remains below only so historical checkpoints/artifacts can still be read,
+# but future runs cannot add the duplicate earnings HITS/speed task bundle.
+EARNINGS_OHLCV_ENABLED = False
+ISSUER_ENCODER_INSTRUMENT_DECODER = os.getenv(
+    "TRANSFORMER_ISSUER_ENCODER_INSTRUMENT_DECODER", "0"
+) == "1"
+# Multi-rate issuer state: primary temporal documents are split at observed
+# reporting boundaries.  The issuer encoder consumes the historical sequence
+# of available issuer snapshots once, and the daily decoder reuses the latest
+# encoded state for every instrument token in that reporting interval.
+MULTIRATE_ISSUER_STATE = os.getenv(
+    "TRANSFORMER_MULTIRATE_ISSUER_STATE", "1"
+) == "1"
+# Roughly one quarter of trading tokens.  This is only a computational
+# boundary when the vendor does not provide a usable reporting date; it is
+# never used to shift labels or features in time.
+ISSUER_INTERVAL_MAX_TOKENS = max(
+    20, int(os.getenv("TRANSFORMER_ISSUER_INTERVAL_MAX_TOKENS", "66"))
+)
+INSTRUMENT_UPDATE_RATE_PER_YEAR = float(
+    os.getenv("TRANSFORMER_INSTRUMENT_UPDATE_RATE_PER_YEAR", "4.0")
+)
+EARNINGS_OHLCV_WEIGHT = float(os.getenv("TRANSFORMER_EARNINGS_OHLCV_WEIGHT", "0.05"))
+EARNINGS_STOP_WEIGHT = float(os.getenv("TRANSFORMER_EARNINGS_STOP_WEIGHT", "0.10"))
+# This is the explicit release-date marker merged from the earnings calendar.
+# Keep it separate from the sparse event-label column ``is_earnings_reported``:
+# the decoder needs actual reporting dates, not a vendor event feature that may
+# have different coverage or semantics.
+EARNINGS_BOUNDARY_COL = "earnings_boundary"
 CROSS_SECTIONAL_SET_CONTEXT = os.getenv("TRANSFORMER_CROSS_SET_CONTEXT", "1") == "1"
 ETF_CORPUS_ENABLED = os.getenv("TRANSFORMER_ETF_CORPUS", "0") == "1"
 ETF_CORPUS_PANEL_PATH = os.getenv("TRANSFORMER_ETF_CORPUS_PANEL", "").strip()
@@ -100,7 +142,7 @@ ASSET_MODALITY_IDS = {name: index + 1 for index, name in enumerate(ASSET_CLASSES
 # receiving precomputed indicators such as returns, SMAs, RSI, ATR, or TA
 # candle/cycle features.
 DISABLED_TECHNICAL_FAMILIES = {
-    "price_technicals",
+    "equity-historical-price-eod",
     "technical_candles",
     "technical_cycles",
     "technical_math",
@@ -147,8 +189,16 @@ TARGET_COLS = [
 SPEED_TARGET_COLS = list(gnn.SPEED_TARGET_COLS)
 CROSS_RANK_TARGET_COLS = [f"cross_{column}" for column in TARGET_COLS]
 CROSS_SPEED_RANK_TARGET_COLS = [f"cross_{column}" for column in SPEED_TARGET_COLS]
+CROSS_ASSET_CLASS_TARGET_COLS = [f"cross_asset_class_{column}" for column in TARGET_COLS]
+CROSS_ASSET_CLASS_SPEED_TARGET_COLS = [f"cross_asset_class_{column}" for column in SPEED_TARGET_COLS]
+CROSS_ISSUER_TARGET_COLS = [f"cross_issuer_{column}" for column in TARGET_COLS]
+CROSS_ISSUER_SPEED_TARGET_COLS = [f"cross_issuer_{column}" for column in SPEED_TARGET_COLS]
 EVENT_COLS = list(gnn.ALL_EVENT_TARGETS)
-AUX_COLS = list(gnn.AUX_TARGET_COLS)
+SUB_SECTOR_TASK_ENABLED = os.getenv("TRANSFORMER_SUB_SECTOR_TASK", "0") == "1"
+AUX_COLS = [
+    column for column in gnn.AUX_TARGET_COLS
+    if SUB_SECTOR_TASK_ENABLED or column != "sub_sector_target"
+]
 MACRO_EVENT_COLS: list[str] = []
 MACRO_FAMILY_MODE = os.getenv("TRANSFORMER_MACRO_FAMILY", "0") == "1"
 MACRO_FAMILY_COLS: list[str] = []
@@ -241,6 +291,45 @@ class CausalAssetAdapter(nn.Module):
         return self.output(self.residual(base) + value * torch.sigmoid(self.gate(base)))
 
 
+class IssuerAutoFeatureEngineer(nn.Module):
+    """Learn cheap cross-column issuer features before temporal attention.
+
+    A plain input projection treats a quarterly issuer row as one flat vector.
+    This block adds a low-rank multiplicative path so the model can discover
+    relationships such as revenue versus employees, debt versus assets, or
+    cash-flow versus shares without constructing a dense pairwise feature
+    table.  The factorized product costs O(D * R) per token, where D is the
+    issuer-column count and R is a small learned interaction rank.
+    """
+
+    def __init__(self, input_dim: int, hidden: int, rank: int = 16):
+        super().__init__()
+        self.norm = nn.LayerNorm(input_dim)
+        self.base = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+        )
+        self.left = nn.Linear(input_dim, rank, bias=False)
+        self.right = nn.Linear(input_dim, rank, bias=False)
+        self.interaction = nn.Sequential(
+            nn.LayerNorm(rank),
+            nn.GELU(),
+            nn.Linear(rank, hidden),
+        )
+        self.gate = nn.Parameter(torch.tensor(-3.0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        normalized = self.norm(x)
+        base = self.base(x)
+        # Two learned projections create a compact, signed interaction basis.
+        # The product allows the network to represent ratio-like behavior when
+        # combined with the surrounding nonlinearities and normalization.
+        product = self.left(normalized) * self.right(normalized)
+        return base + torch.sigmoid(self.gate) * self.interaction(product)
+
+
 class CrossSectionalSetBlock(nn.Module):
     """Linear-cost bidirectional same-date context block."""
 
@@ -263,6 +352,9 @@ class CrossSectionalSetBlock(nn.Module):
 class TransformerMTL(nn.Module):
     def __init__(self, feature_dim: int, aux_dims: dict[str, int], extra_task_names: tuple[str, ...] = (), asset_feature_indices: dict[str, tuple[int, ...]] | None = None,
                  family_feature_indices: dict[str, tuple[int, ...]] | None = None,
+                 ohlcv_feature_indices: tuple[int, ...] = (),
+                 issuer_feature_indices: tuple[int, ...] = (),
+                 instrument_feature_indices: tuple[int, ...] = (),
                  feature_mean: np.ndarray | torch.Tensor | None = None, feature_std: np.ndarray | torch.Tensor | None = None,
                  robust_feature_mask: np.ndarray | torch.Tensor | None = None,
                  max_position: int = 512):
@@ -277,6 +369,16 @@ class TransformerMTL(nn.Module):
         self.input = nn.Sequential(nn.Linear(feature_dim, HIDDEN), nn.LayerNorm(HIDDEN), nn.GELU())
         self.asset_feature_indices = asset_feature_indices or {}
         self.family_feature_indices = family_feature_indices or {}
+        self.ohlcv_feature_indices = tuple(ohlcv_feature_indices)
+        self.instrument_feature_indices = tuple(instrument_feature_indices or ohlcv_feature_indices)
+        self.issuer_feature_indices = tuple(
+            issuer_feature_indices
+            or tuple(index for index in range(feature_dim) if index not in self.instrument_feature_indices)
+        )
+        if ISSUER_ENCODER_INSTRUMENT_DECODER and (
+            not self.issuer_feature_indices or not self.instrument_feature_indices
+        ):
+            raise ValueError("Issuer encoder/instrument decoder requires both issuer and instrument feature indices")
         self.shared_family_names = tuple(self.family_feature_indices)
         self._coverage_family_states = None
         self._coverage_family_presence = None
@@ -404,6 +506,39 @@ class TransformerMTL(nn.Module):
         self.encoders = nn.ModuleList(
             [nn.TransformerEncoder(layer, num_layers=LAYERS) for _ in range(TRUNKS)]
         )
+        self.issuer_input = None
+        self.issuer_auto_features = None
+        self.issuer_encoders = nn.ModuleList()
+        self.instrument_input = None
+        self.instrument_decoders = nn.ModuleList()
+        if ISSUER_ENCODER_INSTRUMENT_DECODER:
+            issuer_rank = max(8, min(24, HIDDEN // 2))
+            self.issuer_auto_features = IssuerAutoFeatureEngineer(
+                len(self.issuer_feature_indices), HIDDEN, rank=issuer_rank,
+            )
+            # Keep the public name for checkpoints and diagnostics while the
+            # actual projection now includes learned feature engineering.
+            self.issuer_input = nn.Identity()
+            self.instrument_input = nn.Sequential(
+                nn.Linear(len(self.instrument_feature_indices), HIDDEN),
+                nn.LayerNorm(HIDDEN),
+                nn.GELU(),
+            )
+            for _ in range(TRUNKS):
+                issuer_layer = nn.TransformerEncoderLayer(
+                    d_model=HIDDEN, nhead=HEADS, dim_feedforward=HIDDEN * 4,
+                    dropout=0.1, batch_first=True, norm_first=True,
+                )
+                decoder_layer = nn.TransformerDecoderLayer(
+                    d_model=HIDDEN, nhead=HEADS, dim_feedforward=HIDDEN * 4,
+                    dropout=0.1, batch_first=True, norm_first=True,
+                )
+                self.issuer_encoders.append(
+                    nn.TransformerEncoder(issuer_layer, num_layers=LAYERS)
+                )
+                self.instrument_decoders.append(
+                    nn.TransformerDecoder(decoder_layer, num_layers=LAYERS)
+                )
         self.cross_set_encoders = nn.ModuleList(
             [nn.ModuleList([
                 CrossSectionalSetBlock(HIDDEN)
@@ -415,10 +550,54 @@ class TransformerMTL(nn.Module):
         self.masked_feature_head = nn.Linear(HIDDEN, feature_dim) if SELF_SUPERVISED_ENABLED else None
         self.masked_token_head = nn.Linear(HIDDEN, feature_dim) if MASKED_TOKEN_ENABLED else None
         self.next_token_head = nn.Linear(HIDDEN, feature_dim) if NEXT_TOKEN_ENABLED else None
+        self.family_reconstruction_heads = nn.ModuleDict()
+        self.family_presence_heads = nn.ModuleDict()
+        if FAMILY_RECONSTRUCTION_ENABLED:
+            reconstruction_rank = max(16, min(32, HIDDEN))
+            for family, indices in self.family_feature_indices.items():
+                if not indices:
+                    continue
+                key = family.replace("-", "__")
+                self.family_reconstruction_heads[key] = nn.Sequential(
+                    nn.Linear(HIDDEN, reconstruction_rank),
+                    nn.GELU(),
+                    nn.Linear(reconstruction_rank, len(indices)),
+                )
+                self.family_presence_heads[key] = nn.Linear(HIDDEN, 1)
+        self.earnings_ohlcv_head = (
+            nn.Linear(HIDDEN, len(self.ohlcv_feature_indices))
+            if EARNINGS_OHLCV_ENABLED and self.ohlcv_feature_indices else None
+        )
+        self.earnings_stop_head = (
+            nn.Linear(HIDDEN, 1)
+            if EARNINGS_OHLCV_ENABLED and self.ohlcv_feature_indices else None
+        )
+        self.earnings_graph_head = (
+            nn.Linear(HIDDEN, len(TARGET_COLS))
+            if EARNINGS_OHLCV_ENABLED and self.ohlcv_feature_indices else None
+        )
+        self.earnings_speed_head = (
+            nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
+            if EARNINGS_OHLCV_ENABLED and self.ohlcv_feature_indices else None
+        )
+        self.earnings_decoder = (
+            nn.Sequential(
+                nn.Linear(HIDDEN * 2, HIDDEN),
+                nn.LayerNorm(HIDDEN),
+                nn.GELU(),
+            )
+            if self.earnings_ohlcv_head is not None else None
+        )
         self.last_token_state = None
         self.speed_head = nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
-        self.cross_graph_head = nn.Linear(HIDDEN, len(TARGET_COLS))
-        self.cross_speed_head = nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
+        # Cross-sectional HITS is deliberately split by the relation being
+        # modeled.  The first pair compares securities within an asset class;
+        # the second compares instruments issued by the same issuer.  All four
+        # heads still consume the shared routed representation.
+        self.cross_asset_class_graph_head = nn.Linear(HIDDEN, len(TARGET_COLS))
+        self.cross_asset_class_speed_head = nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
+        self.cross_issuer_graph_head = nn.Linear(HIDDEN, len(TARGET_COLS))
+        self.cross_issuer_speed_head = nn.Linear(HIDDEN, len(SPEED_TARGET_COLS))
         self.event_head = gnn.EventPrototypeHead(HIDDEN, len(EVENT_COLS))
         # These labels describe the symbol/year document, not each daily
         # token.  The document representation is taken from the final valid
@@ -441,13 +620,20 @@ class TransformerMTL(nn.Module):
         # task identity to trunk weights, so task grouping is learned rather
         # than assigned by hand. The router starts at equal weights.
         task_names = ["graph", "speed", "event"] + [f"aux_doc:{name}" for name in self.document_aux_heads]
-        task_names.extend(("cross_graph", "cross_speed"))
+        task_names.extend((
+            "cross_asset_class_graph", "cross_asset_class_speed",
+            "cross_issuer_graph", "cross_issuer_speed",
+        ))
         if self.cross_year_head is not None:
             task_names.append("cross_year")
         if self.asset_class_head is not None:
             task_names.append("asset_class")
         if self.macro_head is not None:
             task_names.append("macro")
+        if FAMILY_RECONSTRUCTION_ENABLED and self.family_reconstruction_heads:
+            task_names.append("family_reconstruction")
+        if self.earnings_ohlcv_head is not None:
+            task_names.append("earnings_ohlcv")
         task_names.extend(extra_task_names)
         self.task_names = task_names
         routing_dim = max(8, min(32, HIDDEN // 2))
@@ -473,13 +659,19 @@ class TransformerMTL(nn.Module):
                 torch.zeros(TRUNKS, len(self.coverage_family_names))
             )
             self.trunk_family_gates = nn.Parameter(torch.full((TRUNKS,), -2.0))
-        self.gradnorm_task_names = ["graph", "speed", "event", "aux", "cross_graph", "cross_speed"]
+        self.gradnorm_task_names = [
+            "graph", "speed", "event", "aux",
+            "cross_asset_class_graph", "cross_asset_class_speed",
+            "cross_issuer_graph", "cross_issuer_speed",
+        ]
         if self.cross_year_head is not None:
             self.gradnorm_task_names.append("cross_year")
         if self.asset_class_head is not None:
             self.gradnorm_task_names.append("asset_class")
         if self.macro_head is not None:
             self.gradnorm_task_names.append("macro")
+        if self.earnings_ohlcv_head is not None:
+            self.gradnorm_task_names.append("earnings_ohlcv")
         self.gradnorm_log_weights = nn.Parameter(torch.zeros(len(self.gradnorm_task_names)))
         self.gradnorm_initial_losses: torch.Tensor | None = None
 
@@ -531,15 +723,24 @@ class TransformerMTL(nn.Module):
         return {name: round(float(value), 4) for name, value in zip(self.gradnorm_task_names, values)}
 
     def shared_parameters(self) -> list[torch.Tensor]:
+        encoder_decoder_modules = []
+        if ISSUER_ENCODER_INSTRUMENT_DECODER:
+            encoder_decoder_modules = [
+                self.issuer_input, self.issuer_auto_features, self.instrument_input,
+                *self.issuer_encoders, *self.instrument_decoders,
+            ]
         return [
             parameter
-            for module in [self.input, *self.asset_inputs.values(), *self.encoders]
+            for module in [self.input, *self.asset_inputs.values(), *self.encoders, *encoder_decoder_modules]
             for parameter in module.parameters()
             if parameter.requires_grad
         ]
 
     def forward(self, x: torch.Tensor, padding_mask: torch.Tensor, causal: bool = True, modality: torch.Tensor | None = None,
-                family_presence: torch.Tensor | None = None):
+                family_presence: torch.Tensor | None = None,
+                earnings_boundary: torch.Tensor | None = None,
+                issuer_history: torch.Tensor | None = None,
+                issuer_history_padding: torch.Tensor | None = None):
         length = x.shape[1]
         if length > self.position.shape[0]:
             raise ValueError(f"document length {length} exceeds positional capacity {self.position.shape[0]}")
@@ -641,7 +842,66 @@ class TransformerMTL(nn.Module):
                     self._coverage_family_states * weighted_presence.unsqueeze(-1)
                 ).sum(dim=2) / weighted_presence.sum(dim=2, keepdim=True).clamp_min(1.0)
                 trunk_inputs[trunk_index] = h + torch.sigmoid(self.trunk_family_gates[trunk_index]) * family_mix
-        if not causal and self.cross_set_encoders is not None:
+        if ISSUER_ENCODER_INSTRUMENT_DECODER:
+            # True encoder-decoder path.  For temporal documents the issuer
+            # encoder receives a compressed history of observed issuer
+            # snapshots (normally quarterly reporting dates), not the same
+            # issuer columns repeated once per trading day.  The final valid
+            # encoder state is one issuer state for the whole daily document.
+            # Cross-sectional documents retain their per-token issuer path,
+            # because each token is a different issuer on the same date.
+            use_slow_state = MULTIRATE_ISSUER_STATE and causal and issuer_history is not None
+            if use_slow_state:
+                if issuer_history_padding is None:
+                    issuer_history_padding = torch.zeros(
+                        issuer_history.shape[:2], dtype=torch.bool, device=x.device
+                    )
+                issuer_history = issuer_history.to(normalized_x.dtype)
+                slow_length = issuer_history.shape[1]
+                issuer_h = self.issuer_input(
+                    self.issuer_auto_features(
+                        self.feature_norm(issuer_history)[..., list(self.issuer_feature_indices)]
+                    )
+                ) + self.position[:slow_length].unsqueeze(0)
+                issuer_memory_mask = causal_mask(slow_length, x.device)
+            else:
+                issuer_h = self.issuer_input(
+                    self.issuer_auto_features(
+                        normalized_x[..., list(self.issuer_feature_indices)]
+                    )
+                ) + self.position[:length].unsqueeze(0)
+                issuer_memory_mask = mask if causal else None
+            instrument_h = self.instrument_input(
+                normalized_x[..., list(self.instrument_feature_indices)]
+            ) + self.position[:length].unsqueeze(0)
+            decoder_mask = mask if causal else None
+            trunk_states = []
+            for issuer_encoder, instrument_decoder in zip(
+                self.issuer_encoders, self.instrument_decoders
+            ):
+                issuer_memory = issuer_encoder(
+                    issuer_h,
+                    mask=issuer_memory_mask,
+                    src_key_padding_mask=issuer_history_padding if use_slow_state else padding_mask,
+                )
+                if use_slow_state:
+                    # Every daily token in this document sees only the latest
+                    # state encoded from snapshots available at the document's
+                    # start.  This is both a single issuer embedding and a
+                    # strict as-of boundary for decoder cross-attention.
+                    history_lengths = (~issuer_history_padding).sum(dim=1).clamp_min(1) - 1
+                    history_index = torch.arange(x.shape[0], device=x.device)
+                    issuer_memory = issuer_memory[history_index, history_lengths].unsqueeze(1)
+                decoder_state = instrument_decoder(
+                    instrument_h,
+                    issuer_memory,
+                    tgt_mask=decoder_mask,
+                    memory_mask=None if use_slow_state else decoder_mask,
+                    tgt_key_padding_mask=padding_mask,
+                    memory_key_padding_mask=None if use_slow_state else padding_mask,
+                )
+                trunk_states.append(decoder_state)
+        elif not causal and self.cross_set_encoders is not None:
             trunk_states = []
             for trunk_index, encoder in enumerate(self.cross_set_encoders):
                 state = trunk_inputs[trunk_index]
@@ -696,12 +956,60 @@ class TransformerMTL(nn.Module):
             else:
                 cross_year_h = cross_year_h[batch_index, lengths]
             cross_year_logits = self.cross_year_head(cross_year_h)
+        family_reconstruction_logits = {}
+        family_presence_logits = {}
+        if self.family_reconstruction_heads:
+            family_h = self._task_state("family_reconstruction", trunk_states)
+            for family in self.family_feature_indices:
+                key = family.replace("-", "__")
+                if key not in self.family_reconstruction_heads:
+                    continue
+                family_reconstruction_logits[family] = self.family_reconstruction_heads[key](family_h)
+                family_presence_logits[family] = self.family_presence_heads[key](family_h).squeeze(-1)
+        earnings_ohlcv_hat = None
+        earnings_stop_logits = None
+        earnings_graph_hat = None
+        earnings_speed_hat = None
+        if self.earnings_ohlcv_head is not None:
+            earnings_h = self._task_state("earnings_ohlcv", trunk_states)
+            if not ISSUER_ENCODER_INSTRUMENT_DECODER:
+                # Legacy conditional-head path retained for reproducibility;
+                # the encoder-decoder experiment uses the actual instrument
+                # decoder state directly below.
+                if earnings_boundary is None:
+                    earnings_boundary = torch.zeros(
+                        x.shape[:2], dtype=torch.bool, device=x.device
+                    )
+                earnings_boundary = earnings_boundary.to(torch.bool) & (~padding_mask)
+                positions = torch.arange(x.shape[1], device=x.device).view(1, -1)
+                release_positions = torch.where(
+                    earnings_boundary, positions.expand_as(earnings_boundary), positions.new_full(positions.shape, -1)
+                )
+                latest_positions = torch.cummax(release_positions, dim=1).values.clamp_min(0)
+                batch_index = torch.arange(x.shape[0], device=x.device).view(-1, 1)
+                latest_release = earnings_h[batch_index, latest_positions]
+                has_release = torch.cummax(
+                    earnings_boundary.to(torch.int64), dim=1
+                ).values.bool().unsqueeze(-1)
+                decoder_input = torch.cat([earnings_h, latest_release], dim=-1)
+                earnings_h = self.earnings_decoder(decoder_input)
+                earnings_h = torch.where(has_release, earnings_h, self._task_state("graph", trunk_states))
+            earnings_ohlcv_hat = self.earnings_ohlcv_head(earnings_h)
+            earnings_stop_logits = self.earnings_stop_head(earnings_h).squeeze(-1)
+            earnings_graph_hat = self.earnings_graph_head(earnings_h)
+            earnings_speed_hat = self.earnings_speed_head(earnings_h)
         return (
             self.graph_head(graph_h), self.speed_head(speed_h), self.event_head(event_h),
             {}, {name: head(document_aux_h[name]) for name, head in self.document_aux_heads.items()},
             macro_logits, asset_class_logits,
-            self.cross_graph_head(self._task_state("cross_graph", trunk_states)),
-            self.cross_speed_head(self._task_state("cross_speed", trunk_states)), cross_year_logits,
+            self.cross_asset_class_graph_head(self._task_state("cross_asset_class_graph", trunk_states)),
+            self.cross_asset_class_speed_head(self._task_state("cross_asset_class_speed", trunk_states)),
+            cross_year_logits,
+            family_reconstruction_logits, family_presence_logits,
+            earnings_ohlcv_hat, earnings_stop_logits, earnings_graph_hat,
+            earnings_speed_hat,
+            self.cross_issuer_graph_head(self._task_state("cross_issuer_graph", trunk_states)),
+            self.cross_issuer_speed_head(self._task_state("cross_issuer_speed", trunk_states)),
         )
 
 
@@ -946,94 +1254,309 @@ def _make_docs(
 ) -> list[dict[str, np.ndarray]]:
     year = base.date.dt.year
     selected = base.loc[year < test_year if train else year == test_year].copy()
+    # A temporal document is one reporting interval.  The daily instrument
+    # stream is therefore conditioned on one issuer state, while the issuer
+    # encoder receives the historical sequence of snapshots available as of
+    # that interval.  Test documents may use historical snapshots through the
+    # start of the test interval, but never a future reporting date.
+    history_scope = base.loc[year < test_year if train else year <= test_year].copy()
     docs: list[dict[str, np.ndarray]] = []
-    selected["_year"] = selected.date.dt.year
-    for (symbol, _), frame in selected.groupby(["symbol", "_year"], sort=True):
-        frame = frame.sort_values("date")
-        values = np.stack(frame["__x__"].to_numpy()).astype(np.float32, copy=False)
-        if feature_mask is not None:
-            values = values * feature_mask
-        docs.append({
-            "symbol": np.array([symbol] * len(frame)),
-            "date": frame.date.to_numpy(),
-            "x": values,
-            "family_presence": np.stack(frame["__family_presence__"].to_numpy()).astype(np.float32),
-            "graph": frame[TARGET_COLS].to_numpy(np.float32),
-            "speed": frame[SPEED_TARGET_COLS].to_numpy(np.float32),
-            "events": frame[EVENT_COLS].to_numpy(np.float32),
-            "macro_events": frame[MACRO_EVENT_COLS].to_numpy(np.float32) if MACRO_EVENT_COLS else np.zeros((len(frame), 0), dtype=np.float32),
-            "aux": frame[AUX_COLS].to_numpy(np.int64),
-            "graph_mask": np.stack(frame["__graph_mask__"].to_numpy()),
-            "kind": "symbol_year",
-            "task_mask": np.ones(5, dtype=np.float32),
-        })
+    for symbol, symbol_rows in selected.groupby("symbol", sort=True):
+        symbol_rows = symbol_rows.sort_values("date").copy()
+        symbol_history = history_scope.loc[history_scope.symbol == symbol].sort_values("date").copy()
+        boundary = (
+            symbol_rows[EARNINGS_BOUNDARY_COL].fillna(0).to_numpy(bool)
+            if EARNINGS_BOUNDARY_COL in symbol_rows
+            else np.zeros(len(symbol_rows), dtype=bool)
+        )
+        starts = [0]
+        if MULTIRATE_ISSUER_STATE and ISSUER_ENCODER_INSTRUMENT_DECODER:
+            observed_boundaries = [
+                int(position) for position in np.flatnonzero(boundary) if int(position) > 0
+            ]
+            # Prefer real reporting dates, but cap an interval when calendar
+            # coverage is incomplete.  This prevents a missing vendor event
+            # from turning one issuer document into decades of daily tokens.
+            for boundary_position in observed_boundaries:
+                while boundary_position - starts[-1] > ISSUER_INTERVAL_MAX_TOKENS:
+                    starts.append(starts[-1] + ISSUER_INTERVAL_MAX_TOKENS)
+                starts.append(boundary_position)
+            while len(symbol_rows) - starts[-1] > ISSUER_INTERVAL_MAX_TOKENS:
+                starts.append(starts[-1] + ISSUER_INTERVAL_MAX_TOKENS)
+        starts = sorted(set(starts))
+        ends = [*starts[1:], len(symbol_rows)]
+        for start, end in zip(starts, ends):
+            frame = symbol_rows.iloc[start:end].copy()
+            if frame.empty:
+                continue
+            values = np.stack(frame["__x__"].to_numpy()).astype(np.float32, copy=False)
+            if feature_mask is not None:
+                values = values * feature_mask
+            interval_start = pd.Timestamp(frame.date.iloc[0])
+            history = symbol_history.loc[symbol_history.date <= interval_start].copy()
+            if EARNINGS_BOUNDARY_COL in history:
+                snapshots = history.loc[history[EARNINGS_BOUNDARY_COL].fillna(0).astype(bool)]
+            else:
+                snapshots = history.iloc[0:0]
+            # Before the first observed report, use the earliest available
+            # issuer row as the initial state.  This avoids inventing a lag or
+            # dropping the early history from training.
+            if snapshots.empty:
+                snapshots = history.tail(1)
+            issuer_history = (
+                np.stack(snapshots["__x__"].to_numpy()).astype(np.float32, copy=False)
+                if not snapshots.empty
+                else values[:1].copy()
+            )
+            if feature_mask is not None:
+                issuer_history = issuer_history * feature_mask
+            docs.append({
+                "symbol": np.array([symbol] * len(frame)),
+                "date": frame.date.to_numpy(),
+                "x": values,
+                "issuer_history": issuer_history,
+                "family_presence": np.stack(frame["__family_presence__"].to_numpy()).astype(np.float32),
+                "graph": frame[TARGET_COLS].to_numpy(np.float32),
+                "speed": frame[SPEED_TARGET_COLS].to_numpy(np.float32),
+                "events": frame[EVENT_COLS].to_numpy(np.float32),
+                "earnings_boundary": (
+                    frame[EARNINGS_BOUNDARY_COL].to_numpy(np.float32) > 0
+                    if EARNINGS_BOUNDARY_COL in frame else np.zeros(len(frame), dtype=bool)
+                ),
+                "macro_events": frame[MACRO_EVENT_COLS].to_numpy(np.float32) if MACRO_EVENT_COLS else np.zeros((len(frame), 0), dtype=np.float32),
+                "aux": frame[AUX_COLS].to_numpy(np.int64),
+                "graph_mask": np.stack(frame["__graph_mask__"].to_numpy()),
+                "kind": "symbol_year",
+                "task_mask": np.ones(5, dtype=np.float32),
+            })
     return docs
 
 
-def _make_cross_sectional_docs(base: pd.DataFrame, test_year: int, train: bool) -> list[dict[str, np.ndarray]]:
-    """Build one document per date containing all symbols in the universe.
+def _cross_rank_frame(frame: pd.DataFrame, field: str) -> np.ndarray:
+    """Rank temporal HITS labels within one same-date relation group."""
+    values = np.stack(frame[field].to_numpy())
+    return pd.DataFrame(values).apply(pd.to_numeric, errors="coerce").rank(
+        method="average", pct=True
+    ).fillna(0.5).to_numpy(np.float32)
 
-    These documents use bidirectional same-date attention.  Their token-level
-    graph and speed targets are reused from the per-symbol temporal labels;
-    no cross-sectional graph is constructed.  Macro and year remain pooled
-    document-level tasks.
+
+def _make_cross_sectional_docs(
+    base: pd.DataFrame,
+    test_year: int,
+    train: bool,
+    related_panel: pd.DataFrame | None = None,
+    feature_cols: list[str] | None = None,
+) -> list[dict[str, np.ndarray]]:
+    """Build same-asset-class and same-issuer HITS documents.
+
+    These are rank labels derived from each instrument's temporal HITS graph;
+    this function never constructs a graph across symbols.  Equity rows form
+    the primary corpus.  Related assets are added by union, not an inner join,
+    so sparse vendor coverage remains sparse.
     """
     year = base.date.dt.year
     selected = base.loc[year < test_year if train else year == test_year].copy()
-    docs: list[dict[str, np.ndarray]] = []
-    for date, frame in selected.groupby("date", sort=True):
-        frame = frame.sort_values("symbol")
-        # Cross-sectional targets are ranks among symbols on this date.  They
-        # reuse the per-symbol temporal HITS labels; no cross-sectional graph
-        # or pairwise edge construction is performed.
-        cross_graph = frame[TARGET_COLS].apply(
-            pd.to_numeric, errors="coerce"
-        ).rank(method="average", pct=True).fillna(0.5).to_numpy(np.float32)
-        cross_speed = frame[SPEED_TARGET_COLS].apply(
-            pd.to_numeric, errors="coerce"
-        ).rank(method="average", pct=True).fillna(0.5).to_numpy(np.float32)
-        cross_aux = np.full((len(frame), len(AUX_COLS)), -1, dtype=np.int64)
-        cross_year = int(frame["year_target"].iloc[0]) if "year_target" in frame else -1
-        docs.append({
-            "symbol": frame.symbol.to_numpy(),
-            "date": frame.date.to_numpy(),
-            "x": np.stack(frame["__x__"].to_numpy()),
-            "family_presence": np.stack(frame["__family_presence__"].to_numpy()).astype(np.float32),
-            # Reuse labels generated by the temporal per-symbol graph when
-            # enabled.  No graph is ever constructed over the universe on a
-            # cross-sectional date.
-            "graph": frame[TARGET_COLS].to_numpy(np.float32),
-            "speed": frame[SPEED_TARGET_COLS].to_numpy(np.float32),
-            "cross_graph": cross_graph,
-            "cross_speed": cross_speed,
-            "events": np.zeros((len(frame), len(EVENT_COLS)), dtype=np.float32),
-            "macro_events": frame[MACRO_EVENT_COLS].iloc[0].to_numpy(np.float32),
-            "cross_year": cross_year,
-            "aux": cross_aux,
-            "graph_mask": np.stack(frame["__graph_mask__"].to_numpy()) if CROSS_SECTIONAL_TOKEN_TASKS else np.zeros((len(frame), len(TARGET_COLS)), dtype=np.float32),
-            "kind": "cross_sectional",
-            "task_mask": np.array([0.0, 0.0, 0.0, 1.0, 1.0], dtype=np.float32),
-            "cross_task_mask": np.array([float(CROSS_SECTIONAL_TOKEN_TASKS), float(CROSS_SECTIONAL_TOKEN_TASKS)], dtype=np.float32),
+    records: list[dict[str, object]] = []
+    family_names: list[str] = []
+    for column in feature_cols or []:
+        family = str(column).split("__", 1)[0]
+        if family not in family_names:
+            family_names.append(family)
+
+    for _, row in selected.iterrows():
+        base_family_presence = np.asarray(row["__family_presence__"], dtype=np.float32)
+        if family_names and len(base_family_presence) != len(family_names):
+            padded = np.zeros(len(family_names), dtype=np.float32)
+            padded[:min(len(padded), len(base_family_presence))] = base_family_presence[:len(padded)]
+            base_family_presence = padded
+        records.append({
+            "symbol": str(row["symbol"]),
+            "date": pd.Timestamp(row["date"]),
+            "issuer": str(row["symbol"]).upper(),
+            "asset_class": str(row.get("asset_class", "equity")).lower(),
+            "instrument_symbol": str(row["symbol"]).upper(),
+            "x": np.asarray(row["__x__"], dtype=np.float32),
+            "family_presence": base_family_presence,
+            "graph": np.asarray(row[TARGET_COLS], dtype=np.float32),
+            "speed": np.asarray(row[SPEED_TARGET_COLS], dtype=np.float32),
+            "macro_events": np.asarray(row[MACRO_EVENT_COLS], dtype=np.float32) if MACRO_EVENT_COLS else np.zeros(0, dtype=np.float32),
+            "aux": np.full(len(AUX_COLS), -1, dtype=np.int64),
+            "cross_year": int(row["year_target"]) if "year_target" in row and pd.notna(row["year_target"]) else -1,
+            "graph_mask": np.asarray(row["__graph_mask__"], dtype=np.float32),
+            "tradeable": True,
         })
+
+    # Add related instruments in the same feature coordinate system.  Labels
+    # are looked up by issuer/date; no row is dropped when that lookup misses.
+    if related_panel is not None and not related_panel.empty and feature_cols:
+        related = related_panel.copy()
+        related["date"] = pd.to_datetime(related["date"], errors="coerce").dt.normalize()
+        related["symbol"] = related["symbol"].astype(str).str.upper()
+        related = related.loc[related.date.dt.year < test_year if train else related.date.dt.year == test_year]
+        label_map = base.set_index(["symbol", "date"])
+        positions = {column: index for index, column in enumerate(feature_cols)}
+        for _, row in related.iterrows():
+            asset_class = str(row.get("asset_class", "unknown")).lower()
+            class_columns = [
+                column for column in feature_cols
+                if str(column).startswith(f"{asset_class}__") and column in related.columns
+            ]
+            if not class_columns:
+                continue
+            values = np.zeros(len(feature_cols), dtype=np.float32)
+            for column in class_columns:
+                value = pd.to_numeric(row.get(column), errors="coerce")
+                if pd.notna(value):
+                    values[positions[column]] = float(value)
+            if not np.any(np.abs(values) > 1e-12):
+                continue
+            issuer = str(row["symbol"]).upper()
+            date = pd.Timestamp(row["date"])
+            source = label_map.loc[(issuer, date)] if (issuer, date) in label_map.index else None
+            if isinstance(source, pd.DataFrame):
+                source = source.iloc[0]
+            graph = np.asarray(source[TARGET_COLS] if source is not None else np.zeros(len(TARGET_COLS)), dtype=np.float32)
+            speed = np.asarray(source[SPEED_TARGET_COLS] if source is not None else np.zeros(len(SPEED_TARGET_COLS)), dtype=np.float32)
+            family_presence = np.zeros(len(family_names), dtype=np.float32)
+            for index, family in enumerate(family_names):
+                family_presence[index] = float(any(
+                    str(column).startswith(f"{family}__") and pd.notna(row.get(column))
+                    for column in class_columns
+                ))
+            records.append({
+                "symbol": issuer, "date": date, "issuer": issuer,
+                "asset_class": asset_class,
+                "instrument_symbol": str(row.get("instrument_symbol", "")).upper(),
+                "x": values, "family_presence": family_presence,
+                "graph": graph, "speed": speed,
+                "macro_events": np.zeros(len(MACRO_EVENT_COLS), dtype=np.float32),
+                "aux": np.full(len(AUX_COLS), -1, dtype=np.int64), "cross_year": -1,
+                "graph_mask": np.ones(len(TARGET_COLS), dtype=np.float32), "tradeable": False,
+            })
+
+    if not records:
+        return []
+    rows = pd.DataFrame(records)
+    docs: list[dict[str, np.ndarray]] = []
+
+    def emit(frame: pd.DataFrame, relation: str) -> None:
+        if frame.empty:
+            return
+        frame = frame.sort_values(["asset_class", "symbol", "instrument_symbol"])
+        graph_rank = _cross_rank_frame(frame, "graph")
+        speed_rank = _cross_rank_frame(frame, "speed")
+        n = len(frame)
+        zero_graph = np.zeros((n, len(TARGET_COLS)), dtype=np.float32)
+        zero_speed = np.zeros((n, len(SPEED_TARGET_COLS)), dtype=np.float32)
+        docs.append({
+            "symbol": frame["symbol"].to_numpy(), "date": frame["date"].to_numpy(),
+            "x": np.stack(frame["x"].to_numpy()).astype(np.float32),
+            "family_presence": np.stack(frame["family_presence"].to_numpy()).astype(np.float32),
+            "graph": np.stack(frame["graph"].to_numpy()).astype(np.float32),
+            "speed": np.stack(frame["speed"].to_numpy()).astype(np.float32),
+            "cross_asset_class_graph": graph_rank if relation == "asset_class" else zero_graph,
+            "cross_asset_class_speed": speed_rank if relation == "asset_class" else zero_speed,
+            "cross_issuer_graph": graph_rank if relation == "issuer" else zero_graph,
+            "cross_issuer_speed": speed_rank if relation == "issuer" else zero_speed,
+            "events": np.zeros((n, len(EVENT_COLS)), dtype=np.float32),
+            "earnings_boundary": np.zeros(n, dtype=bool),
+            "macro_events": np.stack(frame["macro_events"].to_numpy()).astype(np.float32),
+            "cross_year": int(frame["cross_year"].iloc[0]) if relation == "asset_class" and frame["cross_year"].iloc[0] >= 0 else -1,
+            "aux": np.stack(frame["aux"].to_numpy()).astype(np.int64),
+            "graph_mask": np.stack(frame["graph_mask"].to_numpy()).astype(np.float32) if CROSS_SECTIONAL_TOKEN_TASKS else np.zeros((n, len(TARGET_COLS)), dtype=np.float32),
+            "kind": "cross_sectional",
+            "task_mask": np.array([0.0, 0.0, 0.0, 0.0, float(relation == "asset_class" and bool(MACRO_EVENT_COLS))], dtype=np.float32),
+            "cross_task_mask": np.array([
+                float(relation == "asset_class" and CROSS_SECTIONAL_TOKEN_TASKS),
+                float(relation == "asset_class" and CROSS_SECTIONAL_TOKEN_TASKS),
+                float(relation == "issuer" and CROSS_SECTIONAL_TOKEN_TASKS),
+                float(relation == "issuer" and CROSS_SECTIONAL_TOKEN_TASKS),
+            ], dtype=np.float32),
+            "tradeable": frame["tradeable"].to_numpy(bool), "relation": relation,
+        })
+
+    for (_, asset_class), frame in rows.groupby(["date", "asset_class"], sort=True):
+        emit(frame, "asset_class")
+    for (_, issuer), frame in rows.groupby(["date", "issuer"], sort=True):
+        if len(frame) >= 2:
+            emit(frame, "issuer")
     return docs
+
+
+def _infer_instrument_feature_indices(
+    base: pd.DataFrame,
+    feature_cols: list[str],
+    test_year: int,
+    raw_indices: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Route high-cadence features to the daily instrument stream.
+
+    The routing is learned from observed update cadence in the training fold,
+    rather than from a hand-maintained endpoint list.  A feature that changes
+    more than the configured annual rate is treated as fast; slow features
+    remain eligible for the cached issuer state.  Missing observations do not
+    count as updates, which is important for heterogeneous vendor coverage.
+    """
+    if not feature_cols:
+        return tuple(raw_indices)
+    train = base.loc[base.date.dt.year < test_year, ["symbol", "date", *feature_cols]].copy()
+    if train.empty:
+        return tuple(raw_indices)
+    train = train.sort_values(["symbol", "date"])
+    years = max(
+        1.0,
+        (pd.Timestamp(train.date.max()) - pd.Timestamp(train.date.min())).days / 365.25,
+    )
+    fast = set(raw_indices)
+    # Raw price/volume always belongs to the daily decoder.  For other
+    # families, estimate the average number of observed value changes per
+    # symbol-year.  This catches daily valuation/multiple families without
+    # requiring a new manual rule each time a feature family is added.
+    for index, column in enumerate(feature_cols):
+        if index in fast:
+            continue
+        values = pd.to_numeric(train[column], errors="coerce")
+        previous = values.groupby(train["symbol"], sort=False).shift(1)
+        valid = values.notna() & previous.notna()
+        if not valid.any():
+            continue
+        changed = valid & ~np.isclose(
+            values.to_numpy(np.float64, na_value=np.nan),
+            previous.to_numpy(np.float64, na_value=np.nan),
+            rtol=1e-6,
+            atol=1e-8,
+            equal_nan=True,
+        )
+        update_rate = float(changed.sum()) / years / max(1, train["symbol"].nunique())
+        if update_rate > INSTRUMENT_UPDATE_RATE_PER_YEAR:
+            fast.add(index)
+    return tuple(sorted(fast))
 
 
 def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     length = max(len(item["x"]) for item in docs)
     dim = docs[0]["x"].shape[1]
+    history_length = max(len(item.get("issuer_history", item["x"][:1])) for item in docs)
     x = np.zeros((len(docs), length, dim), dtype=np.float32)
+    issuer_history = np.zeros((len(docs), history_length, dim), dtype=np.float32)
+    issuer_history_padding = np.ones((len(docs), history_length), dtype=bool)
     padding = np.ones((len(docs), length), dtype=bool)
     graph = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
     speed = np.zeros((len(docs), length, len(SPEED_TARGET_COLS)), dtype=np.float32)
-    cross_graph = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
-    cross_speed = np.zeros((len(docs), length, len(SPEED_TARGET_COLS)), dtype=np.float32)
+    cross_asset_class_graph = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
+    cross_asset_class_speed = np.zeros((len(docs), length, len(SPEED_TARGET_COLS)), dtype=np.float32)
+    cross_issuer_graph = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
+    cross_issuer_speed = np.zeros((len(docs), length, len(SPEED_TARGET_COLS)), dtype=np.float32)
     events = np.zeros((len(docs), length, len(EVENT_COLS)), dtype=np.float32)
+    earnings_boundary = np.zeros((len(docs), length), dtype=bool)
     macro_events = np.zeros((len(docs), length, len(MACRO_EVENT_COLS)), dtype=np.float32)
     macro_document_events = np.zeros((len(docs), len(MACRO_EVENT_COLS)), dtype=np.float32)
     aux = np.full((len(docs), length, len(AUX_COLS)), -1, dtype=np.int64)
     graph_mask = np.zeros((len(docs), length, len(TARGET_COLS)), dtype=np.float32)
     task_mask = np.zeros((len(docs), 5), dtype=np.float32)
-    cross_task_mask = np.zeros((len(docs), 2), dtype=np.float32)
+    # [same-asset-class graph, same-asset-class speed,
+    #  same-issuer graph, same-issuer speed]
+    cross_task_mask = np.zeros((len(docs), 4), dtype=np.float32)
     cross_year = np.full(len(docs), -1, dtype=np.int64)
     modality = np.zeros(len(docs), dtype=np.int64)
     family_count = len(docs[0].get("family_presence", np.zeros(0, dtype=np.float32)[None, :])[0])
@@ -1041,6 +1564,10 @@ def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tenso
     for i, item in enumerate(docs):
         n = len(item["x"])
         x[i, :n] = item["x"]
+        history = np.asarray(item.get("issuer_history", item["x"][:1]), dtype=np.float32)
+        history_count = min(len(history), history_length)
+        issuer_history[i, :history_count] = history[:history_count]
+        issuer_history_padding[i, :history_count] = False
         if family_count:
             if "family_presence" in item:
                 family_presence[i, :n] = item["family_presence"]
@@ -1052,11 +1579,17 @@ def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tenso
         padding[i, :n] = False
         graph[i, :n] = item["graph"]
         speed[i, :n] = item["speed"]
-        if "cross_graph" in item:
-            cross_graph[i, :n] = item["cross_graph"]
-        if "cross_speed" in item:
-            cross_speed[i, :n] = item["cross_speed"]
+        if "cross_asset_class_graph" in item:
+            cross_asset_class_graph[i, :n] = item["cross_asset_class_graph"]
+        if "cross_asset_class_speed" in item:
+            cross_asset_class_speed[i, :n] = item["cross_asset_class_speed"]
+        if "cross_issuer_graph" in item:
+            cross_issuer_graph[i, :n] = item["cross_issuer_graph"]
+        if "cross_issuer_speed" in item:
+            cross_issuer_speed[i, :n] = item["cross_issuer_speed"]
         events[i, :n] = item["events"]
+        if "earnings_boundary" in item:
+            earnings_boundary[i, :n] = item["earnings_boundary"]
         if MACRO_EVENT_COLS:
             if item["kind"] == "cross_sectional":
                 macro_document_events[i] = item["macro_events"]
@@ -1065,16 +1598,85 @@ def _batch(docs: list[dict[str, np.ndarray]]) -> tuple[torch.Tensor, torch.Tenso
         aux[i, :n] = item["aux"]
         graph_mask[i, :n] = item["graph_mask"]
         task_mask[i] = item["task_mask"]
-        cross_task_mask[i] = item.get("cross_task_mask", np.zeros(2, dtype=np.float32))
+        cross_task_mask[i] = item.get("cross_task_mask", np.zeros(4, dtype=np.float32))
         cross_year[i] = int(item.get("cross_year", -1))
         modality[i] = int(item.get("modality", 0))
     return (
         torch.from_numpy(x), torch.from_numpy(padding),
-        {"graph": torch.from_numpy(graph), "speed": torch.from_numpy(speed), "cross_graph": torch.from_numpy(cross_graph), "cross_speed": torch.from_numpy(cross_speed), "events": torch.from_numpy(events),
+        {"graph": torch.from_numpy(graph), "speed": torch.from_numpy(speed),
+         "cross_asset_class_graph": torch.from_numpy(cross_asset_class_graph),
+         "cross_asset_class_speed": torch.from_numpy(cross_asset_class_speed),
+         "cross_issuer_graph": torch.from_numpy(cross_issuer_graph),
+         "cross_issuer_speed": torch.from_numpy(cross_issuer_speed), "events": torch.from_numpy(events),
          "macro_events": torch.from_numpy(macro_events), "macro_document_events": torch.from_numpy(macro_document_events), "aux": torch.from_numpy(aux),
+         "earnings_boundary": torch.from_numpy(earnings_boundary),
+         "issuer_history": torch.from_numpy(issuer_history),
+         "issuer_history_padding": torch.from_numpy(issuer_history_padding),
          "family_presence": torch.from_numpy(family_presence),
          "graph_mask": torch.from_numpy(graph_mask), "task_mask": torch.from_numpy(task_mask), "cross_task_mask": torch.from_numpy(cross_task_mask), "cross_year": torch.from_numpy(cross_year), "modality": torch.from_numpy(modality)},
     )
+
+
+def _predict_cross_heads(
+    model: TransformerMTL,
+    cross_docs: list[dict[str, np.ndarray]],
+) -> dict[str, pd.DataFrame]:
+    """Score the two relation-specific cross-sectional HITS heads.
+
+    Related-asset tokens participate in the same-date attention during
+    inference, but only tradeable equity rows are returned for the equity
+    backtest.  This lets the same-issuer head use issuer peers without
+    accidentally treating preferreds, warrants, or notes as equity trades.
+    """
+    buckets: dict[str, list[pd.DataFrame]] = {
+        "cross_asset_class": [], "cross_asset_class_speed": [],
+        "cross_issuer": [], "cross_issuer_speed": [],
+    }
+    if not cross_docs:
+        return {}
+    with torch.no_grad():
+        for start in range(0, len(cross_docs), BATCH_SIZE):
+            batch_docs = cross_docs[start:start + BATCH_SIZE]
+            x, padding, target = _batch(batch_docs)
+            outputs = model(
+                x.to(DEVICE), padding.to(DEVICE), causal=False,
+                modality=target["modality"].to(DEVICE),
+                family_presence=target["family_presence"].to(DEVICE),
+                issuer_history=target["issuer_history"].to(DEVICE),
+                issuer_history_padding=target["issuer_history_padding"].to(DEVICE),
+            )
+            for row, doc in enumerate(batch_docs):
+                n = len(doc["x"])
+                tradeable = np.asarray(doc.get("tradeable", np.ones(n, dtype=bool)), dtype=bool)
+                relation = str(doc.get("relation", "asset_class"))
+                if relation == "issuer":
+                    graph_values, speed_values = outputs[16], outputs[17]
+                    graph_name, speed_name = "cross_issuer", "cross_issuer_speed"
+                else:
+                    graph_values, speed_values = outputs[7], outputs[8]
+                    graph_name, speed_name = "cross_asset_class", "cross_asset_class_speed"
+                frame = pd.DataFrame({"symbol": doc["symbol"][:n], "date": doc["date"][:n]})
+                frame = frame.loc[tradeable].copy()
+                if frame.empty:
+                    continue
+                # Cross-sectional inference runs on ``DEVICE`` (normally
+                # CUDA).  Convert only the selected tradeable rows before
+                # handing them to pandas; assigning a CUDA tensor directly
+                # fails when the anchored WFO reaches prediction.
+                frame[TARGET_COLS] = graph_values[row, :n][tradeable].detach().cpu().numpy()
+                frame[SPEED_TARGET_COLS] = speed_values[row, :n][tradeable].detach().cpu().numpy()
+                buckets[graph_name].append(frame[["symbol", "date", *TARGET_COLS]])
+                buckets[speed_name].append(frame[["symbol", "date", *SPEED_TARGET_COLS]])
+    predictions: dict[str, pd.DataFrame] = {}
+    for name, frames in buckets.items():
+        if not frames:
+            continue
+        result = pd.concat(frames, ignore_index=True)
+        columns = TARGET_COLS if not name.endswith("_speed") else SPEED_TARGET_COLS
+        for column in columns:
+            result[column] = result.groupby("date")[column].rank(pct=True, method="average")
+        predictions[name] = result
+    return predictions
 
 
 def _batch_same_issuer_pairs(pairs: list[dict[str, object]]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
@@ -1245,6 +1847,40 @@ def _load_macro_event_panel(dates: pd.Series) -> tuple[pd.DataFrame, list[str]]:
     return panel, [column for column in panel.columns if str(column).startswith("is_")]
 
 
+def _load_earnings_boundary_panel(symbols: list[str], tier: str) -> pd.DataFrame:
+    """Load actual historical earnings release dates from quant-warehouse.
+
+    The general event-label cache may contain an earnings target column even
+    when the cached event rows were not backfilled.  Episode boundaries must
+    come from the populated equity calendar, keyed by the actual report date,
+    and must never be inferred from fiscal period dates.
+    """
+    cache = OUT / "cache" / f"transformer_earnings_boundaries_{tier.lower()}_{gnn.DATA_END:%Y%m%d}.parquet"
+    if cache.exists():
+        panel = pd.read_parquet(cache)
+    else:
+        calendar = EquityCalendarStore().read(
+            "equity_calendar_earnings",
+            provider="fmp",
+            start=str(gnn.DATA_START.date()),
+            end=str(gnn.DATA_END.date()),
+        )
+        if calendar.empty:
+            raise RuntimeError("Earnings-conditioned training was enabled, but quant-warehouse returned no earnings calendar rows")
+        panel = calendar.reset_index()
+        date_column = "report_date" if "report_date" in panel.columns else panel.columns[0]
+        panel = panel.rename(columns={date_column: "date"})
+        panel = panel[["symbol", "date"]].copy()
+        panel["symbol"] = panel["symbol"].astype(str).str.upper()
+        panel["date"] = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
+        panel = panel.dropna(subset=["date"]).drop_duplicates(["symbol", "date"])
+        panel = panel.loc[panel.symbol.isin(set(symbols))].copy()
+        panel["earnings_boundary"] = 1.0
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        panel.to_parquet(cache, index=False)
+    return panel
+
+
 def _load_preferred_feature_panel(base_symbols: list[str]) -> tuple[pd.DataFrame, list[str]]:
     """Load the precomputed raw preferred-security feature family."""
     if not PREFERRED_ENABLED:
@@ -1371,6 +2007,17 @@ def _prepare_data(tier: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str], pd.
     symbols = sorted(fused.symbol.unique())
     prices, labels = gnn.build_price_and_labels(symbols, tier)
     base = fused.merge(labels, on=["symbol", "date"], how="inner")
+    if EARNINGS_OHLCV_ENABLED:
+        earnings = _load_earnings_boundary_panel(symbols, tier)
+        base = base.drop(columns=["earnings_boundary"], errors="ignore").merge(
+            earnings[["symbol", "date", "earnings_boundary"]],
+            on=["symbol", "date"], how="left", validate="many_to_one",
+        )
+        base["earnings_boundary"] = base["earnings_boundary"].fillna(0.0).astype("float32")
+        if not base["earnings_boundary"].gt(0).any():
+            raise RuntimeError(f"No earnings report dates overlap tier {tier}; refusing to run an empty earnings task")
+    else:
+        base["earnings_boundary"] = 0.0
     # Keep only the adjusted raw price observations after disabling all
     # precomputed technical families.  Causal attention can derive returns,
     # trends, volatility, and reversal behavior from these historical tokens.
@@ -1391,6 +2038,11 @@ def _prepare_data(tier: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str], pd.
         raise RuntimeError("Preferred features were enabled but no preferred rows overlap the requested tier")
     related_panel, related_cols = _load_related_asset_feature_panel(symbols)
     if not related_panel.empty and RELATED_ASSETS_AS_ROWS:
+        related_panel = _add_related_instrument_graph_labels(related_panel)
+    elif not related_panel.empty and CROSS_SECTIONAL_ENABLED:
+        # Cross-sectional same-issuer/same-asset-class HITS targets need each
+        # related instrument's own temporal labels, but they remain a separate
+        # document corpus and never alter the equity feature rows.
         related_panel = _add_related_instrument_graph_labels(related_panel)
     if not related_panel.empty:
         if RELATED_ASSETS_AS_ROWS:
@@ -1627,6 +2279,7 @@ def _make_etf_docs(panel: pd.DataFrame, feature_cols: list[str], test_year: int,
                 "symbol": np.array([symbol] * len(chunk)), "date": chunk.date.to_numpy(), "x": values,
                 "graph": chunk[TARGET_COLS].to_numpy(np.float32), "speed": chunk[SPEED_TARGET_COLS].to_numpy(np.float32),
                 "events": np.zeros((len(chunk), len(EVENT_COLS)), dtype=np.float32),
+                "earnings_boundary": np.zeros(len(chunk), dtype=bool),
                 "macro_events": np.zeros((len(chunk), len(MACRO_EVENT_COLS)), dtype=np.float32),
                 "aux": np.full((len(chunk), len(AUX_COLS)), -1, dtype=np.int64), "graph_mask": graph_mask,
                 "kind": "symbol_year", "task_mask": np.array([1.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32),
@@ -1756,10 +2409,30 @@ def _train_epoch(
             selected = [docs[int(i)] for i in order[offset:offset + BATCH_SIZE]]
             x, padding, target = _batch(selected)
             x = x.to(DEVICE); padding = padding.to(DEVICE)
-            clean_x = x
+            target = {name: value.to(DEVICE) for name, value in target.items()}
+            clean_x = x.clone()
             masked_features = None
             masked_token_positions = None
             next_token_positions = None
+            family_mask = torch.zeros_like(target["family_presence"], dtype=torch.bool)
+            input_family_presence = target["family_presence"]
+            if FAMILY_RECONSTRUCTION_ENABLED and model.family_reconstruction_heads:
+                for family_index, family in enumerate(model.family_feature_indices):
+                    if family_index >= input_family_presence.shape[-1]:
+                        break
+                    observed = input_family_presence[..., family_index].gt(0)
+                    selected_family = (
+                        observed
+                        & (~padding)
+                        & torch.rand_like(observed, dtype=torch.float32).lt(FAMILY_RECONSTRUCTION_RATE)
+                    )
+                    family_mask[..., family_index] = selected_family
+                    if selected_family.any():
+                        indices = list(model.family_feature_indices[family])
+                        x[..., indices] = x[..., indices].masked_fill(
+                            selected_family.unsqueeze(-1), 0.0
+                        )
+                input_family_presence = input_family_presence.masked_fill(family_mask, 0.0)
             if use_self_supervised and model.masked_feature_head is not None:
                 # Mask whole families rather than arbitrary scalar columns.
                 # Temporal documents remain causal; cross-sectional documents
@@ -1785,11 +2458,13 @@ def _train_epoch(
                 token_valid = (~padding) & clean_x.abs().sum(dim=-1).gt(1e-8)
                 next_token_positions = torch.zeros_like(token_valid)
                 next_token_positions[:, :-1] = token_valid[:, :-1] & token_valid[:, 1:]
-            target = {name: value.to(DEVICE) for name, value in target.items()}
             optimizer.zero_grad()
-            graph_hat, speed_hat, event_logits, aux_logits, document_aux_logits, macro_logits, asset_class_logits, cross_graph_hat, cross_speed_hat, cross_year_logits = model(
+            graph_hat, speed_hat, event_logits, aux_logits, document_aux_logits, macro_logits, asset_class_logits, cross_asset_class_graph_hat, cross_asset_class_speed_hat, cross_year_logits, family_reconstruction_logits, family_presence_logits, earnings_ohlcv_hat, earnings_stop_logits, earnings_graph_hat, earnings_speed_hat, cross_issuer_graph_hat, cross_issuer_speed_hat = model(
                 x, padding, causal=kind == "symbol_year", modality=target["modality"],
-                family_presence=target["family_presence"],
+                family_presence=input_family_presence,
+                earnings_boundary=target["earnings_boundary"],
+                issuer_history=target["issuer_history"],
+                issuer_history_padding=target["issuer_history_padding"],
             )
             valid = ~padding
             task_valid = target["task_mask"]
@@ -1800,12 +2475,18 @@ def _train_epoch(
             speed_error = nn.functional.smooth_l1_loss(speed_hat, target["speed"], reduction="none")
             speed_loss = (speed_error * speed_valid.unsqueeze(-1)).sum() / speed_valid.sum().clamp_min(1.0)
             cross_task_valid = target["cross_task_mask"]
-            cross_graph_valid = valid * cross_task_valid[:, 0, None].bool()
-            cross_graph_error = nn.functional.smooth_l1_loss(cross_graph_hat, target["cross_graph"], reduction="none")
-            cross_graph_loss = (cross_graph_error * cross_graph_valid.unsqueeze(-1)).sum() / cross_graph_valid.sum().clamp_min(1.0)
-            cross_speed_valid = valid * cross_task_valid[:, 1, None].bool()
-            cross_speed_error = nn.functional.smooth_l1_loss(cross_speed_hat, target["cross_speed"], reduction="none")
-            cross_speed_loss = (cross_speed_error * cross_speed_valid.unsqueeze(-1)).sum() / cross_speed_valid.sum().clamp_min(1.0)
+            cross_asset_class_graph_valid = valid * cross_task_valid[:, 0, None].bool()
+            cross_asset_class_graph_error = nn.functional.smooth_l1_loss(cross_asset_class_graph_hat, target["cross_asset_class_graph"], reduction="none")
+            cross_asset_class_graph_loss = (cross_asset_class_graph_error * cross_asset_class_graph_valid.unsqueeze(-1)).sum() / cross_asset_class_graph_valid.sum().clamp_min(1.0)
+            cross_asset_class_speed_valid = valid * cross_task_valid[:, 1, None].bool()
+            cross_asset_class_speed_error = nn.functional.smooth_l1_loss(cross_asset_class_speed_hat, target["cross_asset_class_speed"], reduction="none")
+            cross_asset_class_speed_loss = (cross_asset_class_speed_error * cross_asset_class_speed_valid.unsqueeze(-1)).sum() / cross_asset_class_speed_valid.sum().clamp_min(1.0)
+            cross_issuer_graph_valid = valid * cross_task_valid[:, 2, None].bool()
+            cross_issuer_graph_error = nn.functional.smooth_l1_loss(cross_issuer_graph_hat, target["cross_issuer_graph"], reduction="none")
+            cross_issuer_graph_loss = (cross_issuer_graph_error * cross_issuer_graph_valid.unsqueeze(-1)).sum() / cross_issuer_graph_valid.sum().clamp_min(1.0)
+            cross_issuer_speed_valid = valid * cross_task_valid[:, 3, None].bool()
+            cross_issuer_speed_error = nn.functional.smooth_l1_loss(cross_issuer_speed_hat, target["cross_issuer_speed"], reduction="none")
+            cross_issuer_speed_loss = (cross_issuer_speed_error * cross_issuer_speed_valid.unsqueeze(-1)).sum() / cross_issuer_speed_valid.sum().clamp_min(1.0)
             cross_year_loss = graph_hat.new_zeros(())
             if cross_year_logits is not None:
                 cross_year_valid = (
@@ -1843,7 +2524,10 @@ def _train_epoch(
                         )
             task_losses = {
                 "graph": graph_loss, "speed": speed_loss, "event": event_loss, "aux": aux_loss,
-                "cross_graph": cross_graph_loss, "cross_speed": cross_speed_loss,
+                "cross_asset_class_graph": cross_asset_class_graph_loss,
+                "cross_asset_class_speed": cross_asset_class_speed_loss,
+                "cross_issuer_graph": cross_issuer_graph_loss,
+                "cross_issuer_speed": cross_issuer_speed_loss,
                 "cross_year": cross_year_loss,
             }
             masked_feature_loss = graph_hat.new_zeros(())
@@ -1885,12 +2569,103 @@ def _train_epoch(
                     next_prediction, next_target, reduction="none"
                 )
                 next_token_loss = next_error[next_token_positions[:, :-1]].mean()
+            family_reconstruction_loss = graph_hat.new_zeros(())
+            if (
+                FAMILY_RECONSTRUCTION_ENABLED
+                and family_reconstruction_logits
+                and family_mask.any()
+            ):
+                reconstruction_target = model.feature_norm(clean_x).detach()
+                value_losses: list[torch.Tensor] = []
+                presence_losses: list[torch.Tensor] = []
+                valid = ~padding
+                for family_index, family in enumerate(model.family_feature_indices):
+                    if family_index >= family_mask.shape[-1] or family not in family_reconstruction_logits:
+                        continue
+                    family_selected = family_mask[..., family_index]
+                    if family_selected.any():
+                        indices = list(model.family_feature_indices[family])
+                        error = nn.functional.smooth_l1_loss(
+                            family_reconstruction_logits[family],
+                            reconstruction_target[..., indices],
+                            reduction="none",
+                        )
+                        value_losses.append(error[family_selected].mean())
+                    presence_error = nn.functional.binary_cross_entropy_with_logits(
+                        family_presence_logits[family],
+                        target["family_presence"][..., family_index],
+                        reduction="none",
+                    )
+                    presence_losses.append(presence_error[valid].mean())
+                if value_losses:
+                    family_reconstruction_loss = torch.stack(value_losses).mean()
+                    if presence_losses:
+                        family_reconstruction_loss = family_reconstruction_loss + (
+                            FAMILY_RECONSTRUCTION_PRESENCE_WEIGHT
+                            * torch.stack(presence_losses).mean()
+                        )
+            earnings_ohlcv_loss = graph_hat.new_zeros(())
+            if (
+                EARNINGS_OHLCV_ENABLED
+                and earnings_ohlcv_hat is not None
+                and earnings_stop_logits is not None
+                and kind == "symbol_year"
+                and model.ohlcv_feature_indices
+            ):
+                boundary = target["earnings_boundary"].bool() & valid
+                seen_release = torch.cumsum(boundary.to(torch.int64), dim=1).gt(0)
+                current_valid = seen_release[:, :-1] & valid[:, :-1]
+                next_is_release = boundary[:, 1:]
+                ohlcv_valid = current_valid & (~next_is_release)
+                stop_valid = current_valid
+                if ohlcv_valid.any():
+                    ohlcv_target = model.feature_norm(clean_x[:, 1:])
+                    ohlcv_target = ohlcv_target[..., list(model.ohlcv_feature_indices)].detach()
+                    ohlcv_error = nn.functional.smooth_l1_loss(
+                        earnings_ohlcv_hat[:, :-1], ohlcv_target, reduction="none"
+                    )
+                    ohlcv_loss = ohlcv_error[ohlcv_valid].mean()
+                else:
+                    ohlcv_loss = graph_hat.new_zeros(())
+                if stop_valid.any():
+                    stop_loss = nn.functional.binary_cross_entropy_with_logits(
+                        earnings_stop_logits[:, :-1][stop_valid],
+                        next_is_release[stop_valid].to(earnings_stop_logits.dtype),
+                    )
+                else:
+                    stop_loss = graph_hat.new_zeros(())
+                # Trading labels are same-day targets.  The label predicted
+                # from token t is consumed as a signal for trading on t+1.
+                # They remain trained across the complete temporal document;
+                # only OHLCV reconstruction is restricted to the active
+                # earnings episode and remains a next-token objective.
+                label_valid = valid
+                label_graph_error = nn.functional.smooth_l1_loss(
+                    earnings_graph_hat, target["graph"].detach(), reduction="none"
+                )
+                label_speed_error = nn.functional.smooth_l1_loss(
+                    earnings_speed_hat, target["speed"].detach(), reduction="none"
+                )
+                if label_valid.any():
+                    label_graph_loss = label_graph_error[label_valid].mean()
+                    label_speed_loss = label_speed_error[label_valid].mean()
+                else:
+                    label_graph_loss = graph_hat.new_zeros(())
+                    label_speed_loss = graph_hat.new_zeros(())
+                earnings_ohlcv_loss = (
+                    ohlcv_loss
+                    + label_graph_loss
+                    + label_speed_loss
+                    + EARNINGS_STOP_WEIGHT * stop_loss
+                )
             if asset_class_logits is not None:
                 asset_class_valid = target["modality"].gt(0)
                 task_losses["asset_class"] = (
                     nn.functional.cross_entropy(asset_class_logits[asset_class_valid], target["modality"][asset_class_valid])
                     if asset_class_valid.any() else graph_hat.new_zeros(())
                 )
+            if model.earnings_ohlcv_head is not None:
+                task_losses["earnings_ohlcv"] = earnings_ohlcv_loss
             # Keep the optimizer step active when macro prediction is disabled;
             # the macro branch is optional, while graph/auxiliary training is not.
             if model.macro_head is None or MACRO_EVENT_COLS:
@@ -1927,7 +2702,8 @@ def _train_epoch(
                     gradnorm_optimizer.step()
                     weights = model.gradnorm_weights().detach()
                 else:
-                    default_weights = {"graph": 1.0, "speed": float(os.getenv("TRANSFORMER_SPEED_LOSS_WEIGHT", "0.10")), "event": 1.0, "aux": float(os.getenv("TRANSFORMER_AUX_LOSS_WEIGHT", "0.10")), "asset_class": ASSET_CLASS_LOSS_WEIGHT, "macro": float(os.getenv("TRANSFORMER_MACRO_LOSS_WEIGHT", "1.0")), "cross_graph": float(os.getenv("TRANSFORMER_CROSS_RANK_LOSS_WEIGHT", "1.0")), "cross_speed": float(os.getenv("TRANSFORMER_CROSS_RANK_LOSS_WEIGHT", "1.0")), "cross_year": float(os.getenv("TRANSFORMER_CROSS_YEAR_LOSS_WEIGHT", "1.0"))}
+                    cross_weight = float(os.getenv("TRANSFORMER_CROSS_RANK_LOSS_WEIGHT", "1.0"))
+                    default_weights = {"graph": 1.0, "speed": float(os.getenv("TRANSFORMER_SPEED_LOSS_WEIGHT", "0.10")), "event": 1.0, "aux": float(os.getenv("TRANSFORMER_AUX_LOSS_WEIGHT", "0.10")), "asset_class": ASSET_CLASS_LOSS_WEIGHT, "macro": float(os.getenv("TRANSFORMER_MACRO_LOSS_WEIGHT", "1.0")), "cross_asset_class_graph": cross_weight, "cross_asset_class_speed": cross_weight, "cross_issuer_graph": cross_weight, "cross_issuer_speed": cross_weight, "cross_year": float(os.getenv("TRANSFORMER_CROSS_YEAR_LOSS_WEIGHT", "1.0")), "earnings_ohlcv": 1.0}
                     weights = torch.tensor(
                         [default_weights[name] for name in model.gradnorm_task_names], device=DEVICE,
                     )
@@ -1936,6 +2712,8 @@ def _train_epoch(
                         masked_feature_loss
                         + MASKED_TOKEN_WEIGHT * masked_token_loss
                         + NEXT_TOKEN_WEIGHT * next_token_loss
+                        + FAMILY_RECONSTRUCTION_WEIGHT * family_reconstruction_loss
+                        + EARNINGS_OHLCV_WEIGHT * earnings_ohlcv_loss
                     )
                 else:
                     loss = sum(
@@ -1943,7 +2721,7 @@ def _train_epoch(
                         for index, name in enumerate(model.gradnorm_task_names)
                     ) + model.routing_regularization() + (
                         SELF_SUPERVISED_WEIGHT * masked_feature_loss if use_self_supervised else 0.0
-                    ) + MASKED_TOKEN_WEIGHT * masked_token_loss + NEXT_TOKEN_WEIGHT * next_token_loss
+                    ) + MASKED_TOKEN_WEIGHT * masked_token_loss + NEXT_TOKEN_WEIGHT * next_token_loss + FAMILY_RECONSTRUCTION_WEIGHT * family_reconstruction_loss + EARNINGS_OHLCV_WEIGHT * earnings_ohlcv_loss
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
@@ -2064,8 +2842,7 @@ def _run_dual_tier(tier: str) -> pd.DataFrame:
                 for row, group in enumerate(b):
                     count = len(group["issuer"]["x"]); frame = pd.DataFrame({"symbol": group["issuer"]["symbol"][:count], "date": group["issuer"]["date"][:count]}); frame[TARGET_COLS] = gh[row, 0, :count]; rows.append(frame)
         pred = pd.concat(rows, ignore_index=True)
-        for column in TARGET_COLS: pred[column] = pred.groupby("date")[column].rank(pct=True, method="average")
-        pred["long_score"], pred["long_exit_score"] = pred.long_hub, pred.long_authority; pred["short_score"], pred["short_exit_score"] = pred.short_hub, pred.short_authority; pred["long_agree_count"] = (pred.long_score >= pred.short_score).astype(int); pred["short_agree_count"] = (pred.short_score > pred.long_score).astype(int); pred["model_count"] = 1
+        pred = build_legacy_compatible_scores(pred)
         dates = pd.DatetimeIndex(next_returns.index[(next_returns.index >= f"{test_year}-01-01") & (next_returns.index <= f"{test_year}-12-31")])
         summary, _, _ = gnn.run_shared_book_framework_comparison(scores=pred[["symbol", "date", "long_score", "short_score", "long_exit_score", "short_exit_score", "long_agree_count", "short_agree_count", "model_count"]], next_returns=next_returns, symbols=tuple(close.columns), dates=dates, variants=BACKTEST_VARIANTS, top_k_values=(effective_top_k,), entry_threshold=.5, exit_threshold=.5, cost_models={"family_common": gnn.SharedBookCostModel(.5, 5.)})
         summary["tier"] = tier; summary["year"] = test_year; summary["family"] = f"dual_tower_{ISSUER_TRUNKS}issuer_{ISSUER_EQUITY_ENABLED}equity_{INSTRUMENT_TRUNKS}instrument"; summaries.append(summary)
@@ -2089,6 +2866,14 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
         representation_label += "_masked_token"
     if NEXT_TOKEN_ENABLED:
         representation_label += "_next_token"
+    if FAMILY_RECONSTRUCTION_ENABLED:
+        representation_label += "_family_reconstruction"
+    if EARNINGS_OHLCV_ENABLED:
+        representation_label += "_earnings_ohlcv"
+    if ISSUER_ENCODER_INSTRUMENT_DECODER:
+        representation_label += "_issuer_encoder_instrument_decoder"
+        if MULTIRATE_ISSUER_STATE:
+            representation_label += "_multirate_issuer_state"
     representation_label += os.getenv("TRANSFORMER_RUN_SUFFIX", "")
     normalized = _normalize(base, feature_cols, FIRST_TEST_YEAR)
     train_docs = _make_docs(normalized, FIRST_TEST_YEAR, True)
@@ -2097,13 +2882,13 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
     normalized_etf = _normalize_related_panel(etf_panel, feature_cols, FIRST_TEST_YEAR)
     etf_train_docs = _make_etf_docs(normalized_etf, feature_cols, FIRST_TEST_YEAR, True)
     cross_enabled = CROSS_SECTIONAL_ENABLED and (bool(MACRO_EVENT_COLS) or "year_target" in AUX_COLS)
-    cross_train_docs = _make_cross_sectional_docs(normalized, FIRST_TEST_YEAR, True) if cross_enabled else []
+    cross_train_docs = _make_cross_sectional_docs(normalized, FIRST_TEST_YEAR, True, normalized_related, feature_cols) if cross_enabled else []
     test_docs_by_year = {
         year: _make_docs(normalized, year, False)
         for year in range(FIRST_TEST_YEAR, LAST_TEST_YEAR + 1)
     }
     cross_test_by_year = {
-        year: _make_cross_sectional_docs(normalized, year, False) if cross_enabled else []
+        year: _make_cross_sectional_docs(normalized, year, False, normalized_related, feature_cols) if cross_enabled else []
         for year in range(FIRST_TEST_YEAR, LAST_TEST_YEAR + 1)
     }
     training_docs = train_docs + cross_train_docs + related_train_docs + etf_train_docs
@@ -2122,19 +2907,40 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
     family_feature_indices = {
         family: tuple(indices) for family, indices in family_feature_indices.items() if indices
     }
+    ohlcv_feature_indices = tuple(
+        index for index, column in enumerate(feature_cols)
+        if str(column).startswith("raw__")
+        and str(column).rsplit("__", 1)[-1] in {"open", "high", "low", "close", "volume"}
+    )
+    instrument_feature_indices = _infer_instrument_feature_indices(
+        normalized,
+        feature_cols,
+        FIRST_TEST_YEAR,
+        ohlcv_feature_indices,
+    )
+    issuer_feature_indices = tuple(
+        index for index in range(len(feature_cols))
+        if index not in instrument_feature_indices
+    )
     robust_feature_mask = np.asarray([_is_price_volume_feature(column) for column in feature_cols], dtype=bool)
     all_docs = training_docs + [doc for docs in test_docs_by_year.values() for doc in docs]
     all_docs += [doc for docs in cross_test_by_year.values() for doc in docs]
-    max_position = max((len(doc["x"]) for doc in all_docs), default=512)
+    max_position = max(
+        (max(len(doc["x"]), len(doc.get("issuer_history", doc["x"]))) for doc in all_docs),
+        default=512,
+    )
     model = TransformerMTL(
         len(feature_cols), aux_dims, asset_feature_indices=asset_feature_indices,
         family_feature_indices=family_feature_indices,
+        ohlcv_feature_indices=ohlcv_feature_indices,
+        issuer_feature_indices=issuer_feature_indices,
+        instrument_feature_indices=instrument_feature_indices,
         feature_mean=feature_mean, feature_std=feature_std,
         robust_feature_mask=robust_feature_mask, max_position=max_position,
     ).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     gradnorm_optimizer = torch.optim.Adam([model.gradnorm_log_weights], lr=GRADNORM_LR) if GRADNORM_ENABLED else None
-    print({"tier": tier, "single_fit": True, "train_through": str(pd.Timestamp(f"{FIRST_TEST_YEAR - 1}-12-31").date()), "train_documents": len(train_docs), "cross_train_documents": len(cross_train_docs), "trunks": TRUNKS, "masked_token": MASKED_TOKEN_ENABLED, "next_token": NEXT_TOKEN_ENABLED, "device": str(DEVICE)}, flush=True)
+    print({"tier": tier, "single_fit": True, "train_through": str(pd.Timestamp(f"{FIRST_TEST_YEAR - 1}-12-31").date()), "train_documents": len(train_docs), "cross_train_documents": len(cross_train_docs), "trunks": TRUNKS, "masked_token": MASKED_TOKEN_ENABLED, "next_token": NEXT_TOKEN_ENABLED, "family_reconstruction": FAMILY_RECONSTRUCTION_ENABLED, "earnings_ohlcv": EARNINGS_OHLCV_ENABLED, "earnings_boundaries": int(sum(np.asarray(doc.get("earnings_boundary", []), dtype=bool).sum() for doc in train_docs)), "device": str(DEVICE)}, flush=True)
     for epoch in range(SELF_SUPERVISED_PRETRAIN_EPOCHS):
         loss = _train_epoch(
             model, training_docs, optimizer, gradnorm_optimizer,
@@ -2155,6 +2961,8 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
         cross_test_docs = cross_test_by_year[test_year]
         temporal_predictions: list[pd.DataFrame] = []
         temporal_speed_predictions: list[pd.DataFrame] = []
+        earnings_predictions: list[pd.DataFrame] = []
+        earnings_speed_predictions: list[pd.DataFrame] = []
         with torch.no_grad():
             for start in range(0, len(test_docs), BATCH_SIZE):
                 batch_docs = test_docs[start:start + BATCH_SIZE]
@@ -2162,9 +2970,14 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
                 outputs = model(
                     x.to(DEVICE), padding.to(DEVICE), modality=batch_target["modality"].to(DEVICE),
                     family_presence=batch_target["family_presence"].to(DEVICE),
+                    earnings_boundary=batch_target["earnings_boundary"].to(DEVICE),
+                    issuer_history=batch_target["issuer_history"].to(DEVICE),
+                    issuer_history_padding=batch_target["issuer_history_padding"].to(DEVICE),
                 )
                 values = outputs[0].cpu().numpy()
                 speed_values = outputs[1].cpu().numpy()
+                earnings_values = outputs[14].cpu().numpy() if outputs[14] is not None else None
+                earnings_speed_values = outputs[15].cpu().numpy() if outputs[15] is not None else None
                 for row, doc in enumerate(batch_docs):
                     n = len(doc["x"])
                     frame = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
@@ -2172,73 +2985,43 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
                     temporal_predictions.append(frame)
                     if SPEED_STRATEGY_ENABLED:
                         speed_frame = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
-                        speed_frame[TARGET_COLS] = speed_values[row, :n, :len(TARGET_COLS)]
+                        speed_frame[SPEED_TARGET_COLS] = speed_values[row, :n]
                         temporal_speed_predictions.append(speed_frame)
+                    if earnings_values is not None:
+                        earnings_frame = pd.DataFrame({"symbol": doc["symbol"][:n], "date": doc["date"][:n]})
+                        earnings_frame[TARGET_COLS] = earnings_values[row, :n]
+                        earnings_predictions.append(earnings_frame)
+                        if earnings_speed_values is not None:
+                            earnings_speed_frame = earnings_frame[["symbol", "date"]].copy()
+                            earnings_speed_frame[SPEED_TARGET_COLS] = earnings_speed_values[row, :n]
+                            earnings_speed_predictions.append(earnings_speed_frame)
         head_predictions = {"temporal": pd.concat(temporal_predictions, ignore_index=True)}
         if SPEED_STRATEGY_ENABLED:
             head_predictions["temporal_speed"] = pd.concat(temporal_speed_predictions, ignore_index=True)
+        if earnings_predictions:
+            head_predictions["earnings_temporal"] = pd.concat(earnings_predictions, ignore_index=True)
+            if earnings_speed_predictions and SPEED_STRATEGY_ENABLED:
+                head_predictions["earnings_temporal_speed"] = pd.concat(earnings_speed_predictions, ignore_index=True)
         if CROSS_SECTIONAL_COMPARE_HEADS or CROSS_SECTIONAL_TRADING:
-            cross_predictions: list[pd.DataFrame] = []
-            with torch.no_grad():
-                for start in range(0, len(cross_test_docs), BATCH_SIZE):
-                    batch_docs = cross_test_docs[start:start + BATCH_SIZE]
-                    x, padding, batch_target = _batch(batch_docs)
-                    outputs = model(
-                        x.to(DEVICE), padding.to(DEVICE), causal=False,
-                        modality=batch_target["modality"].to(DEVICE),
-                        family_presence=batch_target["family_presence"].to(DEVICE),
-                    )
-                    values = outputs[7].cpu().numpy()
-                    for row, doc in enumerate(batch_docs):
-                        n = len(doc["x"])
-                        frame = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
-                        frame[TARGET_COLS] = values[row, :n]
-                        cross_predictions.append(frame)
-            cross_pred = pd.concat(cross_predictions, ignore_index=True)
-            for column in TARGET_COLS:
-                cross_pred[column] = cross_pred.groupby("date")[column].rank(pct=True, method="average")
-            head_predictions["cross_sectional"] = cross_pred
-            if SPEED_STRATEGY_ENABLED:
-                cross_speed_pred = cross_pred.copy()
-                # Cross-sectional speed scores are produced by the speed head
-                # under the same bidirectional document attention.
-                cross_speed_predictions: list[pd.DataFrame] = []
-                with torch.no_grad():
-                    for start in range(0, len(cross_test_docs), BATCH_SIZE):
-                        batch_docs = cross_test_docs[start:start + BATCH_SIZE]
-                        x, padding, batch_target = _batch(batch_docs)
-                        outputs = model(
-                            x.to(DEVICE), padding.to(DEVICE), causal=False,
-                            modality=batch_target["modality"].to(DEVICE),
-                            family_presence=batch_target["family_presence"].to(DEVICE),
-                        )
-                        speed_values = outputs[8].cpu().numpy()
-                        for row, doc in enumerate(batch_docs):
-                            n = len(doc["x"])
-                            frame = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
-                            frame[TARGET_COLS] = speed_values[row, :n, :len(TARGET_COLS)]
-                            cross_speed_predictions.append(frame)
-                cross_speed_pred = pd.concat(cross_speed_predictions, ignore_index=True)
-                for column in TARGET_COLS:
-                    cross_speed_pred[column] = cross_speed_pred.groupby("date")[column].rank(pct=True, method="average")
-                head_predictions["cross_sectional_speed"] = cross_speed_pred
+            head_predictions.update(_predict_cross_heads(model, cross_test_docs))
         if CROSS_SECTIONAL_COMPARE_HEADS:
             selected_heads = head_predictions.items()
         elif CROSS_SECTIONAL_TRADING:
-            selected_heads = (("cross_sectional", head_predictions["cross_sectional"]),)
+            selected_heads = tuple(
+                (name, head_predictions[name])
+                for name in ("cross_asset_class", "cross_asset_class_speed", "cross_issuer", "cross_issuer_speed")
+                if name in head_predictions
+            )
         else:
             selected_heads = (("temporal", head_predictions["temporal"]),)
             if SPEED_STRATEGY_ENABLED:
                 selected_heads = (*selected_heads, ("temporal_speed", head_predictions["temporal_speed"]))
         dates = pd.DatetimeIndex(next_returns.index[(next_returns.index >= f"{test_year}-01-01") & (next_returns.index <= f"{test_year}-12-31")])
         for head_name, pred in selected_heads:
-            for column in TARGET_COLS:
-                pred[column] = pred.groupby("date")[column].rank(pct=True, method="average")
-            pred["long_score"], pred["long_exit_score"] = pred.long_hub, pred.long_authority
-            pred["short_score"], pred["short_exit_score"] = pred.short_hub, pred.short_authority
-            pred["long_agree_count"] = (pred.long_score >= pred.short_score).astype(int)
-            pred["short_agree_count"] = (pred.short_score > pred.long_score).astype(int)
-            pred["model_count"] = 1
+            is_speed_strategy = head_name.endswith("_speed")
+            pred = build_legacy_compatible_scores(
+                pred, strategy="speed" if is_speed_strategy else "return"
+            )
             summary, trade_log, _ = gnn.run_shared_book_framework_comparison(
                 scores=pred[["symbol", "date", "long_score", "short_score", "long_exit_score", "short_exit_score", "long_agree_count", "short_agree_count", "model_count"]],
                 next_returns=next_returns, symbols=tuple(close.columns), dates=dates,
@@ -2248,7 +3031,12 @@ def _run_single_fit_tier(tier: str) -> pd.DataFrame:
             summary = _attach_holding_days(summary, trade_log)
             if not summary.empty:
                 summary["tier"] = tier; summary["year"] = test_year
-                summary["family"] = f"causal_symbol_year_transformer_{TRUNKS}trunk_single_fit_{head_name}head"
+                summary["family"] = (
+                    f"causal_symbol_year_transformer_{TRUNKS}trunk_single_fit_{head_name}head"
+                    + ("_earnings_ohlcv" if EARNINGS_OHLCV_ENABLED else "")
+                    + ("_multirate_issuer_state" if MULTIRATE_ISSUER_STATE and ISSUER_ENCODER_INSTRUMENT_DECODER else "")
+                    + ("_issuer_auto_features" if ISSUER_ENCODER_INSTRUMENT_DECODER else "")
+                )
                 summary["label_source"] = "transformer_hits_single_fit_smoke"
                 summaries.append(summary)
     result = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
@@ -2282,6 +3070,12 @@ def run_tier(tier: str) -> pd.DataFrame:
         representation_label += "_masked_token"
     if NEXT_TOKEN_ENABLED:
         representation_label += "_next_token"
+    if FAMILY_RECONSTRUCTION_ENABLED:
+        representation_label += "_family_reconstruction"
+    if EARNINGS_OHLCV_ENABLED:
+        representation_label += "_earnings_ohlcv"
+    if ISSUER_ENCODER_INSTRUMENT_DECODER:
+        representation_label += "_issuer_encoder_instrument_decoder"
     representation_label += os.getenv("TRANSFORMER_RUN_SUFFIX", "")
     for test_year in range(FIRST_TEST_YEAR, LAST_TEST_YEAR + 1):
         normalized = _normalize(base, feature_cols, test_year)
@@ -2292,8 +3086,8 @@ def run_tier(tier: str) -> pd.DataFrame:
         normalized_etf = _normalize_related_panel(etf_panel, feature_cols, test_year)
         etf_train_docs = _make_etf_docs(normalized_etf, feature_cols, test_year, True)
         cross_enabled = CROSS_SECTIONAL_ENABLED and (bool(MACRO_EVENT_COLS) or "year_target" in AUX_COLS)
-        cross_train_docs = _make_cross_sectional_docs(normalized, test_year, True) if cross_enabled else []
-        cross_test_docs = _make_cross_sectional_docs(normalized, test_year, False) if cross_enabled else []
+        cross_train_docs = _make_cross_sectional_docs(normalized, test_year, True, normalized_related, feature_cols) if cross_enabled else []
+        cross_test_docs = _make_cross_sectional_docs(normalized, test_year, False, normalized_related, feature_cols) if cross_enabled else []
         if not train_docs or not test_docs:
             continue
         training_docs = train_docs + cross_train_docs + related_train_docs + etf_train_docs
@@ -2310,9 +3104,24 @@ def run_tier(tier: str) -> pd.DataFrame:
         family_feature_indices = {
             family: tuple(indices) for family, indices in family_feature_indices.items() if indices
         }
+        ohlcv_feature_indices = tuple(
+            index for index, column in enumerate(feature_cols)
+            if str(column).startswith("raw__")
+            and str(column).rsplit("__", 1)[-1] in {"open", "high", "low", "close", "volume"}
+        )
+        instrument_feature_indices = _infer_instrument_feature_indices(
+            base,
+            feature_cols,
+            test_year,
+            ohlcv_feature_indices,
+        )
+        issuer_feature_indices = tuple(
+            index for index in range(len(feature_cols))
+            if index not in instrument_feature_indices
+        )
         robust_feature_mask = np.asarray([_is_price_volume_feature(column) for column in feature_cols], dtype=bool)
         max_position = max(
-            (len(document["x"]) for document in (
+            (max(len(document["x"]), len(document.get("issuer_history", document["x"]))) for document in (
                 train_docs + test_docs + cross_train_docs + cross_test_docs
                 + related_train_docs + etf_train_docs
             )),
@@ -2321,6 +3130,9 @@ def run_tier(tier: str) -> pd.DataFrame:
         model = TransformerMTL(
             len(feature_cols), aux_dims, asset_feature_indices=asset_feature_indices,
             family_feature_indices=family_feature_indices,
+            ohlcv_feature_indices=ohlcv_feature_indices,
+            issuer_feature_indices=issuer_feature_indices,
+            instrument_feature_indices=instrument_feature_indices,
             feature_mean=feature_mean, feature_std=feature_std,
             robust_feature_mask=robust_feature_mask, max_position=max_position,
         ).to(DEVICE)
@@ -2332,8 +3144,8 @@ def run_tier(tier: str) -> pd.DataFrame:
         gradnorm_optimizer = torch.optim.Adam(
             [model.gradnorm_log_weights], lr=GRADNORM_LR
         ) if GRADNORM_ENABLED else None
-        architecture = "shared_mixer_plus_linear_cross_set_context" if CROSS_SECTIONAL_SET_CONTEXT else "shared_mixer_cross_presence_causal_conv" if SHARED_MIXER_ENHANCEMENTS else "shared_low_rank_feature_mixer_plus_shared_trunks" if SHARED_FEATURE_MIXER else "family_cross_interactions_plus_shared_trunks" if FAMILY_INTERACTIONS else "shared_equity_plus_gated_instrument_adapters" if HYBRID_INSTRUMENT_ADAPTER else "separate_related_and_etf_document_corpora"
-        print({"tier": tier, "year": test_year, "documents": len(train_docs), "related_documents": len(related_train_docs), "etf_documents": len(etf_train_docs), "cross_sectional_train_documents": len(cross_train_docs), "test_documents": len(test_docs), "cross_sectional_test_documents": len(cross_test_docs), "tokens": sum(len(d["x"]) for d in train_docs), "related_tokens": sum(len(d["x"]) for d in related_train_docs), "etf_tokens": sum(len(d["x"]) for d in etf_train_docs), "macro_tasks": len(MACRO_EVENT_COLS), "trunks": TRUNKS, "masked_token": MASKED_TOKEN_ENABLED, "next_token": NEXT_TOKEN_ENABLED, "routing": ROUTING_MODE, "gradnorm": GRADNORM_ENABLED, "architecture": architecture, "device": str(DEVICE)}, flush=True)
+        architecture = "issuer_encoder_instrument_transformer_decoder" if ISSUER_ENCODER_INSTRUMENT_DECODER else "shared_mixer_plus_linear_cross_set_context" if CROSS_SECTIONAL_SET_CONTEXT else "shared_mixer_cross_presence_causal_conv" if SHARED_MIXER_ENHANCEMENTS else "shared_low_rank_feature_mixer_plus_shared_trunks" if SHARED_FEATURE_MIXER else "family_cross_interactions_plus_shared_trunks" if FAMILY_INTERACTIONS else "shared_equity_plus_gated_instrument_adapters" if HYBRID_INSTRUMENT_ADAPTER else "separate_related_and_etf_document_corpora"
+        print({"tier": tier, "year": test_year, "documents": len(train_docs), "related_documents": len(related_train_docs), "etf_documents": len(etf_train_docs), "cross_sectional_train_documents": len(cross_train_docs), "test_documents": len(test_docs), "cross_sectional_test_documents": len(cross_test_docs), "tokens": sum(len(d["x"]) for d in train_docs), "related_tokens": sum(len(d["x"]) for d in related_train_docs), "etf_tokens": sum(len(d["x"]) for d in etf_train_docs), "issuer_history_snapshots": sum(len(d.get("issuer_history", [])) for d in train_docs), "earnings_boundaries": int(sum(np.asarray(doc.get("earnings_boundary", []), dtype=bool).sum() for doc in train_docs)), "macro_tasks": len(MACRO_EVENT_COLS), "trunks": TRUNKS, "masked_token": MASKED_TOKEN_ENABLED, "next_token": NEXT_TOKEN_ENABLED, "family_reconstruction": FAMILY_RECONSTRUCTION_ENABLED, "earnings_ohlcv": EARNINGS_OHLCV_ENABLED, "issuer_encoder_instrument_decoder": ISSUER_ENCODER_INSTRUMENT_DECODER, "multirate_issuer_state": MULTIRATE_ISSUER_STATE, "issuer_auto_feature_engineering": ISSUER_ENCODER_INSTRUMENT_DECODER, "issuer_features": len(issuer_feature_indices), "instrument_features": len(instrument_feature_indices), "routing": ROUTING_MODE, "gradnorm": GRADNORM_ENABLED, "architecture": architecture, "device": str(DEVICE)}, flush=True)
         for epoch in range(SELF_SUPERVISED_PRETRAIN_EPOCHS):
             loss = _train_epoch(
                 model, training_docs, optimizer, gradnorm_optimizer,
@@ -2355,66 +3167,68 @@ def run_tier(tier: str) -> pd.DataFrame:
             "feature_cols": feature_cols, "feature_mean": feature_mean, "feature_std": feature_std,
             "aux_dims": aux_dims, "trunks": TRUNKS, "cross_sectional": bool(cross_enabled),
             "masked_token": MASKED_TOKEN_ENABLED, "next_token": NEXT_TOKEN_ENABLED,
+            "family_reconstruction": FAMILY_RECONSTRUCTION_ENABLED, "earnings_ohlcv": EARNINGS_OHLCV_ENABLED,
         }, checkpoint_dir / f"{tier.lower()}_{test_year}_2trunk_cross_year.pt")
         model.eval()
         predictions: list[pd.DataFrame] = []
+        earnings_predictions: list[pd.DataFrame] = []
+        earnings_speed_predictions: list[pd.DataFrame] = []
         with torch.no_grad():
             for start in range(0, len(test_docs), BATCH_SIZE):
                 batch_docs = test_docs[start:start + BATCH_SIZE]
                 x, padding, batch_target = _batch(batch_docs)
                 x = x.to(DEVICE); padding = padding.to(DEVICE)
-                graph_hat, speed_hat, _, _, _, _, _, _, _, _ = model(
+                outputs = model(
                     x, padding, modality=batch_target["modality"].to(DEVICE),
                     family_presence=batch_target["family_presence"].to(DEVICE),
+                    earnings_boundary=batch_target["earnings_boundary"].to(DEVICE),
+                    issuer_history=batch_target["issuer_history"].to(DEVICE),
+                    issuer_history_padding=batch_target["issuer_history_padding"].to(DEVICE),
                 )
+                graph_hat, speed_hat = outputs[0], outputs[1]
                 values = graph_hat.cpu().numpy()
                 speed_values = speed_hat.cpu().numpy()
+                earnings_values = outputs[14].cpu().numpy() if outputs[14] is not None else None
+                earnings_speed_values = outputs[15].cpu().numpy() if outputs[15] is not None else None
                 for row, doc in enumerate(batch_docs):
                     n = len(doc["x"])
                     pred = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
                     pred[TARGET_COLS] = values[row, :n]
                     pred[SPEED_TARGET_COLS] = speed_values[row, :n]
                     predictions.append(pred)
+                    if earnings_values is not None:
+                        # The label heads are trading heads, so they produce
+                        # a score for every daily token.  Earnings boundaries
+                        # condition the feature-reconstruction episode, not
+                        # the availability of daily trading predictions.
+                        earnings_pred = pd.DataFrame({"symbol": doc["symbol"][:n], "date": doc["date"][:n]})
+                        earnings_pred[TARGET_COLS] = earnings_values[row, :n]
+                        earnings_predictions.append(earnings_pred)
+                        if earnings_speed_values is not None:
+                            earnings_speed_pred = earnings_pred[["symbol", "date"]].copy()
+                            earnings_speed_pred[SPEED_TARGET_COLS] = earnings_speed_values[row, :n]
+                            earnings_speed_predictions.append(earnings_speed_pred)
         temporal_pred = pd.concat(predictions, ignore_index=True)
         head_predictions = {"temporal": temporal_pred}
         if SPEED_STRATEGY_ENABLED:
             head_predictions["temporal_speed"] = temporal_pred.copy()
+        if earnings_predictions:
+            head_predictions["earnings_temporal"] = pd.concat(earnings_predictions, ignore_index=True)
+            if earnings_speed_predictions and SPEED_STRATEGY_ENABLED:
+                head_predictions["earnings_temporal_speed"] = pd.concat(earnings_speed_predictions, ignore_index=True)
         if CROSS_SECTIONAL_TRADING or CROSS_SECTIONAL_COMPARE_HEADS:
-            # Evaluate the cross-sectional head directly.  Each date is one
-            # bidirectional document, so the scores are produced jointly for
-            # all equities on that date rather than copied from temporal
-            # symbol/year documents.
-            cross_predictions: list[pd.DataFrame] = []
-            with torch.no_grad():
-                for start in range(0, len(cross_test_docs), BATCH_SIZE):
-                    batch_docs = cross_test_docs[start:start + BATCH_SIZE]
-                    x, padding, batch_target = _batch(batch_docs)
-                    x = x.to(DEVICE); padding = padding.to(DEVICE)
-                    outputs = model(
-                        x, padding, causal=False,
-                        modality=batch_target["modality"].to(DEVICE),
-                        family_presence=batch_target["family_presence"].to(DEVICE),
-                    )
-                    cross_values = outputs[7].cpu().numpy()
-                    cross_speed_values = outputs[8].cpu().numpy()
-                    for row, doc in enumerate(batch_docs):
-                        n = len(doc["x"])
-                        cross_pred = pd.DataFrame({"symbol": doc["symbol"], "date": doc["date"]})
-                        cross_pred[TARGET_COLS] = cross_values[row, :n]
-                        cross_pred[SPEED_TARGET_COLS] = cross_speed_values[row, :n]
-                        cross_predictions.append(cross_pred)
-            cross_pred = pd.concat(cross_predictions, ignore_index=True)
-            for column in TARGET_COLS:
-                cross_pred[column] = cross_pred.groupby("date")[column].rank(pct=True, method="average")
-            head_predictions["cross_sectional"] = cross_pred
-            if SPEED_STRATEGY_ENABLED:
-                head_predictions["cross_sectional_speed"] = cross_pred.copy()
+            # Each relation uses its own same-date bidirectional documents and
+            # its own routed HITS head.  Only equity rows are returned by the
+            # helper for trading.
+            head_predictions.update(_predict_cross_heads(model, cross_test_docs))
         if CROSS_SECTIONAL_COMPARE_HEADS:
             selected_heads = head_predictions.items()
         elif CROSS_SECTIONAL_TRADING:
-            selected_heads = [("cross_sectional", head_predictions["cross_sectional"])]
-            if SPEED_STRATEGY_ENABLED:
-                selected_heads.append(("cross_sectional_speed", head_predictions["cross_sectional_speed"]))
+            selected_heads = [
+                (name, head_predictions[name])
+                for name in ("cross_asset_class", "cross_asset_class_speed", "cross_issuer", "cross_issuer_speed")
+                if name in head_predictions
+            ]
         else:
             selected_heads = [("temporal", temporal_pred)]
             if SPEED_STRATEGY_ENABLED:
@@ -2423,18 +3237,9 @@ def run_tier(tier: str) -> pd.DataFrame:
         dates = pd.DatetimeIndex(next_returns.index[(next_returns.index >= f"{test_year}-01-01") & (next_returns.index <= f"{test_year}-12-31")])
         for head_name, pred in selected_heads:
             is_speed_strategy = head_name.endswith("_speed")
-            strategy_targets = SPEED_TARGET_COLS if is_speed_strategy else TARGET_COLS
-            for column in strategy_targets:
-                pred[column] = pred.groupby("date")[column].rank(pct=True, method="average")
-            long_hub = "speed_long_hub" if is_speed_strategy else "long_hub"
-            long_authority = "speed_long_authority" if is_speed_strategy else "long_authority"
-            short_hub = "speed_short_hub" if is_speed_strategy else "short_hub"
-            short_authority = "speed_short_authority" if is_speed_strategy else "short_authority"
-            pred["long_score"], pred["long_exit_score"] = pred[long_hub], pred[long_authority]
-            pred["short_score"], pred["short_exit_score"] = pred[short_hub], pred[short_authority]
-            pred["long_agree_count"] = (pred.long_score >= pred.short_score).astype(int)
-            pred["short_agree_count"] = (pred.short_score > pred.long_score).astype(int)
-            pred["model_count"] = 1
+            pred = build_legacy_compatible_scores(
+                pred, strategy="speed" if is_speed_strategy else "return"
+            )
             strategy_label = f"_{head_name}head" if CROSS_SECTIONAL_COMPARE_HEADS else ("_crosshead" if CROSS_SECTIONAL_TRADING else "")
             strategy_label += "_speed" if is_speed_strategy and not strategy_label.endswith("_speed") else ""
             strategy_kind = "speed_hits" if is_speed_strategy else "return_hits"
@@ -2460,8 +3265,14 @@ def run_tier(tier: str) -> pd.DataFrame:
         del model, optimizer, training_docs, train_docs, test_docs
         del cross_train_docs, cross_test_docs, related_train_docs, etf_train_docs
         del normalized, normalized_related, normalized_etf, predictions, head_predictions
-        del selected_heads, pred, temporal_pred, cross_pred, cross_predictions
-        del batch_docs, x, padding, batch_target, values, cross_values
+        del selected_heads, pred, temporal_pred
+        # Cross-sectional prediction variables are branch-local and may not
+        # exist when that head is disabled.  Do not let optional cleanup turn
+        # a completed fold into an UnboundLocalError.
+        for optional_name in ("cross_pred", "cross_predictions", "cross_values"):
+            if optional_name in locals():
+                del locals()[optional_name]
+        del batch_docs, x, padding, batch_target, values
         if DEVICE.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
