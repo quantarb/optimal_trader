@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import urllib.error
 import urllib.parse
@@ -10,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+LIVE_BASE_URL = "https://api.alpaca.markets"
 DATA_BASE_URL = "https://data.alpaca.markets"
 
 
@@ -390,8 +392,8 @@ class AlpacaPaperClient:
         data_api: bool = False,
     ) -> Any:
         base_url = self.base_url.rstrip("/")
-        if base_url != PAPER_BASE_URL:
-            raise RuntimeError(f"Refusing non-paper Alpaca URL: {base_url}")
+        if base_url not in {PAPER_BASE_URL, LIVE_BASE_URL}:
+            raise RuntimeError(f"Refusing unknown Alpaca URL: {base_url}")
         request_base_url = self.data_base_url.rstrip("/") if data_api else base_url
         body = None if payload is None else json.dumps(dict(payload)).encode("utf-8")
         request = urllib.request.Request(
@@ -410,7 +412,8 @@ class AlpacaPaperClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Alpaca paper API {exc.code}: {detail}") from exc
+            account_mode = "live" if base_url == LIVE_BASE_URL else "paper"
+            raise RuntimeError(f"Alpaca {account_mode} API {exc.code}: {detail}") from exc
         return json.loads(raw) if raw else None
 
     def get_account(self) -> dict[str, Any]:
@@ -444,6 +447,40 @@ class AlpacaPaperClient:
         response = dict(self._request("GET", path) or {})
         return list(response.get("option_contracts") or response.get("contracts") or [])
 
+    def get_option_contracts_for_underlyings(
+        self,
+        underlying_symbols: Sequence[str],
+        *,
+        expiration_date_gte: str | None = None,
+    ) -> list[dict[str, Any]]:
+        symbols = list(dict.fromkeys(str(value).strip().upper() for value in underlying_symbols if str(value).strip()))
+        if not symbols:
+            return []
+        params: dict[str, Any] = {"underlying_symbols": ",".join(symbols), "status": "active", "limit": 10000}
+        if expiration_date_gte:
+            params["expiration_date_gte"] = str(expiration_date_gte)
+        try:
+            response = dict(self._request("GET", "/v2/options/contracts?" + urllib.parse.urlencode(params)) or {})
+            return list(response.get("option_contracts") or response.get("contracts") or [])
+        except RuntimeError as exc:
+            # Alpaca rejects the entire batch when one underlying is invalid
+            # (funds and delisted symbols are common in broad universes). Split
+            # recursively so valid symbols still produce contracts.
+            if "invalid underlying symbols" not in str(exc).lower():
+                raise
+            detail = str(exc).split("invalid underlying symbols:", 1)[-1]
+            invalid = {value.strip().upper() for value in re.split(r"[,\s]+", detail) if value.strip()}
+            remaining = [symbol for symbol in symbols if symbol not in invalid]
+            if len(remaining) < len(symbols):
+                return self.get_option_contracts_for_underlyings(remaining, expiration_date_gte=expiration_date_gte)
+            if len(symbols) == 1:
+                return []
+            midpoint = max(1, len(symbols) // 2)
+            return (
+                self.get_option_contracts_for_underlyings(symbols[:midpoint], expiration_date_gte=expiration_date_gte)
+                + self.get_option_contracts_for_underlyings(symbols[midpoint:], expiration_date_gte=expiration_date_gte)
+            )
+
     def get_option_contract(self, symbol_or_id: str) -> dict[str, Any]:
         encoded = urllib.parse.quote(str(symbol_or_id).strip(), safe="")
         return dict(self._request("GET", f"/v2/options/contracts/{encoded}") or {})
@@ -465,6 +502,20 @@ class AlpacaPaperClient:
             )
             snapshots.update(response.get("snapshots") or {})
         return snapshots
+
+    def get_option_chain(self, underlying_symbol: str, *, feed: str | None = None) -> dict[str, Any]:
+        """Return the latest Alpaca snapshot for every contract of an underlying."""
+        symbol = str(underlying_symbol).strip().upper()
+        if not symbol:
+            return {}
+        query = urllib.parse.urlencode({"feed": feed}) if feed else ""
+        suffix = f"?{query}" if query else ""
+        response = self._request(
+            "GET",
+            f"/v1beta1/options/snapshots/{urllib.parse.quote(symbol, safe='')}{suffix}",
+            data_api=True,
+        ) or {}
+        return dict(response.get("snapshots") or {})
 
     def cancel_order(self, order_id: str) -> None:
         encoded = urllib.parse.quote(str(order_id).strip(), safe="")

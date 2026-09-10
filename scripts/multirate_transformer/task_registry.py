@@ -20,11 +20,11 @@ def resolve_current_tasks(gnn_script: Path | None = None) -> list[dict[str, obje
         *getattr(module, "SPEED_TARGET_COLS", ()),
     )
     for name in graph_names:
-        rows.append({"task_name": name, "task_type": "regression", "task_level": "instrument", "target_column": name, "loss": "smooth_l1", "orientation": "long" if "long" in name else "short", "weight": 1.0, "applicable_asset_classes": "non_option"})
+        rows.append({"task_name": name, "task_type": "regression", "task_level": "instrument", "target_column": name, "loss": "smooth_l1", "orientation": "long" if "long" in name else "short", "weight": 1.0, "applicable_asset_classes": "all"})
     for name in getattr(module, "ALL_EVENT_TARGETS", {}):
-        rows.append({"task_name": name, "task_type": "event", "task_level": "instrument", "target_column": name, "loss": "prototype_or_bce", "orientation": "positive", "weight": 0.25, "applicable_asset_classes": "issuer_linked"})
+        rows.append({"task_name": name, "task_type": "event", "task_level": "instrument", "target_column": name, "loss": "prototype_or_bce", "orientation": "positive", "weight": 0.25, "applicable_asset_classes": "all"})
     for name in getattr(module, "AUX_TARGET_COLS", ()):
-        rows.append({"task_name": name, "task_type": "categorical", "task_level": "issuer_or_context", "target_column": name, "loss": "cross_entropy", "orientation": "n/a", "weight": 0.1, "applicable_asset_classes": "issuer_linked"})
+        rows.append({"task_name": name, "task_type": "categorical", "task_level": "issuer_or_context", "target_column": name, "loss": "cross_entropy", "orientation": "n/a", "weight": 0.1, "applicable_asset_classes": "all"})
     return rows
 
 
@@ -32,4 +32,3 @@ def task_inventory_frame(gnn_script: Path | None = None):
     import pandas as pd
 
     return pd.DataFrame(resolve_current_tasks(gnn_script))
-

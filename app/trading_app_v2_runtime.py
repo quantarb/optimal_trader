@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
+import numpy as np
 
 from app.quant_warehouse_storage import ensure_quant_warehouse_storage
 from platforms.brokers.option_pricing import normalize_option_limit_price
@@ -120,6 +121,30 @@ def load_equity_artifacts(artifact_dir: Path) -> dict[str, pd.DataFrame]:
     }
 
 
+def load_multirate_strategy_scores(predictions_path: Path) -> pd.DataFrame:
+    """Convert MultiRate Transformer supervised predictions to live leaderboard scores."""
+    frame = pd.read_csv(Path(predictions_path))
+    required = {"symbol", "date"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise KeyError(f"MultiRate predictions missing columns: {sorted(missing)}")
+    frame["symbol"] = frame["symbol"].astype(str).str.strip().str.upper()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+    frame = frame.loc[frame["date"].notna() & ~frame["symbol"].str.startswith("OPT_")].copy()
+
+    def mean_available(columns: Sequence[str]) -> pd.Series:
+        present = [column for column in columns if column in frame]
+        if not present:
+            return pd.Series(float("nan"), index=frame.index)
+        return frame[present].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+
+    frame["long_score"] = mean_available(("oracle_is_buy", "hits_long_return_hub", "hits_long_return_authority"))
+    frame["short_score"] = mean_available(("oracle_is_short", "hits_short_return_hub", "hits_short_return_authority"))
+    return frame.loc[frame["long_score"].notna() & frame["short_score"].notna(), ["date", "symbol", "long_score", "short_score"]].assign(
+        strategy_source="multirate_10b"
+    )
+
+
 def resolve_option_training_panel(artifact_dir: Path, *, min_market_cap: int) -> Path:
     """Return the newest successful unified option panel for an exact universe."""
 
@@ -170,6 +195,11 @@ def latest_prices_from_quant_warehouse(
     prices: dict[str, float] = {}
     for symbol in _normalize_symbols(symbols):
         frame = warehouse.read_prices(symbol, provider=provider, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+        if frame is not None and not isinstance(frame, pd.DataFrame):
+            if hasattr(frame, "to_pandas"):
+                frame = frame.to_pandas()
+            else:
+                frame = pd.DataFrame(frame)
         if frame is None or frame.empty or "close" not in frame.columns:
             continue
         close = pd.to_numeric(frame["close"], errors="coerce").dropna()
@@ -574,11 +604,14 @@ def build_score_date_option_candidate_panel(
     score_date: str | pd.Timestamp | None = None,
     symbols: Sequence[str] | None = None,
     target_dte: int = 90,
+    option_data_source: str = "thetadata",
+    alpaca_client: Any | None = None,
 ) -> pd.DataFrame:
     from quant_warehouse.platforms.data_providers.thetadata.feature_engineering.option_features import (
         build_option_contract_features,
     )
     from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
+    import polars as pl
 
     if leaderboard is None or leaderboard.empty:
         return pd.DataFrame()
@@ -591,32 +624,85 @@ def build_score_date_option_candidate_panel(
         lead = lead.loc[lead["selected"].astype(bool)].copy()
     if lead.empty:
         return pd.DataFrame()
-    if score_date is None:
-        score_date = pd.to_datetime(lead["score_date"], errors="coerce").max() if "score_date" in lead.columns else pd.Timestamp.today()
-    score_ts = pd.Timestamp(score_date).normalize()
+    requested_score_ts = pd.Timestamp(score_date).normalize() if score_date is not None else None
     frames: list[pd.DataFrame] = []
 
     for row in lead.to_dict("records"):
         symbol = str(row.get("symbol") or "").strip().upper()
         if not symbol:
             continue
+        score_ts = requested_score_ts
+        if score_ts is None:
+            score_ts = pd.to_datetime(row.get("score_date"), errors="coerce")
+            if pd.notna(score_ts):
+                score_ts = pd.Timestamp(score_ts).normalize()
+        if pd.isna(score_ts):
+            continue
         try:
-            chain = read_thetadata_eod_option_chain(
-                symbol,
-                start_date=score_ts,
-                end_date=score_ts,
-                require_rich_columns=False,
-            )
+            if str(option_data_source).lower() == "alpaca":
+                if alpaca_client is None:
+                    raise ValueError("alpaca_client is required when option_data_source='alpaca'")
+                contracts = alpaca_client.get_option_contracts(
+                    symbol,
+                    option_type="call",
+                    expiration_date_gte=str(score_ts.date()),
+                    expiration_date_lte=str((score_ts + pd.Timedelta(days=int(target_dte) + 45)).date()),
+                )
+                contracts += alpaca_client.get_option_contracts(
+                    symbol,
+                    option_type="put",
+                    expiration_date_gte=str(score_ts.date()),
+                    expiration_date_lte=str((score_ts + pd.Timedelta(days=int(target_dte) + 45)).date()),
+                )
+                snapshots = alpaca_client.get_option_snapshots([c.get("symbol", "") for c in contracts])
+                rows = []
+                by_symbol = {str(c.get("symbol", "")).upper(): c for c in contracts}
+                for contract_symbol, snapshot in snapshots.items():
+                    contract = by_symbol.get(str(contract_symbol).upper(), {})
+                    quote = dict(snapshot.get("latestQuote") or snapshot.get("latest_quote") or {})
+                    trade = dict(snapshot.get("latestTrade") or snapshot.get("latest_trade") or {})
+                    daily_bar = dict(snapshot.get("dailyBar") or snapshot.get("daily_bar") or {})
+                    greeks = dict(snapshot.get("greeks") or {})
+                    rows.append({
+                        "contract_symbol": contract_symbol,
+                        "underlying_symbol": symbol,
+                        "snapshot_date": score_ts,
+                        "expiration": contract.get("expiration_date"),
+                        "strike": contract.get("strike_price"),
+                        "option_type": str(contract.get("type") or "").lower(),
+                        "bid": quote.get("bp"),
+                        "ask": quote.get("ap"),
+                        "mid": ((float(quote["bp"]) + float(quote["ap"])) / 2.0
+                                if quote.get("bp") is not None and quote.get("ap") is not None else None),
+                        "volume": daily_bar.get("v") or daily_bar.get("volume") or trade.get("s"),
+                        "open_interest": snapshot.get("openInterest") or snapshot.get("open_interest") or contract.get("open_interest"),
+                        "iv": snapshot.get("impliedVolatility") or snapshot.get("implied_volatility"),
+                        **greeks,
+                    })
+                chain = pd.DataFrame(rows)
+            else:
+                chain = read_thetadata_eod_option_chain(
+                    symbol,
+                    start_date=score_ts,
+                    end_date=score_ts,
+                    require_rich_columns=False,
+                )
         except Exception:
             continue
-        if chain.empty:
+        if chain is None or len(chain) == 0:
             continue
         spot = _number(row.get("close"))
+        if str(option_data_source).lower() == "alpaca" and isinstance(chain, pd.DataFrame):
+            chain = pl.from_pandas(chain)
         featured = build_option_contract_features(
             chain,
             underlying_price=spot if spot > 0 else None,
             target_dte=int(target_dte),
         ).df
+        if not isinstance(featured, pd.DataFrame) and hasattr(featured, "to_pandas"):
+            featured = featured.to_pandas()
+        if featured is None:
+            continue
         if featured.empty:
             continue
         featured["snapshot_date"] = pd.to_datetime(featured.get("snapshot_date"), errors="coerce").dt.normalize()
@@ -651,29 +737,40 @@ def build_score_date_option_candidate_panel(
 def select_optionable_leaderboard(
     leaderboard: pd.DataFrame,
     *,
-    score_date: str | pd.Timestamp,
+    score_date: str | pd.Timestamp | None = None,
     top_k: int = 20,
+    option_data_source: str = "thetadata",
+    alpaca_client: Any | None = None,
 ) -> pd.DataFrame:
     """Select the highest-ranked underlyings with a locally available score-date chain."""
 
     from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
 
     selected_rows = []
-    score_ts = pd.Timestamp(score_date).normalize()
+    requested_score_ts = pd.Timestamp(score_date).normalize() if score_date is not None else None
     for row in leaderboard.sort_values("rank", kind="stable").to_dict("records"):
         symbol = str(row.get("symbol") or "").strip().upper()
         if not symbol:
             continue
+        score_ts = requested_score_ts
+        if score_ts is None:
+            score_ts = pd.to_datetime(row.get("score_date"), errors="coerce")
+            if pd.notna(score_ts):
+                score_ts = pd.Timestamp(score_ts).normalize()
+        if pd.isna(score_ts):
+            continue
         try:
-            chain = read_thetadata_eod_option_chain(
-                symbol,
-                start_date=score_ts,
-                end_date=score_ts,
-                require_rich_columns=False,
-            )
+            if str(option_data_source).lower() == "alpaca":
+                if alpaca_client is None:
+                    raise ValueError("alpaca_client is required when option_data_source='alpaca'")
+                contracts = alpaca_client.get_option_contracts(symbol, option_type="call", expiration_date_gte=str(score_ts.date()))
+                contracts += alpaca_client.get_option_contracts(symbol, option_type="put", expiration_date_gte=str(score_ts.date()))
+                chain = contracts
+            else:
+                chain = read_thetadata_eod_option_chain(symbol, start_date=score_ts, end_date=score_ts, require_rich_columns=False)
         except Exception:
             continue
-        if chain is None or chain.empty:
+        if chain is None or len(chain) == 0:
             continue
         selected_rows.append(row)
         if len(selected_rows) >= int(top_k):
@@ -697,6 +794,8 @@ def build_score_date_option_ml_ranking_table(
     start_date: str = "1900-01-01",
     max_underlyings: int = 20,
     equity_family_scores: pd.DataFrame | None = None,
+    option_data_source: str = "thetadata",
+    alpaca_client: Any | None = None,
 ) -> pd.DataFrame:
     requested_symbols = _normalize_symbols(symbols or ())
     if len(requested_symbols) > int(max_underlyings):
@@ -710,6 +809,8 @@ def build_score_date_option_ml_ranking_table(
         score_date=score_date,
         symbols=symbols,
         target_dte=target_dte,
+        option_data_source=option_data_source,
+        alpaca_client=alpaca_client,
     )
     if candidates.empty:
         return pd.DataFrame()
@@ -722,7 +823,28 @@ def build_score_date_option_ml_ranking_table(
         return score_option_meta_ranker(meta_model_path, candidates, equity_family_scores)
     family_dirs = sorted(path for path in root.iterdir() if path.is_dir()) if root.exists() else []
     if not family_dirs:
-        return pd.DataFrame()
+        # Keep live scoring operational when optional trained option-family
+        # ranker artifacts are absent. The candidate panel is still built from
+        # local ThetaData; rank contracts by tenor proximity, near-ATM fit,
+        # liquidity, and tightness of the executable market.
+        fallback = candidates.copy()
+        numeric = lambda name: pd.to_numeric(fallback.get(name, 0.0), errors="coerce").fillna(0.0)
+        fallback["fallback_option_score"] = (
+            -numeric("dte_gap").abs()
+            - 2.0 * numeric("abs_moneyness").abs()
+            - numeric("spread_pct").clip(lower=0.0)
+            + 0.05 * numeric("liquidity_score")
+            + 0.01 * np.log1p(numeric("volume").clip(lower=0.0))
+            + 0.005 * np.log1p(numeric("open_interest").clip(lower=0.0))
+        )
+        result = _finalize_option_ml_score_table(
+            fallback,
+            ["fallback_option_score"],
+            tradable_as_of=pd.to_datetime(fallback["entry_date"], errors="coerce").max(),
+        )
+        if not result.empty:
+            result["option_score_source"] = "local_thetadata_fallback"
+        return result
     score_ts = pd.to_datetime(candidates["entry_date"], errors="coerce").max()
     symbol_list = tuple(sorted(candidates["symbol"].dropna().astype(str).str.upper().unique()))
     from quant_warehouse.research_tools.feature_family_eval import FamilyEvaluationConfig, build_fundamental_feature_panel
@@ -911,8 +1033,8 @@ def leaderboard_to_ranked_scores(leaderboard: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def alpaca_client_from_env(prefix: str):
-    from platforms.brokers.alpaca import AlpacaPaperClient
+def alpaca_client_from_env(prefix: str, *, live: bool = False):
+    from platforms.brokers.alpaca import AlpacaPaperClient, LIVE_BASE_URL, PAPER_BASE_URL
 
     if "PYTEST_CURRENT_TEST" not in os.environ:
         try:
@@ -923,14 +1045,19 @@ def alpaca_client_from_env(prefix: str):
             pass
 
     clean = str(prefix).strip().upper()
-    key = os.getenv(f"{clean}_ALPACA_PAPER_API_KEY") or os.getenv(f"ALPACA_{clean}_PAPER_API_KEY")
-    secret = os.getenv(f"{clean}_ALPACA_PAPER_API_SECRET") or os.getenv(f"ALPACA_{clean}_PAPER_API_SECRET")
+    mode = "LIVE" if live else "PAPER"
+    key = os.getenv(f"{clean}_ALPACA_{mode}_API_KEY") or os.getenv(f"ALPACA_{clean}_{mode}_API_KEY")
+    secret = os.getenv(f"{clean}_ALPACA_{mode}_API_SECRET") or os.getenv(f"ALPACA_{clean}_{mode}_API_SECRET")
     if not key or not secret:
         raise RuntimeError(
-            f"Missing dedicated Alpaca paper credentials for prefix={prefix!r}; "
-            "generic ALPACA_PAPER credentials are not accepted for multi-account trading."
+            f"Missing dedicated Alpaca {mode.lower()} credentials for prefix={prefix!r}; "
+            f"set {clean}_ALPACA_{mode}_API_KEY and {clean}_ALPACA_{mode}_API_SECRET."
         )
-    return AlpacaPaperClient(api_key=str(key), api_secret=str(secret))
+    return AlpacaPaperClient(
+        api_key=str(key),
+        api_secret=str(secret),
+        base_url=LIVE_BASE_URL if live else PAPER_BASE_URL,
+    )
 
 
 def load_distinct_alpaca_paper_accounts(
@@ -1684,6 +1811,8 @@ def build_ranked_alpaca_option_orders(
     llm: bool = False,
     max_underlyings: int = 20,
     strategy_allocation: float | None = 100_000.0,
+    live: bool = False,
+    discount_pct: float = 0.0,
 ) -> pd.DataFrame:
     """Reconcile prior-day symbol/contract selections, then price with live Alpaca quotes."""
 
@@ -1697,7 +1826,7 @@ def build_ranked_alpaca_option_orders(
     selected["underlying_symbol"] = selected["symbol"].astype(str).str.upper()
     if "contract_symbol" not in selected.columns:
         raise KeyError("option rankings require contract_symbol")
-    client = alpaca_client_from_env(account_prefix)
+    client = alpaca_client_from_env(account_prefix, live=live)
     account = client.get_account()
     account_value = float(account.get("equity") or account.get("portfolio_value") or account.get("cash") or 0.0)
     if account_value <= 0:
@@ -1750,6 +1879,36 @@ def build_ranked_alpaca_option_orders(
     normalized_decisions = normalized_decisions.loc[
         normalized_decisions["symbol"].isin(available_underlyings | held_underlyings)
     ].copy()
+    # A directional decision implies a contract type: long -> call and
+    # short -> put.  The ranking stage can legitimately return only one side
+    # of a chain (stale/illiquid quotes are common), so remove an unexecutable
+    # decision before the broker planner sees it.  This prevents a missing
+    # VZ-call-style selection from aborting the entire order plan.
+    available_contract_types = {
+        (str(row.get("underlying_symbol") or "").strip().upper(), str(row.get("option_type") or "").strip().lower())
+        for row in selected_contracts
+    }
+    if not normalized_decisions.empty:
+        decision_values = normalized_decisions.get(decision_col, normalized_decisions.get("decision"))
+        if decision_values is not None:
+            decision_values = decision_values.astype(str).str.lower().str.strip()
+            required_types = decision_values.map({"long": "call", "short": "put"})
+            executable = required_types.isna()
+            for index, row in normalized_decisions.iterrows():
+                required_type = required_types.loc[index]
+                if pd.notna(required_type):
+                    underlying = str(row["symbol"]).strip().upper()
+                    executable.loc[index] = (underlying, str(required_type)) in available_contract_types
+            normalized_decisions = normalized_decisions.loc[executable].copy()
+    # Keep selected contracts and directions as a closed set.  After dropping
+    # an unexecutable decision, contracts for that underlying must also be
+    # removed or the broker planner will correctly reject them as undirected.
+    directed_underlyings = set(normalized_decisions["symbol"].astype(str).str.upper()) if "symbol" in normalized_decisions else set()
+    allowed_underlyings = directed_underlyings | held_underlyings
+    selected_contracts = [
+        row for row in selected_contracts
+        if str(row.get("underlying_symbol") or "").strip().upper() in allowed_underlyings
+    ]
     # Re-run reconciliation after sizing so an unpriceable/over-budget contract
     # is omitted rather than accidentally falling back to a one-contract order.
     raw_orders = planner(
@@ -1768,6 +1927,7 @@ def build_ranked_alpaca_option_orders(
     return generate_live_option_limit_prices(
         intents,
         quote_frame,
+        discount_pct=float(discount_pct),
         time_in_force="gtc",
     )
 
@@ -2125,11 +2285,12 @@ def regenerate_order_plan_from_account_state(
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
+        "alpaca_option_live": "OPTION",
     }
     for name, prefix in account_prefixes.items():
         if name not in refreshed:
             continue
-        client = alpaca_client_from_env(prefix)
+        client = alpaca_client_from_env(prefix, live=name == "alpaca_option_live")
         if account_state is not None:
             occupied = len(account_state.get(f"{name}_orders", pd.DataFrame())) + len(account_state.get(f"{name}_positions", pd.DataFrame()))
         else:
@@ -2140,11 +2301,11 @@ def regenerate_order_plan_from_account_state(
         if occupied > 0:
             refreshed[name] = refreshed[name].iloc[0:0].copy()
 
-    robinhood_name = "robinhood_option_real"
-    if robinhood_name in refreshed and not refreshed[robinhood_name].empty:
-        fresh = refreshed[robinhood_name].copy()
+    live_name = "alpaca_option_live"
+    if live_name in refreshed and not refreshed[live_name].empty:
+        fresh = refreshed[live_name].copy()
         discount = float(pd.to_numeric(fresh.get("discount_pct", 90.0), errors="coerce").dropna().iloc[0]) if "discount_pct" in fresh.columns and pd.to_numeric(fresh["discount_pct"], errors="coerce").notna().any() else 90.0
-        refreshed[robinhood_name] = apply_option_limit_policy(fresh, time_in_force="gtc", discount_pct=discount)
+        refreshed[live_name] = apply_option_limit_policy(fresh, time_in_force="gtc", discount_pct=discount)
     return refreshed
 
 
@@ -2155,15 +2316,11 @@ def load_account_state_snapshot() -> dict[str, pd.DataFrame]:
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
+        "alpaca_option_live": "OPTION",
     }.items():
-        client = alpaca_client_from_env(prefix)
+        client = alpaca_client_from_env(prefix, live=name == "alpaca_option_live")
         state[f"{name}_orders"] = pd.DataFrame(client.get_open_orders())
         state[f"{name}_positions"] = pd.DataFrame(client.get_positions())
-    # Robinhood authentication can block for an extended period. Keep its
-    # state out of this synchronous refresh; its displayed plan is repriced
-    # from the cached quote fields and submission remains an explicit action.
-    state["robinhood_option_real_orders"] = pd.DataFrame()
-    state["robinhood_option_real_positions"] = pd.DataFrame()
     return state
 
 
@@ -2204,7 +2361,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders
 
 EMBEDDED_DATA = {payload_literal}
 
@@ -2247,7 +2404,26 @@ with symbol_tab:
         st.warning("Symbol score view is empty. Showing leaderboard only.")
         score_table = leaderboard.copy()
     st.subheader("Scores By Symbol")
-    st.dataframe(score_table.sort_values(["rank", "symbol"], kind="stable"), width="stretch", hide_index=True)
+    score_sort_columns = [
+        column
+        for column in ("rank", "symbol")
+        if column in score_table.columns
+    ]
+    if "rank" not in score_table.columns:
+        score_sort_columns = [
+            column
+            for column in ("long_score", "ensemble_long_score", "symbol")
+            if column in score_table.columns
+        ]
+        score_sort_ascending = [column == "symbol" for column in score_sort_columns]
+    else:
+        score_sort_ascending = True
+    score_view = (
+        score_table.sort_values(score_sort_columns, ascending=score_sort_ascending, kind="stable")
+        if score_sort_columns
+        else score_table
+    )
+    st.dataframe(score_view, width="stretch", hide_index=True)
 
 with option_tab:
     option_rankings = read_embedded_frame("option_ml_rankings")
@@ -2287,6 +2463,7 @@ with orders_tab:
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
+        "alpaca_option_live": "OPTION",
     }}
     alpaca_asset_types = {{
         "alpaca_equity_paper": "equity",
@@ -2295,10 +2472,9 @@ with orders_tab:
     }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
-        "robinhood_option_real": "robinhood_option",
     }}
     if st.button("Regenerate Plan", key="regenerate_plan"):
-        with st.spinner("Refreshing account state and Robinhood quotes..."):
+        with st.spinner("Refreshing Alpaca account state..."):
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
@@ -2321,12 +2497,10 @@ with orders_tab:
             try:
                 if submitters[name] == "alpaca":
                     result = submit_alpaca_orders(
-                        alpaca_client_from_env(account_prefixes[name]),
+                        alpaca_client_from_env(account_prefixes[name], live=name == "alpaca_option_live"),
                         orders,
                         asset_type=alpaca_asset_types[name],
                     )
-                else:
-                    result = submit_robinhood_option_orders(orders)
                 submission_results[name] = result
             except Exception as exc:
                 submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])
@@ -2350,7 +2524,7 @@ REPO_ROOT = Path(r"{str(repo_root)}")
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders, submit_robinhood_option_orders
+from app.trading_app_v2_runtime import alpaca_client_from_env, load_account_state_snapshot, regenerate_order_plan_from_account_state, submit_alpaca_orders
 
 
 def read_csv_if_nonempty(path: Path) -> pd.DataFrame:
@@ -2392,7 +2566,26 @@ with symbol_tab:
         st.warning(f"Missing or empty symbol score view: {{symbol_scores_path}}. Showing leaderboard only.")
         score_table = leaderboard.copy()
     st.subheader("Scores By Symbol")
-    st.dataframe(score_table.sort_values(["rank", "symbol"], kind="stable"), width="stretch", hide_index=True)
+    score_sort_columns = [
+        column
+        for column in ("rank", "symbol")
+        if column in score_table.columns
+    ]
+    if "rank" not in score_table.columns:
+        score_sort_columns = [
+            column
+            for column in ("long_score", "ensemble_long_score", "symbol")
+            if column in score_table.columns
+        ]
+        score_sort_ascending = [column == "symbol" for column in score_sort_columns]
+    else:
+        score_sort_ascending = True
+    score_view = (
+        score_table.sort_values(score_sort_columns, ascending=score_sort_ascending, kind="stable")
+        if score_sort_columns
+        else score_table
+    )
+    st.dataframe(score_view, width="stretch", hide_index=True)
 
 with option_tab:
     option_rankings_path = LIVE_DIR / "option_ml_rankings.csv"
@@ -2435,6 +2628,7 @@ with orders_tab:
         "alpaca_equity_paper": "EQUITY",
         "alpaca_option_paper": "OPTION",
         "alpaca_llm_paper": "LLM",
+        "alpaca_option_live": "OPTION",
     }}
     alpaca_asset_types = {{
         "alpaca_equity_paper": "equity",
@@ -2443,10 +2637,9 @@ with orders_tab:
     }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
-        "robinhood_option_real": "robinhood_option",
     }}
     if st.button("Regenerate Plan", key="regenerate_plan"):
-        with st.spinner("Refreshing account state and Robinhood quotes..."):
+        with st.spinner("Refreshing Alpaca account state..."):
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
@@ -2467,12 +2660,10 @@ with orders_tab:
             try:
                 if submitters[name] == "alpaca":
                     result = submit_alpaca_orders(
-                        alpaca_client_from_env(account_prefixes[name]),
+                        alpaca_client_from_env(account_prefixes[name], live=name == "alpaca_option_live"),
                         orders,
                         asset_type=alpaca_asset_types[name],
                     )
-                else:
-                    result = submit_robinhood_option_orders(orders)
                 submission_results[name] = result
             except Exception as exc:
                 submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])

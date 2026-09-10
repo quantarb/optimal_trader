@@ -77,6 +77,11 @@ class WarrantInputAdapter(InputAdapter):
         super().__init__(input_dim, d_model, "warrant", feature_token_mode)
 
 
+class OptionInputAdapter(InputAdapter):
+    def __init__(self, input_dim: int, d_model: int, feature_token_mode: bool = False):
+        super().__init__(input_dim, d_model, "option", feature_token_mode)
+
+
 class GenericAssetInputAdapter(InputAdapter):
     pass
 
@@ -89,6 +94,8 @@ ADAPTERS: dict[str, type[InputAdapter]] = {
     "preferred": PreferredShareInputAdapter,
     "preferred_share": PreferredShareInputAdapter,
     "warrant": WarrantInputAdapter,
+    "option": OptionInputAdapter,
+    "options": OptionInputAdapter,
 }
 
 

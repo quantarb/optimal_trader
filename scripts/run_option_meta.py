@@ -26,7 +26,9 @@ def main() -> int:
     started = perf_counter()
 
     repo = Path(__file__).resolve().parents[1]
-    sys.path[:0] = [str(repo), str(repo.parent / "quant-warehouse"), str(repo.parent / "quant-orchestrator")]
+    # quant-warehouse and quant-orchestrator are declared GitHub dependencies;
+    # do not shadow the installed packages with sibling checkouts.
+    sys.path.insert(0, str(repo))
 
     def display(obj=None, *_args, **_kwargs):
         if obj is not None:

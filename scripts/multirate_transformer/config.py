@@ -15,6 +15,7 @@ DEFAULT_ASSET_CLASSES = (
     "adr",
     "ordinary",
     "etf",
+    "option",
 )
 
 
@@ -35,7 +36,10 @@ class MultiRateModelConfig:
     asset_specific_adapters: bool = True
     feature_token_mode: bool = False
     asset_classes: tuple[str, ...] = field(default_factory=lambda: DEFAULT_ASSET_CLASSES)
-    excluded_asset_classes: tuple[str, ...] = ("option", "options")
+    # Asset class changes the input adapter and feature schema, not the
+    # supervised task inventory.  A task with an unavailable label is masked
+    # at the sample/task level by the trainer.
+    excluded_asset_classes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.d_model % self.num_heads:
@@ -44,8 +48,9 @@ class MultiRateModelConfig:
             raise ValueError("encoder and decoder layer counts must be positive")
         if any(value <= 0 for value in (self.annual_sequence_length, self.quarterly_sequence_length, self.daily_sequence_length)):
             raise ValueError("sequence lengths must be positive")
-        if any(name.lower() in self.excluded_asset_classes for name in self.asset_classes):
-            raise ValueError("option asset classes are not supported by this model")
+        excluded = {name.lower() for name in self.excluded_asset_classes}
+        if any(name.lower() in excluded for name in self.asset_classes):
+            raise ValueError(f"excluded asset class was requested: {sorted(excluded)}")
 
 
 @dataclass(frozen=True)
@@ -63,4 +68,3 @@ class MultiRateTaskConfig:
     use_listwise_ranking: bool = False
     uncertainty_weighting: bool = False
     gradnorm: bool = False
-

@@ -45,8 +45,8 @@ if TIER not in {"1T", "100B", "10B"}:
 SEED = 20260721
 EPOCHS = int(os.getenv("OPTION_TRANSFORMER_EPOCHS", "3"))
 LR = float(os.getenv("OPTION_TRANSFORMER_LR", "0.001"))
-MAX_TOKENS = int(os.getenv("OPTION_TRANSFORMER_MAX_TOKENS", "0"))
 MAX_DOCUMENTS = int(os.getenv("OPTION_TRANSFORMER_MAX_DOCUMENTS", "0"))
+TRAIN_MAX_TOKENS_PER_DOCUMENT = int(os.getenv("OPTION_TRANSFORMER_TRAIN_MAX_TOKENS_PER_DOCUMENT", "256"))
 RAW_FEATURES = [
     "underlying_price", "strike", "dte", "option_type_id",
     "bid", "ask", "mid", "iv", "volume", "open_interest",
@@ -133,12 +133,9 @@ def load_documents(symbols: list[str], issuer_labels: pd.DataFrame) -> list[pd.D
         ).astype(np.float32)
         chain = chain.sort_values(["date", "option_type_id", "dte", "strike", "contract_symbol"], kind="stable")
         for (date, _), doc in chain.groupby(["date", "symbol"], sort=False):
-            keep = ["date", "symbol", "contract_symbol", *FEATURES, LABEL, "rank_target",
+            keep = ["date", "symbol", "contract_symbol", "option_type", *FEATURES, LABEL, "rank_target",
                     *GRAPH_TARGETS, *SPEED_TARGETS, *EVENT_TARGETS, *AUX_TARGETS]
             doc = doc[keep].reset_index(drop=True)
-            if MAX_TOKENS and len(doc) > MAX_TOKENS:
-                # Explicitly opt-in only; default keeps every valid daily option token.
-                doc = doc.iloc[:MAX_TOKENS].copy()
             documents.append(doc)
         print({"symbol": symbol, "daily_documents": int(chain.date.nunique()),
                "daily_option_rows": len(chain), "max_tokens": int(chain.groupby("date").size().max())}, flush=True)
@@ -150,6 +147,42 @@ def load_documents(symbols: list[str], issuer_labels: pd.DataFrame) -> list[pd.D
         half = max(1, MAX_DOCUMENTS // 2)
         documents = train[:half] + valid[:MAX_DOCUMENTS - half]
     return documents
+
+
+def reduce_training_documents(
+    documents: list[pd.DataFrame],
+    *,
+    max_tokens_per_document: int,
+    seed: int = SEED,
+) -> list[pd.DataFrame]:
+    """Reduce only training documents while preserving contract diversity.
+
+    Ranking targets are computed on the complete daily chain before sampling.
+    The cap therefore reduces training cost without changing the target's
+    within-chain meaning. Evaluation/scoring callers must use the original
+    documents and never call this helper.
+    """
+    if max_tokens_per_document <= 0:
+        return documents
+    rng = np.random.default_rng(seed)
+    reduced: list[pd.DataFrame] = []
+    for document in documents:
+        if len(document) <= max_tokens_per_document:
+            reduced.append(document)
+            continue
+        groups = [group for _, group in document.groupby("option_type", sort=True)] if "option_type" in document else [document]
+        allocations = np.full(len(groups), max_tokens_per_document // len(groups), dtype=int)
+        allocations[: max_tokens_per_document % len(groups)] += 1
+        chosen: list[pd.DataFrame] = []
+        for group, count in zip(groups, allocations):
+            if count <= 0:
+                continue
+            indices = rng.choice(len(group), size=min(count, len(group)), replace=False)
+            chosen.append(group.iloc[np.sort(indices)])
+        sampled = pd.concat(chosen, ignore_index=True) if chosen else document.iloc[:0].copy()
+        sort_columns = [column for column in ("option_type", "dte", "strike", "contract_symbol") if column in sampled.columns]
+        reduced.append(sampled.sort_values(sort_columns, kind="stable").reset_index(drop=True) if sort_columns else sampled.reset_index(drop=True))
+    return reduced
 
 
 def normalize_documents(documents: list[pd.DataFrame], train_docs: list[bool]) -> tuple[list[dict[str, np.ndarray]], float, float, dict[str, int]]:
@@ -287,16 +320,30 @@ def main() -> None:
     valid_flags = [int(d.date.iloc[0].year) == 2026 for d in documents_df]
     if not any(train_flags) or not any(valid_flags):
         raise RuntimeError("Expected both 2025 training and 2026 evaluation documents")
-    docs, change_mean, change_std, aux_dims = normalize_documents(documents_df, train_flags)
+    reduced_train_documents = reduce_training_documents(
+        [document for document, is_train in zip(documents_df, train_flags) if is_train],
+        max_tokens_per_document=TRAIN_MAX_TOKENS_PER_DOCUMENT,
+    )
+    reduced_train_iter = iter(reduced_train_documents)
+    training_documents = [next(reduced_train_iter) if is_train else document
+                          for document, is_train in zip(documents_df, train_flags)]
+    # Keep evaluation documents untouched. Normalization statistics are fit
+    # from the reduced training sample only, while every evaluation contract
+    # remains available for scoring.
+    docs, change_mean, change_std, aux_dims = normalize_documents(
+        training_documents, train_flags
+    )
     train_indices = [i for i, flag in enumerate(train_flags) if flag]
     valid_indices = [i for i, flag in enumerate(valid_flags) if flag]
     model = OptionChainTransformer(len(FEATURES), aux_dims).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     print({
         "tier": TIER, "symbols": symbols, "train_documents_2025": len(train_indices), "eval_documents_2026": len(valid_indices),
-        "train_tokens": int(sum(len(documents_df[i]) for i in train_indices)),
-        "eval_tokens": int(sum(len(documents_df[i]) for i in valid_indices)),
+        "train_tokens": int(sum(len(docs[i]["x"]) for i in train_indices)),
+        "train_tokens_before_reduction": int(sum(len(documents_df[i]) for i in train_indices)),
+        "eval_tokens": int(sum(len(docs[i]["x"]) for i in valid_indices)),
         "features_per_option_token": len(FEATURES), "max_tokens_in_document": int(max(len(d) for d in documents_df)),
+        "train_max_tokens_per_document": TRAIN_MAX_TOKENS_PER_DOCUMENT,
         "equity_mtl_tasks": {"change_percent": True, "rank": True, "graph": len(GRAPH_TARGETS),
                              "speed": len(SPEED_TARGETS), "company_event": len(EVENT_TARGETS),
                              "sector_industry_year": AUX_TARGETS},
