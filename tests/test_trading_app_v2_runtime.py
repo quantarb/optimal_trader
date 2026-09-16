@@ -271,7 +271,7 @@ def test_streamlit_app_displays_feature_family_scores_for_all_symbols(tmp_path):
     assert 'symbol_scores_path = LIVE_DIR / "symbol_scores.csv"' in script
     assert "Scores By Symbol" in script
     assert 'option_rankings_path = LIVE_DIR / "option_ml_rankings.csv"' in script
-    assert "Option ML Rankings" in script
+    assert "Option Selections" in script
     assert "strategy_scores.csv" not in script
     assert "combined_feature_family_scores" not in script
     assert "Family Long Scores" not in script

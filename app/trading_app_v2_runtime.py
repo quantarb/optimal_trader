@@ -123,26 +123,21 @@ def load_equity_artifacts(artifact_dir: Path) -> dict[str, pd.DataFrame]:
 
 def load_multirate_strategy_scores(predictions_path: Path) -> pd.DataFrame:
     """Convert MultiRate Transformer supervised predictions to live leaderboard scores."""
-    frame = pd.read_csv(Path(predictions_path))
-    required = {"symbol", "date"}
-    missing = required.difference(frame.columns)
+    from scripts.multirate_transformer.trading_policy import build_legacy_compatible_scores
+
+    path = Path(predictions_path)
+    frame = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
+    if "asset_class" in frame:
+        frame = frame.loc[frame["asset_class"].eq("equity")].copy()
+    heads = {f"hits_{side}_return_{role}": f"{side}_{role}"
+             for side in ("long", "short") for role in ("hub", "authority")}
+    missing = {"symbol", "date", *heads}.difference(frame.columns)
     if missing:
         raise KeyError(f"MultiRate predictions missing columns: {sorted(missing)}")
-    frame["symbol"] = frame["symbol"].astype(str).str.strip().str.upper()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-    frame = frame.loc[frame["date"].notna() & ~frame["symbol"].str.startswith("OPT_")].copy()
-
-    def mean_available(columns: Sequence[str]) -> pd.Series:
-        present = [column for column in columns if column in frame]
-        if not present:
-            return pd.Series(float("nan"), index=frame.index)
-        return frame[present].apply(pd.to_numeric, errors="coerce").mean(axis=1)
-
-    frame["long_score"] = mean_available(("oracle_is_buy", "hits_long_return_hub", "hits_long_return_authority"))
-    frame["short_score"] = mean_available(("oracle_is_short", "hits_short_return_hub", "hits_short_return_authority"))
-    return frame.loc[frame["long_score"].notna() & frame["short_score"].notna(), ["date", "symbol", "long_score", "short_score"]].assign(
-        strategy_source="multirate_10b"
-    )
+    if not np.isfinite(frame[list(heads)].to_numpy(dtype=float)).all():
+        raise ValueError("MultiRate trading heads must be finite")
+    scores = build_legacy_compatible_scores(frame.rename(columns=heads))
+    return scores.assign(strategy_source="warehouse_multirate")
 
 
 def resolve_option_training_panel(artifact_dir: Path, *, min_market_cap: int) -> Path:
@@ -214,6 +209,7 @@ def build_latest_equity_leaderboard(
     top_k: int,
     min_long_score: float = 0.50,
     price_provider: str = "fmp",
+    price_map: Mapping[str, float] | None = None,
 ) -> pd.DataFrame:
     required = {"date", "symbol", "strategy_source", "long_score", "short_score"}
     missing = required.difference(strategy_scores.columns)
@@ -247,7 +243,8 @@ def build_latest_equity_leaderboard(
         ["confidence", "best_family_score"], ascending=[False, False], kind="stable"
     ).reset_index(drop=True)
     latest_by_symbol["rank"] = latest_by_symbol.index + 1
-    price_map = latest_prices_from_quant_warehouse(latest_by_symbol["symbol"], provider=price_provider)
+    if price_map is None:
+        price_map = latest_prices_from_quant_warehouse(latest_by_symbol["symbol"], provider=price_provider)
     latest_by_symbol["close"] = latest_by_symbol["symbol"].map(price_map)
     latest_by_symbol["eligible"] = latest_by_symbol["close"].gt(0) & latest_by_symbol["confidence"].ge(float(min_long_score))
     latest_by_symbol["capacity_rank"] = pd.NA
@@ -732,6 +729,72 @@ def build_score_date_option_candidate_panel(
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def select_atm_options(
+    leaderboard: pd.DataFrame, *, score_date: str, target_dte: int = 60,
+    top_k: int = 20, warehouse=None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select nearest expiry, then nearest strike, from the exact stored date.
+
+    Calls express long signals and puts express short signals. Equal expiry
+    distances prefer the later expiry; equal strike distances prefer the lower
+    strike, then contract symbol. No ML ranking or liquidity reranking is used.
+    Returns selections and an audit of missing chains/directional contracts.
+    """
+    from quant_warehouse.warehouse.api import Warehouse
+    from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
+
+    if target_dte <= 0 or top_k <= 0:
+        raise ValueError('target_dte and top_k must be positive')
+    warehouse = warehouse or Warehouse()
+    day = pd.Timestamp(score_date).normalize()
+    if pd.isna(day):
+        raise ValueError('score_date must be a valid date')
+    selected, audit = [], []
+    for row in leaderboard.sort_values('rank', kind='stable').to_dict('records'):
+        if not row.get('eligible', False):
+            continue
+        symbol = str(row['symbol']).strip().upper()
+        spot = float(row['close'])
+        right = {'long':'call', 'short':'put'}.get(row['direction'])
+        if right is None or not math.isfinite(spot) or spot <= 0:
+            continue
+        if pd.Timestamp(row['score_date']).normalize() != day:
+            raise ValueError(f'{symbol} has a different equity scoring date')
+        chain = read_thetadata_eod_option_chain(symbol, start_date=day, end_date=day,
+            backend=warehouse.backend, require_rich_columns=False)
+        frame = chain.to_pandas() if hasattr(chain, 'to_pandas') else pd.DataFrame(chain)
+        if frame.empty:
+            audit.append(dict(symbol=symbol, status='missing_score_date_chain'))
+            continue
+        frame['snapshot_date'] = pd.to_datetime(frame['snapshot_date']).dt.normalize()
+        frame['expiration'] = pd.to_datetime(frame['expiration']).dt.normalize()
+        frame['strike'] = pd.to_numeric(frame['strike'], errors='coerce')
+        frame['option_type'] = frame['option_type'].astype(str).str.lower()
+        frame = frame.loc[frame['snapshot_date'].eq(day) & frame['option_type'].eq(right)
+            & frame['expiration'].gt(day) & np.isfinite(frame['strike']) & frame['strike'].gt(0)].copy()
+        if frame.empty:
+            audit.append(dict(symbol=symbol, status='no_unexpired_directional_contract', option_type=right))
+            continue
+        frame['dte'] = (frame['expiration'] - day).dt.days
+        frame['dte_gap'] = (frame['dte'] - target_dte).abs()
+        frame['strike_gap'] = (frame['strike'] - spot).abs()
+        candidate = frame.sort_values(['dte_gap','expiration','strike_gap','strike','contract_symbol'],
+            ascending=[True,False,True,True,True], kind='stable').iloc[0].to_dict()
+        candidate.update(symbol=symbol, underlying_symbol=symbol, direction=row['direction'],
+            underlying_price=spot, score_date=day, entry_date=day, target_dte=target_dte,
+            selection_method='nearest_expiry_then_atm', selected_by_option_ensemble=True,
+            option_rank=len(selected)+1, option_ensemble_rank=1)
+        selected.append(candidate)
+        audit.append(dict(symbol=symbol, status='selected', contract_symbol=candidate['contract_symbol'],
+            dte=int(candidate['dte']), strike=float(candidate['strike'])))
+        if len(selected) == top_k:
+            break
+    columns = ['symbol','underlying_symbol','direction','contract_symbol','option_type','expiration',
+        'strike','dte','dte_gap','strike_gap','underlying_price','score_date','entry_date','target_dte',
+        'selection_method','selected_by_option_ensemble','option_rank','option_ensemble_rank']
+    return (pd.DataFrame(selected) if selected else pd.DataFrame(columns=columns), pd.DataFrame(audit))
 
 
 def select_optionable_leaderboard(
@@ -2396,7 +2459,7 @@ cols[1].metric("Selected", f"{{selected:,}}")
 cols[2].metric("Eligible", f"{{eligible:,}}")
 cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
 
-symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders / Positions"])
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option Selections", "Orders / Positions"])
 
 with symbol_tab:
     score_table = read_embedded_frame("symbol_scores")
@@ -2428,9 +2491,9 @@ with symbol_tab:
 with option_tab:
     option_rankings = read_embedded_frame("option_ml_rankings")
     if option_rankings.empty:
-        st.info("No tradable, unexpired option ML ranking rows are embedded in this app snapshot.")
+        st.info("No option selections are embedded in this app snapshot.")
     else:
-        st.subheader("Selected Option ML Rankings")
+        st.subheader("Selected Options")
         st.dataframe(option_rankings, width="stretch", hide_index=True)
 
 with orders_tab:
@@ -2557,7 +2620,7 @@ cols[1].metric("Selected", f"{{selected:,}}")
 cols[2].metric("Eligible", f"{{eligible:,}}")
 cols[3].metric("Latest Score Date", str(leaderboard.get("score_date", pd.Series([""])).max()))
 
-symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option ML Rankings", "Orders / Positions"])
+symbol_tab, option_tab, orders_tab = st.tabs(["Symbol Scores", "Option Selections", "Orders / Positions"])
 
 with symbol_tab:
     symbol_scores_path = LIVE_DIR / "symbol_scores.csv"
@@ -2591,9 +2654,9 @@ with option_tab:
     option_rankings_path = LIVE_DIR / "option_ml_rankings.csv"
     option_rankings = read_csv_if_nonempty(option_rankings_path)
     if option_rankings.empty:
-        st.info(f"No tradable, unexpired option ML ranking rows found at {{option_rankings_path}}.")
+        st.info(f"No option selections found at {{option_rankings_path}}.")
     else:
-        st.subheader("Selected Option ML Rankings")
+        st.subheader("Selected Options")
         st.dataframe(option_rankings, width="stretch", hide_index=True)
 
 with orders_tab:
