@@ -131,13 +131,35 @@ def load_multirate_strategy_scores(predictions_path: Path) -> pd.DataFrame:
         frame = frame.loc[frame["asset_class"].eq("equity")].copy()
     heads = {f"hits_{side}_return_{role}": f"{side}_{role}"
              for side in ("long", "short") for role in ("hub", "authority")}
-    missing = {"symbol", "date", *heads}.difference(frame.columns)
+    diagnostic_heads = [
+        *(f"hits_{side}_{objective}_{role}"
+          for objective in ("return", "speed")
+          for side in ("long", "short")
+          for role in ("hub", "authority")),
+        "government_is_buy", "government_is_sell",
+        "insider_is_buy", "insider_is_sell",
+    ]
+    missing = {"symbol", "date", *diagnostic_heads}.difference(frame.columns)
     if missing:
         raise KeyError(f"MultiRate predictions missing columns: {sorted(missing)}")
     if not np.isfinite(frame[list(heads)].to_numpy(dtype=float)).all():
         raise ValueError("MultiRate trading heads must be finite")
     scores = build_legacy_compatible_scores(frame.rename(columns=heads))
+    # The policy renames return-HITS fields for trading compatibility. Retain
+    # every original supervised diagnostic under its model task name as well.
+    for head in diagnostic_heads:
+        scores[head] = pd.to_numeric(frame[head], errors="coerce")
     return scores.assign(strategy_source="warehouse_multirate")
+
+
+MULTIRATE_LEADERBOARD_HEADS = (
+    *(f"hits_{side}_{objective}_{role}"
+      for objective in ("return", "speed")
+      for side in ("long", "short")
+      for role in ("hub", "authority")),
+    "government_is_buy", "government_is_sell",
+    "insider_is_buy", "insider_is_sell",
+)
 
 
 def resolve_option_training_panel(artifact_dir: Path, *, min_market_cap: int) -> Path:
@@ -221,22 +243,24 @@ def build_latest_equity_leaderboard(
     scores["date"] = pd.to_datetime(scores["date"], errors="coerce").dt.normalize()
     scores["long_score"] = pd.to_numeric(scores["long_score"], errors="coerce")
     scores["short_score"] = pd.to_numeric(scores["short_score"], errors="coerce")
+    diagnostic_heads = [head for head in MULTIRATE_LEADERBOARD_HEADS if head in scores.columns]
+    for head in diagnostic_heads:
+        scores[head] = pd.to_numeric(scores[head], errors="coerce")
     scores = scores.dropna(subset=["date", "symbol", "long_score", "short_score"])
     latest_by_source = (
         scores.sort_values(["strategy_source", "symbol", "date"])
         .groupby(["strategy_source", "symbol"], as_index=False, sort=False)
         .tail(1)
     )
-    latest_by_symbol = (
-        latest_by_source.groupby("symbol", as_index=False)
-        .agg(
-            score_date=("date", "max"),
-            prob_buy=("long_score", "mean"),
-            prob_short=("short_score", "mean"),
-            model_count=("strategy_source", "nunique"),
-            best_family_score=("long_score", "max"),
-        )
-    )
+    aggregations = {
+        "score_date": ("date", "max"),
+        "prob_buy": ("long_score", "mean"),
+        "prob_short": ("short_score", "mean"),
+        "model_count": ("strategy_source", "nunique"),
+        "best_family_score": ("long_score", "max"),
+        **{head: (head, "mean") for head in diagnostic_heads},
+    }
+    latest_by_symbol = latest_by_source.groupby("symbol", as_index=False).agg(**aggregations)
     latest_by_symbol["direction"] = latest_by_symbol["prob_buy"].ge(latest_by_symbol["prob_short"]).map({True: "long", False: "short"})
     latest_by_symbol["confidence"] = latest_by_symbol[["prob_buy", "prob_short"]].max(axis=1)
     latest_by_symbol = latest_by_symbol.sort_values(
@@ -323,7 +347,8 @@ def build_symbol_score_table(strategy_scores: pd.DataFrame, leaderboard: pd.Data
         lead["symbol"] = lead["symbol"].astype(str).str.strip().str.upper()
         lead_cols = [
             col
-            for col in ("symbol", "rank", "prob_buy", "prob_short", "best_family_score", "selected", "close", "eligible")
+            for col in ("symbol", "rank", "prob_buy", "prob_short", "best_family_score",
+                        *MULTIRATE_LEADERBOARD_HEADS, "selected", "close", "eligible")
             if col in lead.columns
         ]
         table = lead[lead_cols].merge(table, on="symbol", how="outer")
@@ -352,6 +377,7 @@ def build_symbol_score_table(strategy_scores: pd.DataFrame, leaderboard: pd.Data
             "prob_buy",
             "prob_short",
             "best_family_score",
+            *MULTIRATE_LEADERBOARD_HEADS,
             "ensemble_model_count",
             "selected",
             "eligible",

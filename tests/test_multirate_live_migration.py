@@ -15,12 +15,31 @@ def test_latest_warehouse_scores_use_existing_hits_policy(tmp_path):
     pd.DataFrame({'symbol':['A','B'],'date':['2026-06-02']*2,'asset_class':['equity']*2,
         'hits_long_return_hub':[10.,20.], 'hits_long_return_authority':[9.,8.],
         'hits_short_return_hub':[20.,10.], 'hits_short_return_authority':[1.,2.],
+        'hits_long_speed_hub':[3.,4.], 'hits_long_speed_authority':[5.,6.],
+        'hits_short_speed_hub':[7.,8.], 'hits_short_speed_authority':[9.,10.],
+        'government_is_buy':[.8,.2], 'government_is_sell':[.2,.8],
+        'insider_is_buy':[.7,.3], 'insider_is_sell':[.3,.7],
         'oracle_is_buy':[1.,0.], 'oracle_is_short':[0.,1.]}).to_parquet(p)
     scores=runtime.load_multirate_strategy_scores(p)
     assert scores['long_score'].tolist()==[.5,1.]
     assert scores['short_score'].tolist()==[1.,.5]
     assert scores['long_exit_score'].tolist()==[1.,.5]
+    assert scores['hits_long_return_hub'].tolist()==[10.,20.]
+    assert scores['hits_short_speed_authority'].tolist()==[9.,10.]
+    assert scores['government_is_buy'].tolist()==[.8,.2]
+    assert scores['insider_is_sell'].tolist()==[.3,.7]
     assert scores['strategy_source'].tolist()==['warehouse_multirate']*2
+
+
+def test_latest_leaderboard_includes_hits_and_trade_event_heads():
+    row = {'symbol':'A','date':'2026-06-02','strategy_source':'warehouse_multirate',
+           'long_score':.9,'short_score':.1,
+           **{head:index/100 for index,head in enumerate(runtime.MULTIRATE_LEADERBOARD_HEADS,1)}}
+    board=runtime.build_latest_equity_leaderboard(pd.DataFrame([row]),top_k=20,price_map={'A':100.})
+    assert all(head in board.columns for head in runtime.MULTIRATE_LEADERBOARD_HEADS)
+    assert board.loc[0,'hits_long_return_hub']==pytest.approx(.01)
+    assert board.loc[0,'government_is_buy']==pytest.approx(.09)
+    assert board.loc[0,'insider_is_sell']==pytest.approx(.12)
 
 
 def test_atm_selection_prefers_nearest_expiry_then_strike_and_exact_date(monkeypatch):
