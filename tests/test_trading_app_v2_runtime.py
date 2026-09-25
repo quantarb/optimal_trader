@@ -214,9 +214,10 @@ def test_load_distinct_alpaca_paper_accounts_rejects_duplicate_account_ids(monke
         monkeypatch.setenv(f"{prefix}_ALPACA_PAPER_API_SECRET", f"{prefix.lower()}-secret")
 
     class FakeClient:
-        def __init__(self, api_key, api_secret):
+        def __init__(self, api_key, api_secret, base_url=None):
             self.api_key = api_key
             self.api_secret = api_secret
+            self.base_url = base_url
 
         def get_account(self):
             return {"id": account_ids[self.api_key]}
@@ -233,9 +234,10 @@ def test_load_distinct_alpaca_paper_accounts_returns_three_isolated_clients(monk
         monkeypatch.setenv(f"ALPACA_{prefix}_PAPER_API_SECRET", f"{prefix.lower()}-secret")
 
     class FakeClient:
-        def __init__(self, api_key, api_secret):
+        def __init__(self, api_key, api_secret, base_url=None):
             self.api_key = api_key
             self.api_secret = api_secret
+            self.base_url = base_url
 
         def get_account(self):
             return {"id": f"account-for-{self.api_key}"}

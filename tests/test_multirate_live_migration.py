@@ -1,10 +1,8 @@
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from pathlib import Path
 import json
 
 import pandas as pd
-import polars as pl
 import pytest
 
 from app import trading_app_v2_runtime as runtime
@@ -42,31 +40,35 @@ def test_latest_leaderboard_includes_hits_and_trade_event_heads():
     assert board.loc[0,'insider_is_sell']==pytest.approx(.12)
 
 
-def test_atm_selection_prefers_nearest_expiry_then_strike_and_exact_date(monkeypatch):
-    from quant_warehouse.platforms.data_providers.thetadata import options
+def test_atm_selection_prefers_nearest_alpaca_expiry_then_strike():
     date=datetime(2026,6,2)
-    def contract(symbol,dte,strike,right='call',snapshot=date):
-        return dict(contract_symbol=symbol,snapshot_date=snapshot,expiration=date+timedelta(days=dte),
-                    strike=float(strike),option_type=right)
-    chain=pl.DataFrame([contract('C_EXACT_EXPIRY',60,105),contract('C_EXACT_ATM_WRONG_EXPIRY',61,100),
-        contract('C_STALE',60,100,snapshot=date-timedelta(days=1)),
-        contract('P_59',59,100,'put'),contract('P_61_LOWER',61,99,'put'),contract('P_61_UPPER',61,101,'put')])
-    reads=[]
-    def read(symbol,**kwargs):
-        reads.append((symbol,kwargs))
-        return pl.DataFrame() if symbol=='MISSING' else chain
-    monkeypatch.setattr(options,'read_thetadata_eod_option_chain',read)
+    def contract(symbol,dte,strike,right='call'):
+        return dict(symbol=symbol,expiration_date=date+timedelta(days=dte),
+                    strike_price=str(strike),type=right)
+    contracts={
+        ('A','call'):[contract('C_EXACT_EXPIRY',60,105),contract('C_EXACT_ATM_WRONG_EXPIRY',61,100)],
+        ('B','put'):[contract('P_59',59,100,'put'),contract('P_61_LOWER',61,99,'put'),
+                     contract('P_61_UPPER',61,101,'put')],
+    }
+    class Client:
+        def __init__(self):self.reads=[]
+        def get_option_contracts(self,symbol,**kwargs):
+            self.reads.append((symbol,kwargs))
+            return contracts.get((symbol,kwargs['option_type']),[])
+    client=Client()
     board=pd.DataFrame({'symbol':['MISSING','A','B','NOT_ELIGIBLE'], 'rank':[1,2,3,4],
         'direction':['long','long','short','long'], 'score_date':[date]*4,'close':[100.]*4,
         'eligible':[True,True,True,False]})
     chosen,audit=runtime.select_atm_options(board,score_date='2026-06-02',target_dte=60,top_k=2,
-        warehouse=SimpleNamespace(backend='test_backend'))
+        alpaca_client=client,option_as_of_date=date)
     assert chosen['contract_symbol'].tolist()==['C_EXACT_EXPIRY','P_61_LOWER']
     assert chosen['option_type'].tolist()==['call','put']
+    assert chosen['option_data_source'].tolist()==['alpaca_live','alpaca_live']
     assert chosen['selected_by_option_ensemble'].all()
-    assert audit['status'].tolist()==['missing_score_date_chain','selected','selected']
-    assert len(reads)==3
-    assert all(k['start_date']==k['end_date']==pd.Timestamp(date) and k['backend']=='test_backend' for _,k in reads)
+    assert audit['status'].tolist()==['missing_alpaca_contracts','selected','selected']
+    assert len(client.reads)==3
+    assert all(k['expiration_date_gte']=='2026-06-02' and k['expiration_date_lte']=='2026-09-15'
+               for _,k in client.reads)
 
 
 def test_leaderboard_uses_same_date_prices_without_refetch(monkeypatch):

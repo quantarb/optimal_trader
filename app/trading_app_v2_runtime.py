@@ -759,24 +759,25 @@ def build_score_date_option_candidate_panel(
 
 def select_atm_options(
     leaderboard: pd.DataFrame, *, score_date: str, target_dte: int = 60,
-    top_k: int = 20, warehouse=None,
+    top_k: int = 20, alpaca_client=None, option_as_of_date: str | pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Select nearest expiry, then nearest strike, from the exact stored date.
+    """Select live Alpaca contracts by nearest expiry, then nearest strike.
 
     Calls express long signals and puts express short signals. Equal expiry
     distances prefer the later expiry; equal strike distances prefer the lower
-    strike, then contract symbol. No ML ranking or liquidity reranking is used.
-    Returns selections and an audit of missing chains/directional contracts.
+    strike, then contract symbol. No historical option data, ML ranking, or
+    liquidity reranking is used. Returns selections and an audit of missing
+    Alpaca contracts.
     """
-    from quant_warehouse.warehouse.api import Warehouse
-    from quant_warehouse.platforms.data_providers.thetadata.options import read_thetadata_eod_option_chain
-
     if target_dte <= 0 or top_k <= 0:
         raise ValueError('target_dte and top_k must be positive')
-    warehouse = warehouse or Warehouse()
+    alpaca_client = alpaca_client or alpaca_client_from_env('OPTION', live=True)
     day = pd.Timestamp(score_date).normalize()
     if pd.isna(day):
         raise ValueError('score_date must be a valid date')
+    option_day = (pd.Timestamp(option_as_of_date).normalize() if option_as_of_date is not None
+                  else pd.Timestamp.now(tz='America/New_York').normalize().tz_localize(None))
+    expiration_max = option_day + pd.Timedelta(days=int(target_dte) + 45)
     selected, audit = [], []
     for row in leaderboard.sort_values('rank', kind='stable').to_dict('records'):
         if not row.get('eligible', False):
@@ -788,29 +789,46 @@ def select_atm_options(
             continue
         if pd.Timestamp(row['score_date']).normalize() != day:
             raise ValueError(f'{symbol} has a different equity scoring date')
-        chain = read_thetadata_eod_option_chain(symbol, start_date=day, end_date=day,
-            backend=warehouse.backend, require_rich_columns=False)
-        frame = chain.to_pandas() if hasattr(chain, 'to_pandas') else pd.DataFrame(chain)
-        if frame.empty:
-            audit.append(dict(symbol=symbol, status='missing_score_date_chain'))
+        try:
+            contracts = alpaca_client.get_option_contracts(
+                symbol,
+                option_type=right,
+                expiration_date_gte=option_day.date().isoformat(),
+                expiration_date_lte=expiration_max.date().isoformat(),
+            )
+        except RuntimeError as exc:
+            if 'invalid underlying' not in str(exc).lower():
+                raise
+            audit.append(dict(symbol=symbol, status='invalid_alpaca_underlying', option_type=right))
             continue
-        frame['snapshot_date'] = pd.to_datetime(frame['snapshot_date']).dt.normalize()
-        frame['expiration'] = pd.to_datetime(frame['expiration']).dt.normalize()
+        frame = pd.DataFrame(contracts)
+        if frame.empty:
+            audit.append(dict(symbol=symbol, status='missing_alpaca_contracts', option_type=right))
+            continue
+        frame = frame.rename(columns={
+            'symbol': 'contract_symbol', 'type': 'option_type',
+            'expiration_date': 'expiration', 'strike_price': 'strike',
+        })
+        required = {'contract_symbol', 'expiration', 'strike'}
+        if not required.issubset(frame.columns):
+            raise ValueError(f'Alpaca option contracts missing columns: {sorted(required.difference(frame.columns))}')
+        frame['expiration'] = pd.to_datetime(frame['expiration'], errors='coerce').dt.normalize()
         frame['strike'] = pd.to_numeric(frame['strike'], errors='coerce')
-        frame['option_type'] = frame['option_type'].astype(str).str.lower()
-        frame = frame.loc[frame['snapshot_date'].eq(day) & frame['option_type'].eq(right)
-            & frame['expiration'].gt(day) & np.isfinite(frame['strike']) & frame['strike'].gt(0)].copy()
+        frame['option_type'] = right
+        frame = frame.loc[frame['expiration'].gt(option_day)
+            & np.isfinite(frame['strike']) & frame['strike'].gt(0)].copy()
         if frame.empty:
             audit.append(dict(symbol=symbol, status='no_unexpired_directional_contract', option_type=right))
             continue
-        frame['dte'] = (frame['expiration'] - day).dt.days
+        frame['dte'] = (frame['expiration'] - option_day).dt.days
         frame['dte_gap'] = (frame['dte'] - target_dte).abs()
         frame['strike_gap'] = (frame['strike'] - spot).abs()
         candidate = frame.sort_values(['dte_gap','expiration','strike_gap','strike','contract_symbol'],
             ascending=[True,False,True,True,True], kind='stable').iloc[0].to_dict()
         candidate.update(symbol=symbol, underlying_symbol=symbol, direction=row['direction'],
-            underlying_price=spot, score_date=day, entry_date=day, target_dte=target_dte,
-            selection_method='nearest_expiry_then_atm', selected_by_option_ensemble=True,
+            underlying_price=spot, score_date=day, entry_date=option_day, target_dte=target_dte,
+            option_data_source='alpaca_live', selection_method='nearest_expiry_then_atm',
+            selected_by_option_ensemble=True,
             option_rank=len(selected)+1, option_ensemble_rank=1)
         selected.append(candidate)
         audit.append(dict(symbol=symbol, status='selected', contract_symbol=candidate['contract_symbol'],
@@ -819,7 +837,7 @@ def select_atm_options(
             break
     columns = ['symbol','underlying_symbol','direction','contract_symbol','option_type','expiration',
         'strike','dte','dte_gap','strike_gap','underlying_price','score_date','entry_date','target_dte',
-        'selection_method','selected_by_option_ensemble','option_rank','option_ensemble_rank']
+        'option_data_source','selection_method','selected_by_option_ensemble','option_rank','option_ensemble_rank']
     return (pd.DataFrame(selected) if selected else pd.DataFrame(columns=columns), pd.DataFrame(audit))
 
 
