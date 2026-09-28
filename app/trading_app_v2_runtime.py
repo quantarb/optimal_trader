@@ -2312,7 +2312,29 @@ def submit_alpaca_orders(
         axis=1,
     )
     candidate = candidate.loc[~duplicate_mask].copy()
-    actionable = validate_order_plan_for_submission(candidate, asset_type=asset_type)
+    if str(asset_type).lower() == "option":
+        validated_parts: list[pd.DataFrame] = []
+        option_limit = int(SubmissionSafetyPolicy().max_option_contracts_per_order)
+        for _, row in candidate.iterrows():
+            row_frame = pd.DataFrame([row.to_dict()])
+            if str(row.get("action") or "").lower().startswith("cancel_"):
+                chunks = [row_frame]
+            else:
+                total = int(pd.to_numeric(pd.Series([row.get("qty")]), errors="coerce").iloc[0])
+                chunks = []
+                while total > 0:
+                    chunk = row_frame.copy()
+                    size = min(total, option_limit)
+                    chunk.loc[:, "qty"] = size
+                    chunks.append(chunk)
+                    total -= size
+            for chunk in chunks:
+                validated_parts.append(validate_order_plan_for_submission(chunk, asset_type="option"))
+        actionable = pd.concat(validated_parts, ignore_index=True) if validated_parts else pd.DataFrame()
+    else:
+        actionable = validate_order_plan_for_submission(candidate, asset_type=asset_type)
+    if actionable.empty:
+        return actionable
     responses = client.submit_orders(actionable.to_dict(orient="records"))
     return pd.DataFrame(responses)
 

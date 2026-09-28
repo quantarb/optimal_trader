@@ -866,10 +866,16 @@ def test_submission_safety_allows_stamped_cancellations_and_valid_orders():
     assert list(validated["symbol"]) == ["AAPL", "MSFT"]
 
 
-def test_submit_alpaca_option_orders_uses_option_quantity_limit_without_side_effects():
+def test_submit_alpaca_option_orders_splits_at_option_quantity_limit():
     class FakeClient:
         def __init__(self):
             self.submitted = []
+
+        def get_open_orders(self):
+            return []
+
+        def get_positions(self):
+            return []
 
         def submit_orders(self, orders):
             self.submitted.extend(orders)
@@ -881,16 +887,19 @@ def test_submit_alpaca_option_orders_uses_option_quantity_limit_without_side_eff
             {
                 "symbol": "AAPL260117C00200000",
                 "side": "buy",
-                "qty": 101,
+                "qty": 263,
+                "order_type": "limit",
+                "limit_price": 0.50,
+                "time_in_force": "gtc",
                 "plan_created_at": pd.Timestamp.now(tz="UTC").isoformat(),
             }
         ]
     )
 
-    with pytest.raises(ValueError, match="100 per-order limit"):
-        runtime.submit_alpaca_orders(client, plan, asset_type="option")
+    result = runtime.submit_alpaca_orders(client, plan, asset_type="option")
 
-    assert client.submitted == []
+    assert [row["qty"] for row in client.submitted] == [100, 100, 63]
+    assert len(result) == 3
 
 
 def test_submit_alpaca_orders_skips_existing_open_order_and_position_duplicates():
