@@ -2578,6 +2578,7 @@ with orders_tab:
         "alpaca_equity_paper": "equity",
         "alpaca_option_paper": "option",
         "alpaca_llm_paper": "option",
+        "alpaca_option_live": "option",
     }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
@@ -2589,17 +2590,25 @@ with orders_tab:
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
             st.session_state["plan_regenerated_notice"] = True
         st.rerun()
+    planned_order_rows = sum(len(frame) for frame in order_frames.values())
+    st.caption(f"{{planned_order_rows:,}} order row(s) are currently available for submission.")
+    if planned_order_rows == 0:
+        st.warning(
+            "No order plans are embedded in this app snapshot. Rerun the notebook configuration, "
+            "order-plan generation, and app-generation cells before submitting."
+        )
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
     )
-    if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+    if st.button("Submit All Account Orders", type="primary", disabled=(not confirm_all or planned_order_rows == 0), key="submit_all_accounts"):
         # Reconcile one final time immediately before any broker side effect;
         # this prevents a stale embedded plan from duplicating Alpaca orders.
         with st.spinner("Reconciling current account state before submission..."):
             submission_state = load_account_state_snapshot()
             order_frames = regenerate_order_plan_from_account_state(order_frames, account_state=submission_state)
         submission_results = {{}}
+        submission_errors = {{}}
         for name in sorted(order_frames):
             orders = order_frames[name]
             if orders.empty or name not in submitters:
@@ -2613,8 +2622,15 @@ with orders_tab:
                     )
                 submission_results[name] = result
             except Exception as exc:
-                submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])
-        st.success("Submission attempt completed for all configured accounts.")
+                submission_errors[name] = f"{{type(exc).__name__}}: {{exc}}"
+                submission_results[name] = pd.DataFrame([{{"error": submission_errors[name]}}])
+        response_rows = sum(len(result) for name, result in submission_results.items() if name not in submission_errors)
+        if submission_errors:
+            st.error(f"Submission failed for {{len(submission_errors)}} account(s); inspect the response tables below.")
+        elif response_rows == 0:
+            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
+        else:
+            st.success(f"Broker submission returned {{response_rows:,}} accepted order response row(s).")
         for name, result in submission_results.items():
             st.write(f"{{name}}: {{len(result)}} response row(s)")
             st.dataframe(result, width="stretch", hide_index=True)
@@ -2746,6 +2762,7 @@ with orders_tab:
         "alpaca_equity_paper": "equity",
         "alpaca_option_paper": "option",
         "alpaca_llm_paper": "option",
+        "alpaca_option_live": "option",
     }}
     submitters = {{
         **{{name: "alpaca" for name in account_prefixes}},
@@ -2757,15 +2774,23 @@ with orders_tab:
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
             st.session_state["plan_regenerated_notice"] = True
         st.rerun()
+    planned_order_rows = sum(len(frame) for frame in order_frames.values())
+    st.caption(f"{{planned_order_rows:,}} order row(s) are currently available for submission.")
+    if planned_order_rows == 0:
+        st.warning(
+            "No order plans are available in the live artifact directory. Regenerate the order-plan artifacts "
+            "before submitting."
+        )
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
     )
-    if st.button("Submit All Account Orders", type="primary", disabled=not confirm_all, key="submit_all_accounts"):
+    if st.button("Submit All Account Orders", type="primary", disabled=(not confirm_all or planned_order_rows == 0), key="submit_all_accounts"):
         with st.spinner("Reconciling current account state before submission..."):
             submission_state = load_account_state_snapshot()
             order_frames = regenerate_order_plan_from_account_state(order_frames, account_state=submission_state)
         submission_results = {{}}
+        submission_errors = {{}}
         for name in sorted(order_frames):
             orders = order_frames[name]
             if orders.empty or name not in submitters:
@@ -2779,8 +2804,15 @@ with orders_tab:
                     )
                 submission_results[name] = result
             except Exception as exc:
-                submission_results[name] = pd.DataFrame([{{"error": f"{{type(exc).__name__}}: {{exc}}"}}])
-        st.success("Submission attempt completed for all configured accounts.")
+                submission_errors[name] = f"{{type(exc).__name__}}: {{exc}}"
+                submission_results[name] = pd.DataFrame([{{"error": submission_errors[name]}}])
+        response_rows = sum(len(result) for name, result in submission_results.items() if name not in submission_errors)
+        if submission_errors:
+            st.error(f"Submission failed for {{len(submission_errors)}} account(s); inspect the response tables below.")
+        elif response_rows == 0:
+            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
+        else:
+            st.success(f"Broker submission returned {{response_rows:,}} accepted order response row(s).")
         for name, result in submission_results.items():
             st.write(f"{{name}}: {{len(result)}} response row(s)")
             st.dataframe(result, width="stretch", hide_index=True)

@@ -263,10 +263,15 @@ def test_streamlit_app_submits_all_accounts_from_one_button(tmp_path):
     assert '"alpaca_equity_paper": "equity"' in script
     assert '"alpaca_option_paper": "option"' in script
     assert '"alpaca_llm_paper": "option"' in script
+    assert '"alpaca_option_live": "option"' in script
     assert "asset_type=alpaca_asset_types[name]" in script
     assert 'st.session_state["plan_regenerated_notice"] = True' in script
     assert "st.rerun()" in script
     assert "shown on the next interaction" not in script
+    assert "No order plans are available" in script
+    assert "planned_order_rows == 0" in script
+    assert "No new broker orders were submitted" in script
+    assert "Submission attempt completed" not in script
 
 
 def test_streamlit_app_displays_feature_family_scores_for_all_symbols(tmp_path):
@@ -305,6 +310,9 @@ def test_streamlit_app_can_embed_in_memory_tables(tmp_path):
     assert 'st.session_state["plan_regenerated_notice"] = True' in script
     assert "st.rerun()" in script
     assert "shown on the next interaction" not in script
+    assert '"alpaca_option_live": "option"' in script
+    assert "No order plans are embedded" in script
+    assert "planned_order_rows == 0" in script
 
 
 def test_thetadata_oracle_backfill_accepts_in_memory_trade_frame(monkeypatch):
