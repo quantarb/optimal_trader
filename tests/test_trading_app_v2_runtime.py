@@ -272,6 +272,10 @@ def test_streamlit_app_submits_all_accounts_from_one_button(tmp_path):
     assert "planned_order_rows == 0" in script
     assert "No new broker orders were submitted" in script
     assert "Submission attempt completed" not in script
+    assert 'st.session_state["last_submission_results"] = submission_results' in script
+    assert 'st.session_state["existing_account_state"] = load_account_state_snapshot()' in script
+    assert "Last Submission Results" in script
+    assert "Refresh Broker State" in script
 
 
 def test_streamlit_app_displays_feature_family_scores_for_all_symbols(tmp_path):
@@ -313,6 +317,9 @@ def test_streamlit_app_can_embed_in_memory_tables(tmp_path):
     assert '"alpaca_option_live": "option"' in script
     assert "No order plans are embedded" in script
     assert "planned_order_rows == 0" in script
+    assert 'st.session_state["last_submission_results"] = submission_results' in script
+    assert 'st.session_state["existing_account_state"] = load_account_state_snapshot()' in script
+    assert "Refresh Broker State" in script
 
 
 def test_thetadata_oracle_backfill_accepts_in_memory_trade_frame(monkeypatch):

@@ -2568,6 +2568,10 @@ with orders_tab:
         order_frames = st.session_state["regenerated_order_frames"]
     if st.session_state.pop("plan_regenerated_notice", False):
         st.success("Plan regenerated from current Alpaca account state.")
+    if st.button("Refresh Broker State", key="refresh_broker_state"):
+        with st.spinner("Loading current Alpaca orders and positions..."):
+            st.session_state["existing_account_state"] = load_account_state_snapshot()
+        st.rerun()
     existing_state = st.session_state.get("existing_account_state", {{}})
     if existing_state:
         st.subheader("Existing Broker State")
@@ -2577,6 +2581,22 @@ with orders_tab:
                 st.dataframe(existing_state.get(f"{{account_name}}_orders", pd.DataFrame()), width="stretch", hide_index=True)
                 st.caption("Existing positions")
                 st.dataframe(existing_state.get(f"{{account_name}}_positions", pd.DataFrame()), width="stretch", hide_index=True)
+    last_submission_results = st.session_state.get("last_submission_results", {{}})
+    last_submission_errors = st.session_state.get("last_submission_errors", {{}})
+    if last_submission_results:
+        st.subheader("Last Submission Results")
+        successful_rows = sum(
+            len(result) for name, result in last_submission_results.items() if name not in last_submission_errors
+        )
+        if last_submission_errors:
+            st.error(f"Submission failed for {{len(last_submission_errors)}} account(s); inspect the response tables below.")
+        elif successful_rows == 0:
+            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
+        else:
+            st.success(f"Broker submission returned {{successful_rows:,}} accepted order response row(s).")
+        for name, result in last_submission_results.items():
+            st.write(f"{{name}}: {{len(result)}} response row(s)")
+            st.dataframe(result, width="stretch", hide_index=True)
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2646,16 +2666,10 @@ with orders_tab:
             except Exception as exc:
                 submission_errors[name] = f"{{type(exc).__name__}}: {{exc}}"
                 submission_results[name] = pd.DataFrame([{{"error": submission_errors[name]}}])
-        response_rows = sum(len(result) for name, result in submission_results.items() if name not in submission_errors)
-        if submission_errors:
-            st.error(f"Submission failed for {{len(submission_errors)}} account(s); inspect the response tables below.")
-        elif response_rows == 0:
-            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
-        else:
-            st.success(f"Broker submission returned {{response_rows:,}} accepted order response row(s).")
-        for name, result in submission_results.items():
-            st.write(f"{{name}}: {{len(result)}} response row(s)")
-            st.dataframe(result, width="stretch", hide_index=True)
+        st.session_state["last_submission_results"] = submission_results
+        st.session_state["last_submission_errors"] = submission_errors
+        st.session_state["existing_account_state"] = load_account_state_snapshot()
+        st.rerun()
 '''
         output.write_text(script, encoding="utf-8")
         return output
@@ -2752,6 +2766,10 @@ with orders_tab:
         order_frames = st.session_state["regenerated_order_frames"]
     if st.session_state.pop("plan_regenerated_notice", False):
         st.success("Plan regenerated from current Alpaca account state.")
+    if st.button("Refresh Broker State", key="refresh_broker_state"):
+        with st.spinner("Loading current Alpaca orders and positions..."):
+            st.session_state["existing_account_state"] = load_account_state_snapshot()
+        st.rerun()
     existing_state = st.session_state.get("existing_account_state", {{}})
     if existing_state:
         st.subheader("Existing Broker State")
@@ -2761,6 +2779,22 @@ with orders_tab:
                 st.dataframe(existing_state.get(f"{{account_name}}_orders", pd.DataFrame()), width="stretch", hide_index=True)
                 st.caption("Existing positions")
                 st.dataframe(existing_state.get(f"{{account_name}}_positions", pd.DataFrame()), width="stretch", hide_index=True)
+    last_submission_results = st.session_state.get("last_submission_results", {{}})
+    last_submission_errors = st.session_state.get("last_submission_errors", {{}})
+    if last_submission_results:
+        st.subheader("Last Submission Results")
+        successful_rows = sum(
+            len(result) for name, result in last_submission_results.items() if name not in last_submission_errors
+        )
+        if last_submission_errors:
+            st.error(f"Submission failed for {{len(last_submission_errors)}} account(s); inspect the response tables below.")
+        elif successful_rows == 0:
+            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
+        else:
+            st.success(f"Broker submission returned {{successful_rows:,}} accepted order response row(s).")
+        for name, result in last_submission_results.items():
+            st.write(f"{{name}}: {{len(result)}} response row(s)")
+            st.dataframe(result, width="stretch", hide_index=True)
     account_names = sorted(order_frames)
     account_tabs = st.tabs([name.replace("_", " ").title() for name in account_names]) if account_names else []
     for account_tab, name in zip(account_tabs, account_names):
@@ -2828,16 +2862,10 @@ with orders_tab:
             except Exception as exc:
                 submission_errors[name] = f"{{type(exc).__name__}}: {{exc}}"
                 submission_results[name] = pd.DataFrame([{{"error": submission_errors[name]}}])
-        response_rows = sum(len(result) for name, result in submission_results.items() if name not in submission_errors)
-        if submission_errors:
-            st.error(f"Submission failed for {{len(submission_errors)}} account(s); inspect the response tables below.")
-        elif response_rows == 0:
-            st.warning("No new broker orders were submitted after account reconciliation and duplicate checks.")
-        else:
-            st.success(f"Broker submission returned {{response_rows:,}} accepted order response row(s).")
-        for name, result in submission_results.items():
-            st.write(f"{{name}}: {{len(result)}} response row(s)")
-            st.dataframe(result, width="stretch", hide_index=True)
+        st.session_state["last_submission_results"] = submission_results
+        st.session_state["last_submission_errors"] = submission_errors
+        st.session_state["existing_account_state"] = load_account_state_snapshot()
+        st.rerun()
 '''
     output.write_text(script, encoding="utf-8")
     return output
