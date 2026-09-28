@@ -2544,6 +2544,8 @@ with orders_tab:
     order_frames = read_embedded_orders()
     if "regenerated_order_frames" in st.session_state:
         order_frames = st.session_state["regenerated_order_frames"]
+    if st.session_state.pop("plan_regenerated_notice", False):
+        st.success("Plan regenerated from current Alpaca account state.")
     existing_state = st.session_state.get("existing_account_state", {{}})
     if existing_state:
         st.subheader("Existing Broker State")
@@ -2585,7 +2587,8 @@ with orders_tab:
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
-        st.success("Plan regenerated. The refreshed state will be shown on the next interaction.")
+            st.session_state["plan_regenerated_notice"] = True
+        st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
@@ -2709,6 +2712,8 @@ with orders_tab:
         order_frames[path.stem.removesuffix("_orders")] = read_csv_if_nonempty(path)
     if "regenerated_order_frames" in st.session_state:
         order_frames = st.session_state["regenerated_order_frames"]
+    if st.session_state.pop("plan_regenerated_notice", False):
+        st.success("Plan regenerated from current Alpaca account state.")
     existing_state = st.session_state.get("existing_account_state", {{}})
     if existing_state:
         st.subheader("Existing Broker State")
@@ -2750,7 +2755,8 @@ with orders_tab:
             state = load_account_state_snapshot()
             st.session_state["existing_account_state"] = state
             st.session_state["regenerated_order_frames"] = regenerate_order_plan_from_account_state(order_frames, account_state=state)
-        st.success("Plan regenerated. The refreshed state will be shown on the next interaction.")
+            st.session_state["plan_regenerated_notice"] = True
+        st.rerun()
     confirm_all = st.checkbox(
         "I have reviewed all displayed orders and want to submit them to every configured account.",
         key="confirm_all_accounts",
