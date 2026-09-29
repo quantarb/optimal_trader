@@ -1944,6 +1944,7 @@ def build_ranked_alpaca_option_orders(
             raise ValueError("strategy_allocation must be positive when provided")
         account_value = min(account_value, strategy_allocation)
     current_positions = _enrich_alpaca_option_records(client, client.get_positions())
+    current_open_orders = _enrich_alpaca_option_records(client, client.get_open_orders())
     normalized_decisions = decisions.copy()
     held_underlyings = {
         str(row.get("underlying_symbol") or "").strip().upper()
@@ -2007,6 +2008,16 @@ def build_ranked_alpaca_option_orders(
                     underlying = str(row["symbol"]).strip().upper()
                     executable.loc[index] = (underlying, str(required_type)) in available_contract_types
             normalized_decisions = normalized_decisions.loc[executable].copy()
+    directed_underlyings = set(normalized_decisions["symbol"].astype(str).str.upper())
+    stale_held_underlyings = sorted(held_underlyings.difference(directed_underlyings))
+    if stale_held_underlyings:
+        exit_rows = pd.DataFrame(
+            [
+                {"symbol": symbol, "direction": "exit", "decision": "exit"}
+                for symbol in stale_held_underlyings
+            ]
+        )
+        normalized_decisions = pd.concat([normalized_decisions, exit_rows], ignore_index=True, sort=False)
     # Keep selected contracts and directions as a closed set.  After dropping
     # an unexecutable decision, contracts for that underlying must also be
     # removed or the broker planner will correctly reject them as undirected.
@@ -2024,6 +2035,11 @@ def build_ranked_alpaca_option_orders(
         current_positions,
         max_underlyings=int(max_underlyings),
     )
+    cancel_orders = _build_open_order_cancel_rows(
+        current_open_orders,
+        asset_classes={"", "us_option", "option"},
+    )
+    raw_orders = [*cancel_orders, *raw_orders]
     if not raw_orders:
         return pd.DataFrame()
     intents = pd.DataFrame(raw_orders)
@@ -2298,9 +2314,15 @@ def submit_alpaca_orders(
         return pd.DataFrame()
     existing_orders = list(client.get_open_orders()) if hasattr(client, "get_open_orders") else []
     existing_positions = list(client.get_positions()) if hasattr(client, "get_positions") else []
+    planned_cancel_ids = {
+        str(row.get("order_id") or "").strip()
+        for row in orders.to_dict(orient="records")
+        if str(row.get("action") or "").lower().startswith("cancel_")
+    }
     open_keys = {
         (str(row.get("symbol") or "").upper(), str(row.get("side") or "").lower(), str(row.get("type") or row.get("order_type") or "").lower())
         for row in existing_orders
+        if str(row.get("id") or row.get("order_id") or "").strip() not in planned_cancel_ids
     }
     held_symbols = {str(row.get("symbol") or "").upper() for row in existing_positions}
     candidate = orders.copy()
@@ -2403,32 +2425,8 @@ def regenerate_order_plan_from_account_state(
     max_positions: int = 20,
     account_state: Mapping[str, pd.DataFrame] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Refresh a displayed plan without submitting orders.
-
-    Alpaca plans are suppressed when the account already has capacity occupied
-    by open orders/positions. Robinhood rows are retained but repriced from
-    fresh Robinhood bid/ask quotes.
-    """
+    """Retain a generated plan for final row-level reconciliation at submission."""
     refreshed = {str(name): frame.copy() for name, frame in order_frames.items()}
-    account_prefixes = {
-        "alpaca_equity_paper": "EQUITY",
-        "alpaca_option_paper": "OPTION",
-        "alpaca_llm_paper": "LLM",
-        "alpaca_option_live": "OPTION",
-    }
-    for name, prefix in account_prefixes.items():
-        if name not in refreshed:
-            continue
-        client = alpaca_client_from_env(prefix, live=name == "alpaca_option_live")
-        if account_state is not None:
-            occupied = len(account_state.get(f"{name}_orders", pd.DataFrame())) + len(account_state.get(f"{name}_positions", pd.DataFrame()))
-        else:
-            occupied = len(client.get_open_orders()) + len(client.get_positions())
-        # Regeneration is a reconciliation pass, not a second entry pass:
-        # any existing Alpaca order/position means there is nothing new to
-        # submit for that account in this snapshot.
-        if occupied > 0:
-            refreshed[name] = refreshed[name].iloc[0:0].copy()
 
     live_name = "alpaca_option_live"
     if live_name in refreshed and not refreshed[live_name].empty:

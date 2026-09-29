@@ -79,6 +79,22 @@ def test_directional_option_plan_reverses_calls_and_puts_and_retains_hold():
     assert "NVDA_C_OLD" not in {row["symbol"] for row in plan}
 
 
+def test_directional_option_plan_exits_held_underlying_outside_new_target_set():
+    plan = build_directional_option_order_plan(
+        [
+            {"symbol": "AAPL", "direction": "long"},
+            {"symbol": "LEGACY", "direction": "exit"},
+        ],
+        [{"underlying_symbol": "AAPL", "contract_symbol": "AAPL_C_NEW", "option_type": "call"}],
+        [{"underlying_symbol": "LEGACY", "symbol": "LEGACY_C_OLD", "option_type": "call", "qty": 2}],
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [
+        ("LEGACY_C_OLD", "sell_to_close_call"),
+        ("AAPL_C_NEW", "buy_to_open_call"),
+    ]
+
+
 def test_directional_option_plan_keeps_exact_ranker_selection_and_caps_candidates():
     assert build_directional_option_order_plan(
         [{"symbol": "AAPL", "direction": "long"}],
@@ -181,6 +197,57 @@ def test_llm_ranked_orders_map_relative_ratings_to_direction(monkeypatch):
         "MSFT": "sell",
         "NVDA": "hold",
     }
+
+
+def test_ranked_option_orders_exit_positions_outside_current_selection(monkeypatch):
+    class FakeClient:
+        def get_account(self):
+            return {"equity": "100000"}
+
+        def get_positions(self):
+            return [{"symbol": "LEGACY_C", "asset_class": "us_option", "qty": "2"}]
+
+        def get_open_orders(self):
+            return []
+
+        def get_option_contract(self, symbol):
+            assert symbol == "LEGACY_C"
+            return {
+                "underlying_symbol": "LEGACY",
+                "type": "call",
+                "expiration_date": "2027-01-15",
+                "strike_price": "100",
+            }
+
+        def get_option_snapshots(self, symbols):
+            quotes = {
+                "AAPL_C": {"latestQuote": {"bp": 4.9, "ap": 5.0}},
+                "LEGACY_C": {"latestQuote": {"bp": 1.0, "ap": 1.1}},
+            }
+            return {symbol: quotes[symbol] for symbol in symbols}
+
+    monkeypatch.setattr(runtime, "alpaca_client_from_env", lambda *args, **kwargs: FakeClient())
+    rankings = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "contract_symbol": "AAPL_C",
+                "option_type": "call",
+                "selected_by_option_ensemble": True,
+            }
+        ]
+    )
+
+    plan = runtime.build_ranked_alpaca_option_orders(
+        option_rankings=rankings,
+        decisions=pd.DataFrame([{"symbol": "AAPL", "direction": "long"}]),
+        account_prefix="OPTION",
+    )
+
+    assert [(row.symbol, row.action) for row in plan.itertuples()] == [
+        ("LEGACY_C", "sell_to_close_call"),
+        ("AAPL_C", "buy_to_open_call"),
+    ]
 
 
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
@@ -926,6 +993,52 @@ def test_submit_alpaca_orders_skips_existing_open_order_and_position_duplicates(
         {"symbol": "MSFT", "side": "buy", "qty": 1, "order_type": "market", "plan_created_at": now},
     ])
     assert runtime.submit_alpaca_orders(FakeClient(), plan, asset_type="equity").empty
+
+
+def test_submit_alpaca_orders_can_cancel_and_replace_same_option_contract():
+    class FakeClient:
+        def __init__(self):
+            self.submitted = []
+
+        def get_open_orders(self):
+            return [{"id": "open-1", "symbol": "AAPL_C", "side": "buy", "type": "limit"}]
+
+        def get_positions(self):
+            return []
+
+        def submit_orders(self, orders):
+            self.submitted.extend(orders)
+            return orders
+
+    now = pd.Timestamp.now(tz="UTC").isoformat()
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL_C",
+                "action": "cancel_open_order",
+                "side": "cancel",
+                "qty": 0,
+                "order_id": "open-1",
+                "plan_created_at": now,
+            },
+            {
+                "symbol": "AAPL_C",
+                "action": "buy_to_open_call",
+                "side": "buy",
+                "qty": 1,
+                "order_type": "limit",
+                "limit_price": 1.0,
+                "time_in_force": "gtc",
+                "plan_created_at": now,
+            },
+        ]
+    )
+    client = FakeClient()
+
+    result = runtime.submit_alpaca_orders(client, plan, asset_type="option")
+
+    assert [row["action"] for row in client.submitted] == ["cancel_open_order", "buy_to_open_call"]
+    assert len(result) == 2
 def test_resolve_option_training_panel_selects_exact_unified_contract(tmp_path):
     compatible = tmp_path / "verified"
     compatible.mkdir()

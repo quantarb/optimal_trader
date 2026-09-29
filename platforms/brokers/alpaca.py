@@ -27,7 +27,14 @@ def build_llm_option_order_plan(
         raise ValueError("max_underlyings must be between 1 and 20")
 
     normalized_decisions: dict[str, str] = {}
-    aliases = {"buy": "long", "long": "long", "sell": "short", "short": "short", "hold": "hold"}
+    aliases = {
+        "buy": "long",
+        "long": "long",
+        "sell": "short",
+        "short": "short",
+        "hold": "hold",
+        "exit": "exit",
+    }
     for row in decisions:
         underlying = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
         raw_decision = str(row.get("decision") or row.get("rating") or row.get("direction") or "").strip().lower()
@@ -36,8 +43,9 @@ def build_llm_option_order_plan(
         if raw_decision not in aliases:
             raise ValueError(f"Invalid TradingAgents decision for {underlying}: {raw_decision!r}")
         normalized_decisions[underlying] = aliases[raw_decision]
-    if len(normalized_decisions) > int(max_underlyings):
-        raise ValueError(f"TradingAgents decisions contain {len(normalized_decisions)} unique underlyings; limit is {max_underlyings}.")
+    target_count = sum(decision != "exit" for decision in normalized_decisions.values())
+    if target_count > int(max_underlyings):
+        raise ValueError(f"TradingAgents decisions contain {target_count} target underlyings; limit is {max_underlyings}.")
 
     selections: dict[tuple[str, str], dict[str, Any]] = {}
     selected_underlyings: set[str] = set()
@@ -100,7 +108,7 @@ def build_llm_option_order_plan(
         })
 
     for underlying, decision in normalized_decisions.items():
-        if decision == "hold":
+        if decision in {"hold", "exit"}:
             continue
         option_type = "call" if decision == "long" else "put"
         if (underlying, option_type) in retained:
@@ -136,7 +144,7 @@ def build_directional_option_order_plan(
         direction = str(row.get("direction") or row.get("meta_stack_direction") or "").strip().lower()
         if not underlying or underlying in directions:
             continue
-        if direction not in {"long", "short", "hold"}:
+        if direction not in {"long", "short", "hold", "exit"}:
             raise ValueError(f"Invalid meta_stack direction for {underlying}: {direction!r}")
         directions[underlying] = direction
 
@@ -202,7 +210,7 @@ def build_directional_option_order_plan(
         })
 
     for underlying, direction in directions.items():
-        if direction == "hold":
+        if direction in {"hold", "exit"}:
             continue
         option_type = "call" if direction == "long" else "put"
         selected = selections.get((underlying, option_type))
