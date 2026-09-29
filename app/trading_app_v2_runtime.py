@@ -1197,7 +1197,7 @@ def build_alpaca_equity_orders(
     leaderboard: pd.DataFrame,
     account_prefix: str,
     gross_exposure: float = 0.95,
-    liquidate_unselected: bool = True,
+    liquidate_unselected: bool = False,
 ) -> pd.DataFrame:
     from platforms.brokers.alpaca import build_directional_equity_order_plan
 
@@ -1209,17 +1209,19 @@ def build_alpaca_equity_orders(
         for row in client.get_positions()
         if str(row.get("asset_class") or "us_equity").lower() in {"us_equity", "equity", ""}
     }
-    eligible_rows = leaderboard.loc[
-        leaderboard.get("eligible", pd.Series(True, index=leaderboard.index)).astype(bool)
-    ]
-    directions = eligible_rows[["symbol", "direction"]].to_dict(orient="records")
-    scored_symbols = {str(row["symbol"]).strip().upper() for row in directions}
-    directions.extend(
-        {"symbol": symbol, "direction": "exit"}
-        for symbol in positions
-        if symbol not in scored_symbols
-    )
-    prices = dict(zip(eligible_rows["symbol"].astype(str).str.upper(), pd.to_numeric(eligible_rows["close"], errors="coerce")))
+    direction_rows = leaderboard[["symbol", "direction"]].copy()
+    direction_rows["entry_eligible"] = leaderboard.get(
+        "eligible", pd.Series(True, index=leaderboard.index)
+    ).astype(bool)
+    directions = direction_rows.to_dict(orient="records")
+    if liquidate_unselected:
+        scored_symbols = {str(row["symbol"]).strip().upper() for row in directions}
+        directions.extend(
+            {"symbol": symbol, "direction": "exit", "entry_eligible": False}
+            for symbol in positions
+            if symbol not in scored_symbols
+        )
+    prices = dict(zip(leaderboard["symbol"].astype(str).str.upper(), pd.to_numeric(leaderboard["close"], errors="coerce")))
     orders = build_directional_equity_order_plan(
         directions,
         prices,
@@ -1900,8 +1902,11 @@ def build_llm_review_orders(
     symbols = approved_symbols(reviewed)
     if not symbols:
         return pd.DataFrame(columns=["symbol", "side", "qty", "reason"])
-    reviewed_leaderboard = leaderboard.loc[leaderboard["symbol"].astype(str).str.upper().isin(symbols)].copy()
-    reviewed_leaderboard["eligible"] = True
+    reviewed_leaderboard = leaderboard.copy()
+    reviewed_leaderboard["eligible"] = (
+        reviewed_leaderboard.get("eligible", pd.Series(True, index=reviewed_leaderboard.index)).astype(bool)
+        & reviewed_leaderboard["symbol"].astype(str).str.upper().isin(symbols)
+    )
     orders = build_alpaca_equity_orders(leaderboard=reviewed_leaderboard, account_prefix=account_prefix)
     if not orders.empty and not reviewed.empty:
         review_cols = [col for col in ("symbol", "llm_decision", "llm_rating", "llm_reason", "llm_review_date") if col in reviewed.columns]

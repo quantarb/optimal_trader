@@ -42,6 +42,39 @@ def test_directional_equity_plan_closes_opposites_retains_hold_and_fills_ranked_
     assert "AMZN" not in {row["symbol"] for row in plan}
 
 
+def test_directional_equity_plan_retains_aligned_position_when_not_entry_eligible():
+    plan = build_directional_equity_order_plan(
+        [
+            {"symbol": "AAPL", "direction": "long", "entry_eligible": False},
+            {"symbol": "MSFT", "direction": "short", "entry_eligible": True},
+        ],
+        {"AAPL": 100, "MSFT": 200},
+        {"AAPL": 3},
+        portfolio_value=1_000,
+        max_positions=2,
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [("MSFT", "open_short")]
+
+
+def test_directional_equity_plan_exits_reversed_position_without_reopening_when_not_entry_eligible():
+    plan = build_directional_equity_order_plan(
+        [
+            {"symbol": "AAPL", "direction": "long", "entry_eligible": False},
+            {"symbol": "MSFT", "direction": "short", "entry_eligible": True},
+        ],
+        {"AAPL": 100, "MSFT": 200},
+        {"AAPL": -3},
+        portfolio_value=1_000,
+        max_positions=2,
+    )
+
+    assert [(row["symbol"], row["action"], row["side"]) for row in plan] == [
+        ("AAPL", "close_opposite_signal", "buy"),
+        ("MSFT", "open_short", "sell"),
+    ]
+
+
 def test_directional_equity_plan_fails_closed_without_signal_for_a_held_symbol():
     with pytest.raises(ValueError, match="Missing meta_stack directions"):
         build_directional_equity_order_plan(
@@ -50,6 +83,26 @@ def test_directional_equity_plan_fails_closed_without_signal_for_a_held_symbol()
             {"AAPL": 1, "LEGACY": 1},
             portfolio_value=1_000,
         )
+
+
+def test_alpaca_equity_orders_use_ineligible_signal_to_retain_existing_position(monkeypatch):
+    client = SimpleNamespace(
+        get_account=lambda: {"portfolio_value": "10000"},
+        get_open_orders=lambda: [],
+        get_positions=lambda: [{"symbol": "AAPL", "qty": "3", "asset_class": "us_equity"}],
+    )
+    monkeypatch.setattr(runtime, "alpaca_client_from_env", lambda _prefix: client)
+    leaderboard = pd.DataFrame(
+        [
+            {"symbol": "MSFT", "direction": "short", "eligible": True, "close": 200.0},
+            {"symbol": "AAPL", "direction": "long", "eligible": False, "close": 100.0},
+        ]
+    )
+
+    orders = runtime.build_alpaca_equity_orders(leaderboard=leaderboard, account_prefix="EQUITY")
+
+    assert not ((orders["symbol"] == "AAPL") & orders["action"].str.startswith("close_")).any()
+    assert ((orders["symbol"] == "MSFT") & orders["action"].eq("open_short")).any()
 
 
 def test_directional_option_plan_reverses_calls_and_puts_and_retains_hold():

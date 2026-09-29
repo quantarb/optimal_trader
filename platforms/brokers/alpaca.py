@@ -240,7 +240,7 @@ def build_directional_equity_order_plan(
     if not 1 <= int(max_positions) <= 20:
         raise ValueError("max_positions must be between 1 and 20")
 
-    signals: list[tuple[str, str]] = []
+    signals: list[tuple[str, str, bool]] = []
     seen: set[str] = set()
     for row in ranked_directions:
         symbol = str(row.get("symbol") or "").strip().upper()
@@ -249,7 +249,8 @@ def build_directional_equity_order_plan(
             continue
         if direction not in {"long", "short", "hold", "exit"}:
             raise ValueError(f"Invalid meta_stack direction for {symbol}: {direction!r}")
-        signals.append((symbol, direction))
+        entry_eligible = row.get("entry_eligible", row.get("eligible", True))
+        signals.append((symbol, direction, bool(entry_eligible)))
         seen.add(symbol)
 
     positions = {
@@ -259,7 +260,7 @@ def build_directional_equity_order_plan(
     }
     if len(positions) > int(max_positions):
         raise ValueError(f"Current account has {len(positions)} unique positions; limit is {max_positions}.")
-    direction_by_symbol = dict(signals)
+    direction_by_symbol = {symbol: direction for symbol, direction, _ in signals}
     missing = sorted(set(positions).difference(direction_by_symbol))
     if missing:
         raise ValueError(f"Missing meta_stack directions for current positions: {missing}")
@@ -270,18 +271,24 @@ def build_directional_equity_order_plan(
         or (direction_by_symbol.get(symbol) == "long" and quantity > 0)
         or (direction_by_symbol.get(symbol) == "short" and quantity < 0)
     }
-    candidates = [(symbol, direction) for symbol, direction in signals if direction in {"long", "short"} and symbol not in retained]
+    # Rank and eligibility control entries only. A held position is retained or
+    # exited solely from its current direction signal.
+    candidates = [
+        (symbol, direction)
+        for symbol, direction, entry_eligible in signals
+        if entry_eligible and direction in {"long", "short"} and symbol not in retained
+    ]
     selected = candidates[: max(0, int(max_positions) - len(retained))]
 
     orders: list[dict[str, Any]] = []
-    selected_symbols = {symbol for symbol, _ in selected}
     for symbol, quantity in positions.items():
         if symbol in retained:
             continue
+        direction = direction_by_symbol[symbol]
         orders.append(
             {
                 "symbol": symbol,
-                "action": "close_opposite_signal" if symbol in selected_symbols else "close_for_capacity",
+                "action": "close_exit_signal" if direction == "exit" else "close_opposite_signal",
                 "side": "sell" if quantity > 0 else "buy",
                 "qty": int(abs(quantity)),
                 "order_type": "market",
