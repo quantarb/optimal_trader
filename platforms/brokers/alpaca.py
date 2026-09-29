@@ -186,19 +186,17 @@ def build_directional_option_order_plan(
     if missing:
         raise ValueError(f"Missing meta_stack directions for current option positions: {missing}")
 
-    retained_contracts: set[str] = set()
+    retained_targets: set[tuple[str, str]] = set()
     orders: list[dict[str, Any]] = []
     for position in positions:
         underlying = position["underlying_symbol"]
         option_type = position["option_type"]
         direction = directions[underlying]
         desired_type = "call" if direction == "long" else "put" if direction == "short" else None
-        selected = selections.get((underlying, desired_type)) if desired_type else None
-        retain = direction == "hold" or (
-            option_type == desired_type and selected is not None and position["contract_symbol"] == selected["contract_symbol"]
-        )
+        retain = direction == "hold" or option_type == desired_type
         if retain:
-            retained_contracts.add(position["contract_symbol"])
+            if desired_type:
+                retained_targets.add((underlying, desired_type))
             continue
         orders.append({
             "symbol": position["contract_symbol"],
@@ -209,14 +207,10 @@ def build_directional_option_order_plan(
             "qty": abs(position["qty"]),
         })
 
-    for underlying, direction in directions.items():
-        if direction in {"hold", "exit"}:
-            continue
-        option_type = "call" if direction == "long" else "put"
-        selected = selections.get((underlying, option_type))
-        if selected is None:
-            raise ValueError(f"Missing selected {option_type} contract for {underlying} {direction} signal")
-        if selected["contract_symbol"] in retained_contracts:
+    for (underlying, option_type), selected in selections.items():
+        direction = directions[underlying]
+        desired_type = "call" if direction == "long" else "put" if direction == "short" else None
+        if option_type != desired_type or (underlying, option_type) in retained_targets:
             continue
         orders.append({
             "symbol": selected["contract_symbol"],

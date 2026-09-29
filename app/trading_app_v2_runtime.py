@@ -2006,18 +2006,11 @@ def build_ranked_alpaca_option_orders(
                 required_type = required_types.loc[index]
                 if pd.notna(required_type):
                     underlying = str(row["symbol"]).strip().upper()
-                    executable.loc[index] = (underlying, str(required_type)) in available_contract_types
+                    executable.loc[index] = (
+                        underlying in held_underlyings
+                        or (underlying, str(required_type)) in available_contract_types
+                    )
             normalized_decisions = normalized_decisions.loc[executable].copy()
-    directed_underlyings = set(normalized_decisions["symbol"].astype(str).str.upper())
-    stale_held_underlyings = sorted(held_underlyings.difference(directed_underlyings))
-    if stale_held_underlyings:
-        exit_rows = pd.DataFrame(
-            [
-                {"symbol": symbol, "direction": "exit", "decision": "exit"}
-                for symbol in stale_held_underlyings
-            ]
-        )
-        normalized_decisions = pd.concat([normalized_decisions, exit_rows], ignore_index=True, sort=False)
     # Keep selected contracts and directions as a closed set.  After dropping
     # an unexecutable decision, contracts for that underlying must also be
     # removed or the broker planner will correctly reject them as undirected.
@@ -2035,24 +2028,64 @@ def build_ranked_alpaca_option_orders(
         current_positions,
         max_underlyings=int(max_underlyings),
     )
-    cancel_orders = _build_open_order_cancel_rows(
-        current_open_orders,
-        asset_classes={"", "us_option", "option"},
-    )
-    raw_orders = [*cancel_orders, *raw_orders]
     if not raw_orders:
-        return pd.DataFrame()
-    intents = pd.DataFrame(raw_orders)
-    contract_symbols = intents.loc[
-        ~intents["action"].astype(str).str.startswith("cancel_"), "symbol"
-    ].astype(str).str.upper().unique().tolist()
-    quote_frame = quote_frame.loc[quote_frame["symbol"].isin(contract_symbols)].copy()
-    return generate_live_option_limit_prices(
-        intents,
-        quote_frame,
-        discount_pct=float(discount_pct),
-        time_in_force="gtc",
-    )
+        priced_orders = pd.DataFrame()
+    else:
+        intents = pd.DataFrame(raw_orders)
+        contract_symbols = intents.loc[
+            ~intents["action"].astype(str).str.startswith("cancel_"), "symbol"
+        ].astype(str).str.upper().unique().tolist()
+        quote_frame = quote_frame.loc[quote_frame["symbol"].isin(contract_symbols)].copy()
+        priced_orders = generate_live_option_limit_prices(
+            intents,
+            quote_frame,
+            discount_pct=float(discount_pct),
+            time_in_force="gtc",
+        )
+    return _reconcile_open_option_orders(priced_orders, current_open_orders)
+
+
+def _reconcile_open_option_orders(
+    desired_orders: pd.DataFrame,
+    open_orders: Sequence[Mapping[str, Any]],
+) -> pd.DataFrame:
+    """Retain exact pending orders and cancel only orders outside the desired plan."""
+    remaining = desired_orders.copy() if desired_orders is not None else pd.DataFrame()
+    cancellations: list[dict[str, Any]] = []
+    for raw in open_orders:
+        order = dict(raw)
+        symbol = str(order.get("symbol") or "").strip().upper()
+        side = str(order.get("side") or "").strip().lower()
+        order_type = str(order.get("type") or order.get("order_type") or "").strip().lower()
+        qty = pd.to_numeric(pd.Series([order.get("qty")]), errors="coerce").iloc[0]
+        limit_price = pd.to_numeric(pd.Series([order.get("limit_price")]), errors="coerce").iloc[0]
+        match_index = None
+        if not remaining.empty:
+            candidates = remaining.loc[
+                remaining.get("symbol", pd.Series("", index=remaining.index)).astype(str).str.upper().eq(symbol)
+                & remaining.get("side", pd.Series("", index=remaining.index)).astype(str).str.lower().eq(side)
+                & remaining.get("order_type", pd.Series("", index=remaining.index)).astype(str).str.lower().eq(order_type)
+            ]
+            for index, desired in candidates.iterrows():
+                desired_qty = pd.to_numeric(pd.Series([desired.get("qty")]), errors="coerce").iloc[0]
+                desired_limit = pd.to_numeric(pd.Series([desired.get("limit_price")]), errors="coerce").iloc[0]
+                qty_matches = pd.notna(qty) and pd.notna(desired_qty) and float(qty) == float(desired_qty)
+                price_matches = (
+                    (pd.isna(limit_price) and pd.isna(desired_limit))
+                    or (pd.notna(limit_price) and pd.notna(desired_limit) and round(float(limit_price), 2) == round(float(desired_limit), 2))
+                )
+                if qty_matches and price_matches:
+                    match_index = index
+                    break
+        if match_index is not None:
+            remaining = remaining.drop(index=match_index)
+            continue
+        cancellations.extend(
+            _build_open_order_cancel_rows([order], asset_classes={"", "us_option", "option"})
+        )
+    if not cancellations:
+        return remaining.reset_index(drop=True)
+    return pd.concat([pd.DataFrame(cancellations), remaining], ignore_index=True, sort=False)
 
 
 def build_llm_ranked_option_orders(

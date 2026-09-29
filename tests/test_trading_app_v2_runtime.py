@@ -79,7 +79,7 @@ def test_directional_option_plan_reverses_calls_and_puts_and_retains_hold():
     assert "NVDA_C_OLD" not in {row["symbol"] for row in plan}
 
 
-def test_directional_option_plan_exits_held_underlying_outside_new_target_set():
+def test_directional_option_plan_uses_explicit_exit_for_held_underlying():
     plan = build_directional_option_order_plan(
         [
             {"symbol": "AAPL", "direction": "long"},
@@ -91,6 +91,21 @@ def test_directional_option_plan_exits_held_underlying_outside_new_target_set():
 
     assert [(row["symbol"], row["action"]) for row in plan] == [
         ("LEGACY_C_OLD", "sell_to_close_call"),
+        ("AAPL_C_NEW", "buy_to_open_call"),
+    ]
+
+
+def test_directional_option_plan_retains_aligned_position_outside_new_target_set():
+    plan = build_directional_option_order_plan(
+        [
+            {"symbol": "AAPL", "direction": "long"},
+            {"symbol": "LEGACY", "direction": "long"},
+        ],
+        [{"underlying_symbol": "AAPL", "contract_symbol": "AAPL_C_NEW", "option_type": "call"}],
+        [{"underlying_symbol": "LEGACY", "symbol": "LEGACY_C_OLD", "option_type": "call", "qty": 2}],
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [
         ("AAPL_C_NEW", "buy_to_open_call"),
     ]
 
@@ -199,7 +214,7 @@ def test_llm_ranked_orders_map_relative_ratings_to_direction(monkeypatch):
     }
 
 
-def test_ranked_option_orders_exit_positions_outside_current_selection(monkeypatch):
+def test_ranked_option_orders_retain_aligned_positions_outside_current_selection(monkeypatch):
     class FakeClient:
         def get_account(self):
             return {"equity": "100000"}
@@ -240,14 +255,35 @@ def test_ranked_option_orders_exit_positions_outside_current_selection(monkeypat
 
     plan = runtime.build_ranked_alpaca_option_orders(
         option_rankings=rankings,
-        decisions=pd.DataFrame([{"symbol": "AAPL", "direction": "long"}]),
+        decisions=pd.DataFrame(
+            [
+                {"symbol": "AAPL", "direction": "long"},
+                {"symbol": "LEGACY", "direction": "long"},
+            ]
+        ),
         account_prefix="OPTION",
     )
 
-    assert [(row.symbol, row.action) for row in plan.itertuples()] == [
-        ("LEGACY_C", "sell_to_close_call"),
-        ("AAPL_C", "buy_to_open_call"),
+    assert [(row.symbol, row.action) for row in plan.itertuples()] == [("AAPL_C", "buy_to_open_call")]
+
+
+def test_reconcile_open_option_orders_retains_exact_match_and_cancels_stale_order():
+    desired = pd.DataFrame(
+        [
+            {"symbol": "KEEP_C", "side": "buy", "qty": 2, "order_type": "limit", "limit_price": 1.25},
+            {"symbol": "NEW_P", "side": "buy", "qty": 1, "order_type": "limit", "limit_price": 2.50},
+        ]
+    )
+    open_orders = [
+        {"id": "keep-1", "symbol": "KEEP_C", "asset_class": "us_option", "side": "buy", "qty": "2", "type": "limit", "limit_price": "1.25"},
+        {"id": "stale-1", "symbol": "STALE_C", "asset_class": "us_option", "side": "buy", "qty": "1", "type": "limit", "limit_price": "3.00"},
     ]
+
+    reconciled = runtime._reconcile_open_option_orders(desired, open_orders)
+
+    assert reconciled.loc[0, ["symbol", "action"]].tolist() == ["STALE_C", "cancel_open_order"]
+    assert reconciled.loc[1, "symbol"] == "NEW_P"
+    assert pd.isna(reconciled.loc[1, "action"])
 
 
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):
