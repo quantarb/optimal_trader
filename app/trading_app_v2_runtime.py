@@ -1967,6 +1967,7 @@ def build_ranked_alpaca_option_orders(
     pending_entry_positions: list[dict[str, Any]] = []
     retained_open_order_ids: set[str] = set()
     pending_entry_underlyings: set[str] = set()
+    all_pending_buy_underlyings: set[str] = set()
     for raw in current_open_orders:
         order = dict(raw)
         if str(order.get("side") or "").strip().lower() != "buy":
@@ -1979,6 +1980,7 @@ def build_ranked_alpaca_option_orders(
         contract_symbol = str(order.get("symbol") or "").strip().upper()
         if remaining_qty <= 0 or not underlying or option_type not in {"call", "put"} or not contract_symbol:
             continue
+        all_pending_buy_underlyings.add(underlying)
         if underlying not in direction_by_underlying:
             raise ValueError(f"Missing meta_stack direction for open option order: {underlying}")
         direction = direction_by_underlying[underlying]
@@ -2073,6 +2075,7 @@ def build_ranked_alpaca_option_orders(
         selected_contracts,
         [*current_positions, *pending_entry_positions],
         max_underlyings=int(max_underlyings),
+        occupied_underlyings=all_pending_buy_underlyings,
     )
     if not raw_orders:
         priced_orders = pd.DataFrame()

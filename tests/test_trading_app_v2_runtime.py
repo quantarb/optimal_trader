@@ -126,8 +126,6 @@ def test_directional_option_plan_reverses_calls_and_puts_and_retains_hold():
     assert [(row["symbol"], row["action"]) for row in plan] == [
         ("AAPL_C_OLD", "sell_to_close_call"),
         ("MSFT_P_OLD", "sell_to_close_put"),
-        ("AAPL_P_NEW", "buy_to_open_put"),
-        ("MSFT_C_NEW", "buy_to_open_call"),
     ]
     assert "NVDA_C_OLD" not in {row["symbol"] for row in plan}
 
@@ -179,6 +177,60 @@ def test_directional_option_plan_keeps_exact_ranker_selection_and_caps_candidate
         build_directional_option_order_plan(directions, selections)
 
 
+def test_directional_option_plan_counts_positions_and_pending_entries_against_capacity():
+    occupied = [
+        {
+            "underlying_symbol": f"HELD{i}",
+            "symbol": f"HELD{i}_C",
+            "option_type": "call",
+            "qty": 1,
+        }
+        for i in range(19)
+    ]
+    directions = [
+        {"symbol": f"HELD{i}", "direction": "long"}
+        for i in range(19)
+    ] + [
+        {"symbol": "FIRST", "direction": "long"},
+        {"symbol": "SECOND", "direction": "short"},
+    ]
+    selections = [
+        {"underlying_symbol": "FIRST", "contract_symbol": "FIRST_C", "option_type": "call"},
+        {"underlying_symbol": "SECOND", "contract_symbol": "SECOND_P", "option_type": "put"},
+    ]
+
+    plan = build_directional_option_order_plan(
+        directions,
+        selections,
+        occupied,
+        max_underlyings=20,
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [
+        ("FIRST_C", "buy_to_open_call"),
+    ]
+
+
+def test_directional_option_plan_does_not_reuse_pending_cancellation_capacity():
+    plan = build_directional_option_order_plan(
+        [
+            {"symbol": "STALE", "direction": "short"},
+            {"symbol": "FIRST", "direction": "long"},
+            {"symbol": "SECOND", "direction": "long"},
+        ],
+        [
+            {"underlying_symbol": "FIRST", "contract_symbol": "FIRST_C", "option_type": "call"},
+            {"underlying_symbol": "SECOND", "contract_symbol": "SECOND_C", "option_type": "call"},
+        ],
+        max_underlyings=2,
+        occupied_underlyings=["STALE"],
+    )
+
+    assert [(row["symbol"], row["action"]) for row in plan] == [
+        ("FIRST_C", "buy_to_open_call"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("price", "expected"),
     [(1.25, 40), (2.50, 20), (60.0, 0), (None, 0)],
@@ -221,7 +273,6 @@ def test_llm_option_plan_reverses_opposites_and_retains_same_type_or_hold():
 
     assert [(row["symbol"], row["action"]) for row in plan] == [
         ("AAPL_P_OLD", "sell_to_close_put"),
-        ("AAPL_C_NEW", "buy_to_open_call"),
     ]
 
 

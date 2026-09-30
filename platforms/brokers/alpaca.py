@@ -21,6 +21,7 @@ def build_llm_option_order_plan(
     current_positions: Sequence[Mapping[str, Any]] | None = None,
     *,
     max_underlyings: int = 20,
+    occupied_underlyings: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile TradingAgents decisions using preselected ranker contracts."""
     if not 1 <= int(max_underlyings) <= 20:
@@ -85,18 +86,21 @@ def build_llm_option_order_plan(
         held_underlyings.add(underlying)
     if len(held_underlyings) > int(max_underlyings):
         raise ValueError(f"Current LLM option account has {len(held_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    account_underlyings = held_underlyings | {
+        str(value).strip().upper() for value in occupied_underlyings or () if str(value).strip()
+    }
+    if len(account_underlyings) > int(max_underlyings):
+        raise ValueError(f"Current LLM option positions and orders occupy {len(account_underlyings)} underlyings; limit is {max_underlyings}.")
     missing = sorted(held_underlyings.difference(normalized_decisions))
     if missing:
         raise ValueError(f"Missing TradingAgents decisions for current option positions: {missing}")
 
-    retained: set[tuple[str, str]] = set()
     orders: list[dict[str, Any]] = []
     for position in positions:
         underlying = position["underlying_symbol"]
         decision = normalized_decisions[underlying]
         desired_type = "call" if decision == "long" else "put" if decision == "short" else None
         if decision == "hold" or position["option_type"] == desired_type:
-            retained.add((underlying, position["option_type"]))
             continue
         orders.append({
             "symbol": position["contract_symbol"],
@@ -107,15 +111,19 @@ def build_llm_option_order_plan(
             "qty": abs(position["qty"]),
         })
 
+    available_slots = int(max_underlyings) - len(account_underlyings)
+    opened_underlyings: set[str] = set()
     for underlying, decision in normalized_decisions.items():
         if decision in {"hold", "exit"}:
             continue
         option_type = "call" if decision == "long" else "put"
-        if (underlying, option_type) in retained:
+        if underlying in account_underlyings or underlying in opened_underlyings:
             continue
         selected = selections.get((underlying, option_type))
         if selected is None:
             raise ValueError(f"Missing selected {option_type} contract for {underlying} {decision} decision")
+        if len(opened_underlyings) >= available_slots:
+            continue
         orders.append({
             "symbol": selected["contract_symbol"],
             "underlying_symbol": underlying,
@@ -124,6 +132,7 @@ def build_llm_option_order_plan(
             "side": "buy",
             "qty": int(selected.get("qty") or 1),
         })
+        opened_underlyings.add(underlying)
     return orders
 
 
@@ -133,6 +142,7 @@ def build_directional_option_order_plan(
     current_positions: Sequence[Mapping[str, Any]] | None = None,
     *,
     max_underlyings: int = 20,
+    occupied_underlyings: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Reconcile ranker-selected calls/puts against meta_stack directions."""
     if not 1 <= int(max_underlyings) <= 20:
@@ -182,11 +192,15 @@ def build_directional_option_order_plan(
         held_underlyings.add(underlying)
     if len(held_underlyings) > int(max_underlyings):
         raise ValueError(f"Current option account has {len(held_underlyings)} unique underlyings; limit is {max_underlyings}.")
+    account_underlyings = held_underlyings | {
+        str(value).strip().upper() for value in occupied_underlyings or () if str(value).strip()
+    }
+    if len(account_underlyings) > int(max_underlyings):
+        raise ValueError(f"Current option positions and orders occupy {len(account_underlyings)} underlyings; limit is {max_underlyings}.")
     missing = sorted(held_underlyings.difference(directions))
     if missing:
         raise ValueError(f"Missing meta_stack directions for current option positions: {missing}")
 
-    retained_targets: set[tuple[str, str]] = set()
     orders: list[dict[str, Any]] = []
     for position in positions:
         underlying = position["underlying_symbol"]
@@ -195,8 +209,6 @@ def build_directional_option_order_plan(
         desired_type = "call" if direction == "long" else "put" if direction == "short" else None
         retain = direction == "hold" or option_type == desired_type
         if retain:
-            if desired_type:
-                retained_targets.add((underlying, desired_type))
             continue
         orders.append({
             "symbol": position["contract_symbol"],
@@ -207,10 +219,14 @@ def build_directional_option_order_plan(
             "qty": abs(position["qty"]),
         })
 
+    available_slots = int(max_underlyings) - len(account_underlyings)
+    opened_underlyings: set[str] = set()
     for (underlying, option_type), selected in selections.items():
         direction = directions[underlying]
         desired_type = "call" if direction == "long" else "put" if direction == "short" else None
-        if option_type != desired_type or (underlying, option_type) in retained_targets:
+        if option_type != desired_type or underlying in account_underlyings or underlying in opened_underlyings:
+            continue
+        if len(opened_underlyings) >= available_slots:
             continue
         orders.append({
             "symbol": selected["contract_symbol"],
@@ -220,6 +236,7 @@ def build_directional_option_order_plan(
             "side": "buy",
             "qty": int(selected.get("qty") or 1),
         })
+        opened_underlyings.add(underlying)
     return orders
 
 
