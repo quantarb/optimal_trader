@@ -2423,14 +2423,63 @@ def submit_alpaca_orders(
     }
     held_symbols = {str(row.get("symbol") or "").upper() for row in existing_positions}
     candidate = orders.copy()
-    duplicate_mask = candidate.apply(
-        lambda row: (
-            (str(row.get("symbol") or "").upper(), str(row.get("side") or "").lower(), str(row.get("order_type") or "").lower()) in open_keys
-            or (str(row.get("symbol") or "").upper() in held_symbols and str(row.get("side") or "").lower() == "buy")
-        ),
-        axis=1,
-    )
+
+    def is_duplicate(row: pd.Series) -> bool:
+        symbol = str(row.get("symbol") or "").upper()
+        side = str(row.get("side") or "").lower()
+        order_type = str(row.get("order_type") or "").lower()
+        action = str(row.get("action") or "").lower()
+        if (symbol, side, order_type) in open_keys:
+            return True
+        is_entry = action.startswith("open_") or action.startswith("buy_to_open")
+        legacy_buy_entry = not action and side == "buy"
+        return symbol in held_symbols and (is_entry or legacy_buy_entry)
+
+    duplicate_mask = candidate.apply(is_duplicate, axis=1)
     candidate = candidate.loc[~duplicate_mask].copy()
+    max_positions = 20
+    if str(asset_type).lower() == "option":
+        enriched_positions = _enrich_alpaca_option_records(client, existing_positions)
+        enriched_orders = _enrich_alpaca_option_records(client, existing_orders)
+        occupied_underlyings = {
+            str(row.get("underlying_symbol") or "").strip().upper()
+            for row in enriched_positions
+            if str(row.get("underlying_symbol") or "").strip()
+        }
+        occupied_underlyings.update(
+            str(row.get("underlying_symbol") or "").strip().upper()
+            for row in enriched_orders
+            if str(row.get("side") or "").strip().lower() == "buy"
+            and str(row.get("underlying_symbol") or "").strip()
+        )
+        projected_underlyings = set(occupied_underlyings)
+        for row in candidate.to_dict(orient="records"):
+            action = str(row.get("action") or "").strip().lower()
+            if not action.startswith("buy_to_open"):
+                continue
+            underlying = str(row.get("underlying_symbol") or "").strip().upper()
+            if not underlying:
+                raise ValueError("Refusing option entry without an underlying_symbol.")
+            projected_underlyings.add(underlying)
+        if len(projected_underlyings) > max_positions:
+            raise ValueError(
+                f"Refusing option entries that would occupy {len(projected_underlyings)} underlyings; "
+                f"limit is {max_positions}."
+            )
+    else:
+        projected_symbols = set(held_symbols)
+        for row in candidate.to_dict(orient="records"):
+            symbol = str(row.get("symbol") or "").strip().upper()
+            action = str(row.get("action") or "").strip().lower()
+            if action.startswith("close_"):
+                projected_symbols.discard(symbol)
+            elif action.startswith("open_"):
+                projected_symbols.add(symbol)
+        if len(projected_symbols) > max_positions:
+            raise ValueError(
+                f"Refusing equity orders that would leave {len(projected_symbols)} positions; "
+                f"limit is {max_positions}."
+            )
     if str(asset_type).lower() == "option":
         validated_parts: list[pd.DataFrame] = []
         option_limit = int(SubmissionSafetyPolicy().max_option_contracts_per_order)

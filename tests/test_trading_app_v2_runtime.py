@@ -85,6 +85,26 @@ def test_directional_equity_plan_fails_closed_without_signal_for_a_held_symbol()
         )
 
 
+def test_directional_equity_plan_can_reduce_an_account_above_capacity():
+    positions = {f"S{i}": 1 for i in range(20)} | {"REVERSED": -1}
+    directions = [
+        {"symbol": symbol, "direction": "long", "entry_eligible": False}
+        for symbol in positions
+    ]
+
+    plan = build_directional_equity_order_plan(
+        directions,
+        {symbol: 100.0 for symbol in positions},
+        positions,
+        portfolio_value=100_000,
+        max_positions=20,
+    )
+
+    assert [(row["symbol"], row["action"], row["side"]) for row in plan] == [
+        ("REVERSED", "close_opposite_signal", "buy"),
+    ]
+
+
 def test_alpaca_equity_orders_use_ineligible_signal_to_retain_existing_position(monkeypatch):
     client = SimpleNamespace(
         get_account=lambda: {"portfolio_value": "10000"},
@@ -1293,6 +1313,7 @@ def test_submit_alpaca_orders_can_cancel_and_replace_same_option_contract():
         [
             {
                 "symbol": "AAPL_C",
+                "underlying_symbol": "AAPL",
                 "action": "cancel_open_order",
                 "side": "cancel",
                 "qty": 0,
@@ -1301,6 +1322,7 @@ def test_submit_alpaca_orders_can_cancel_and_replace_same_option_contract():
             },
             {
                 "symbol": "AAPL_C",
+                "underlying_symbol": "AAPL",
                 "action": "buy_to_open_call",
                 "side": "buy",
                 "qty": 1,
@@ -1317,6 +1339,117 @@ def test_submit_alpaca_orders_can_cancel_and_replace_same_option_contract():
 
     assert [row["action"] for row in client.submitted] == ["cancel_open_order", "buy_to_open_call"]
     assert len(result) == 2
+
+
+def test_submit_alpaca_orders_does_not_drop_buy_to_cover_as_duplicate():
+    class FakeClient:
+        def __init__(self):
+            self.submitted = []
+
+        def get_open_orders(self):
+            return []
+
+        def get_positions(self):
+            return [{"symbol": "TTWO", "qty": "-23"}]
+
+        def submit_orders(self, orders):
+            self.submitted.extend(orders)
+            return orders
+
+    now = pd.Timestamp.now(tz="UTC").isoformat()
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "TTWO",
+                "action": "close_opposite_signal",
+                "side": "buy",
+                "qty": 23,
+                "order_type": "market",
+                "time_in_force": "day",
+                "plan_created_at": now,
+            }
+        ]
+    )
+    client = FakeClient()
+
+    result = runtime.submit_alpaca_orders(client, plan, asset_type="equity")
+
+    assert [row["action"] for row in client.submitted] == ["close_opposite_signal"]
+    assert len(result) == 1
+
+
+def test_submit_alpaca_orders_rejects_equity_plan_above_capacity():
+    class FakeClient:
+        def get_open_orders(self):
+            return []
+
+        def get_positions(self):
+            return [{"symbol": f"S{i}", "qty": "1"} for i in range(20)]
+
+        def submit_orders(self, orders):
+            raise AssertionError("over-capacity plan must not be submitted")
+
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "NEW",
+                "action": "open_long",
+                "side": "buy",
+                "qty": 1,
+                "order_type": "market",
+                "time_in_force": "day",
+                "plan_created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="would leave 21 positions"):
+        runtime.submit_alpaca_orders(FakeClient(), plan, asset_type="equity")
+
+
+def test_submit_alpaca_orders_rejects_option_entry_above_underlying_capacity():
+    class FakeClient:
+        def get_open_orders(self):
+            return [
+                {
+                    "id": f"order-{i}",
+                    "symbol": f"S{i}_C",
+                    "asset_class": "us_option",
+                    "side": "buy",
+                    "qty": "1",
+                    "filled_qty": "0",
+                    "type": "limit",
+                }
+                for i in range(20)
+            ]
+
+        def get_positions(self):
+            return []
+
+        def get_option_contract(self, symbol):
+            return {"underlying_symbol": symbol.removesuffix("_C"), "type": "call"}
+
+        def submit_orders(self, orders):
+            raise AssertionError("over-capacity plan must not be submitted")
+
+    plan = pd.DataFrame(
+        [
+            {
+                "symbol": "NEW_C",
+                "underlying_symbol": "NEW",
+                "action": "buy_to_open_call",
+                "side": "buy",
+                "qty": 1,
+                "order_type": "limit",
+                "limit_price": 1.0,
+                "time_in_force": "gtc",
+                "plan_created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="would occupy 21 underlyings"):
+        runtime.submit_alpaca_orders(FakeClient(), plan, asset_type="option")
 def test_resolve_option_training_panel_selects_exact_unified_contract(tmp_path):
     compatible = tmp_path / "verified"
     compatible.mkdir()

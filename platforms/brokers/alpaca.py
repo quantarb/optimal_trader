@@ -275,8 +275,6 @@ def build_directional_equity_order_plan(
         for symbol, quantity in dict(current_positions or {}).items()
         if str(symbol).strip() and float(quantity) != 0
     }
-    if len(positions) > int(max_positions):
-        raise ValueError(f"Current account has {len(positions)} unique positions; limit is {max_positions}.")
     direction_by_symbol = {symbol: direction for symbol, direction, _ in signals}
     missing = sorted(set(positions).difference(direction_by_symbol))
     if missing:
