@@ -320,6 +320,114 @@ def test_ranked_option_orders_retain_aligned_positions_outside_current_selection
     assert [(row.symbol, row.action) for row in plan.itertuples()] == [("AAPL_C", "buy_to_open_call")]
 
 
+def test_ranked_option_orders_treat_aligned_open_entry_as_existing_exposure(monkeypatch):
+    class FakeClient:
+        def get_account(self):
+            return {"equity": "100000"}
+
+        def get_positions(self):
+            return []
+
+        def get_open_orders(self):
+            return [
+                {
+                    "id": "pending-aapl-call",
+                    "symbol": "AAPL_C",
+                    "asset_class": "us_option",
+                    "side": "buy",
+                    "qty": "2",
+                    "filled_qty": "0",
+                    "type": "limit",
+                    "limit_price": "4.00",
+                }
+            ]
+
+        def get_option_contract(self, symbol):
+            assert symbol == "AAPL_C"
+            return {
+                "underlying_symbol": "AAPL",
+                "type": "call",
+                "expiration_date": "2027-01-15",
+                "strike_price": "100",
+            }
+
+        def get_option_snapshots(self, symbols):
+            return {"AAPL_C": {"latestQuote": {"bp": 4.9, "ap": 5.0}}}
+
+    monkeypatch.setattr(runtime, "alpaca_client_from_env", lambda *args, **kwargs: FakeClient())
+    rankings = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "contract_symbol": "AAPL_C",
+                "option_type": "call",
+                "selected_by_option_ensemble": True,
+            }
+        ]
+    )
+
+    plan = runtime.build_ranked_alpaca_option_orders(
+        option_rankings=rankings,
+        decisions=pd.DataFrame([{"symbol": "AAPL", "direction": "long"}]),
+        account_prefix="OPTION",
+    )
+
+    assert plan.empty
+
+
+def test_ranked_option_orders_cancel_open_entry_when_signal_reverses(monkeypatch):
+    class FakeClient:
+        def get_account(self):
+            return {"equity": "100000"}
+
+        def get_positions(self):
+            return []
+
+        def get_open_orders(self):
+            return [
+                {
+                    "id": "pending-aapl-call",
+                    "symbol": "AAPL_C",
+                    "asset_class": "us_option",
+                    "side": "buy",
+                    "qty": "2",
+                    "filled_qty": "0",
+                    "type": "limit",
+                    "limit_price": "4.00",
+                }
+            ]
+
+        def get_option_contract(self, symbol):
+            return {"underlying_symbol": "AAPL", "type": "call"}
+
+        def get_option_snapshots(self, symbols):
+            return {}
+
+    monkeypatch.setattr(runtime, "alpaca_client_from_env", lambda *args, **kwargs: FakeClient())
+    rankings = pd.DataFrame(
+        [
+            {
+                "symbol": "MSFT",
+                "contract_symbol": "MSFT_P",
+                "option_type": "put",
+                "selected_by_option_ensemble": False,
+            }
+        ]
+    )
+
+    plan = runtime.build_ranked_alpaca_option_orders(
+        option_rankings=rankings,
+        decisions=pd.DataFrame([{"symbol": "AAPL", "direction": "short"}]),
+        account_prefix="OPTION",
+    )
+
+    assert plan.loc[0, ["symbol", "action", "order_id"]].tolist() == [
+        "AAPL_C",
+        "cancel_open_order",
+        "pending-aapl-call",
+    ]
+
+
 def test_reconcile_open_option_orders_retains_exact_match_and_cancels_stale_order():
     desired = pd.DataFrame(
         [
@@ -337,6 +445,36 @@ def test_reconcile_open_option_orders_retains_exact_match_and_cancels_stale_orde
     assert reconciled.loc[0, ["symbol", "action"]].tolist() == ["STALE_C", "cancel_open_order"]
     assert reconciled.loc[1, "symbol"] == "NEW_P"
     assert pd.isna(reconciled.loc[1, "action"])
+
+
+def test_reconcile_open_option_orders_keeps_pending_exit_without_repricing():
+    desired = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL_C",
+                "action": "sell_to_close_call",
+                "side": "sell",
+                "qty": 2,
+                "order_type": "limit",
+                "limit_price": 1.50,
+            }
+        ]
+    )
+    open_orders = [
+        {
+            "id": "pending-exit",
+            "symbol": "AAPL_C",
+            "asset_class": "us_option",
+            "side": "sell",
+            "qty": "3",
+            "type": "limit",
+            "limit_price": "1.00",
+        }
+    ]
+
+    reconciled = runtime._reconcile_open_option_orders(desired, open_orders)
+
+    assert reconciled.empty
 
 
 def test_read_csv_if_exists_treats_empty_csv_as_empty_frame(tmp_path):

@@ -1951,12 +1951,53 @@ def build_ranked_alpaca_option_orders(
     current_positions = _enrich_alpaca_option_records(client, client.get_positions())
     current_open_orders = _enrich_alpaca_option_records(client, client.get_open_orders())
     normalized_decisions = decisions.copy()
+    normalized_decisions["symbol"] = normalized_decisions["symbol"].astype(str).str.upper()
+    decision_values = normalized_decisions.get(decision_col, normalized_decisions.get("decision"))
+    canonical_decisions = (
+        decision_values.astype(str).str.lower().str.strip().replace({"buy": "long", "sell": "short"})
+        if decision_values is not None
+        else pd.Series(dtype=str)
+    )
+    direction_by_underlying = dict(zip(normalized_decisions["symbol"], canonical_decisions))
     held_underlyings = {
         str(row.get("underlying_symbol") or "").strip().upper()
         for row in current_positions
         if str(row.get("underlying_symbol") or "").strip()
     }
-    normalized_decisions["symbol"] = normalized_decisions["symbol"].astype(str).str.upper()
+    pending_entry_positions: list[dict[str, Any]] = []
+    retained_open_order_ids: set[str] = set()
+    pending_entry_underlyings: set[str] = set()
+    for raw in current_open_orders:
+        order = dict(raw)
+        if str(order.get("side") or "").strip().lower() != "buy":
+            continue
+        qty = _number(order.get("qty", order.get("quantity")))
+        filled_qty = _number(order.get("filled_qty", order.get("filled_quantity")))
+        remaining_qty = max(qty - filled_qty, 0.0)
+        underlying = str(order.get("underlying_symbol") or "").strip().upper()
+        option_type = str(order.get("option_type") or "").strip().lower()
+        contract_symbol = str(order.get("symbol") or "").strip().upper()
+        if remaining_qty <= 0 or not underlying or option_type not in {"call", "put"} or not contract_symbol:
+            continue
+        if underlying not in direction_by_underlying:
+            raise ValueError(f"Missing meta_stack direction for open option order: {underlying}")
+        direction = direction_by_underlying[underlying]
+        desired_type = "call" if direction == "long" else "put" if direction == "short" else None
+        if direction != "hold" and option_type != desired_type:
+            continue
+        order_id = str(order.get("id") or order.get("order_id") or "").strip()
+        if order_id:
+            retained_open_order_ids.add(order_id)
+        pending_entry_underlyings.add(underlying)
+        pending_entry_positions.append(
+            {
+                "symbol": contract_symbol,
+                "contract_symbol": contract_symbol,
+                "underlying_symbol": underlying,
+                "option_type": option_type,
+                "qty": remaining_qty,
+            }
+        )
     if decision_col != "direction":
         normalized_decisions["decision"] = normalized_decisions[decision_col]
     planner = build_llm_option_order_plan if llm else build_directional_option_order_plan
@@ -1990,7 +2031,7 @@ def build_ranked_alpaca_option_orders(
     selected_contracts = sized_rows
     available_underlyings = {str(row["underlying_symbol"]).upper() for row in sized_rows}
     normalized_decisions = normalized_decisions.loc[
-        normalized_decisions["symbol"].isin(available_underlyings | held_underlyings)
+        normalized_decisions["symbol"].isin(available_underlyings | held_underlyings | pending_entry_underlyings)
     ].copy()
     # A directional decision implies a contract type: long -> call and
     # short -> put.  The ranking stage can legitimately return only one side
@@ -2012,7 +2053,7 @@ def build_ranked_alpaca_option_orders(
                 if pd.notna(required_type):
                     underlying = str(row["symbol"]).strip().upper()
                     executable.loc[index] = (
-                        underlying in held_underlyings
+                        underlying in held_underlyings | pending_entry_underlyings
                         or (underlying, str(required_type)) in available_contract_types
                     )
             normalized_decisions = normalized_decisions.loc[executable].copy()
@@ -2020,7 +2061,7 @@ def build_ranked_alpaca_option_orders(
     # an unexecutable decision, contracts for that underlying must also be
     # removed or the broker planner will correctly reject them as undirected.
     directed_underlyings = set(normalized_decisions["symbol"].astype(str).str.upper()) if "symbol" in normalized_decisions else set()
-    allowed_underlyings = directed_underlyings | held_underlyings
+    allowed_underlyings = directed_underlyings | held_underlyings | pending_entry_underlyings
     selected_contracts = [
         row for row in selected_contracts
         if str(row.get("underlying_symbol") or "").strip().upper() in allowed_underlyings
@@ -2030,7 +2071,7 @@ def build_ranked_alpaca_option_orders(
     raw_orders = planner(
         normalized_decisions.to_dict(orient="records"),
         selected_contracts,
-        current_positions,
+        [*current_positions, *pending_entry_positions],
         max_underlyings=int(max_underlyings),
     )
     if not raw_orders:
@@ -2047,18 +2088,28 @@ def build_ranked_alpaca_option_orders(
             discount_pct=float(discount_pct),
             time_in_force="gtc",
         )
-    return _reconcile_open_option_orders(priced_orders, current_open_orders)
+    return _reconcile_open_option_orders(
+        priced_orders,
+        current_open_orders,
+        retained_order_ids=retained_open_order_ids,
+    )
 
 
 def _reconcile_open_option_orders(
     desired_orders: pd.DataFrame,
     open_orders: Sequence[Mapping[str, Any]],
+    *,
+    retained_order_ids: set[str] | None = None,
 ) -> pd.DataFrame:
-    """Retain exact pending orders and cancel only orders outside the desired plan."""
+    """Treat aligned pending entries as exposure and cancel only conflicting orders."""
     remaining = desired_orders.copy() if desired_orders is not None else pd.DataFrame()
     cancellations: list[dict[str, Any]] = []
+    retained_ids = {str(value).strip() for value in retained_order_ids or set() if str(value).strip()}
     for raw in open_orders:
         order = dict(raw)
+        order_id = str(order.get("id") or order.get("order_id") or "").strip()
+        if order_id in retained_ids:
+            continue
         symbol = str(order.get("symbol") or "").strip().upper()
         side = str(order.get("side") or "").strip().lower()
         order_type = str(order.get("type") or order.get("order_type") or "").strip().lower()
@@ -2072,6 +2123,11 @@ def _reconcile_open_option_orders(
                 & remaining.get("order_type", pd.Series("", index=remaining.index)).astype(str).str.lower().eq(order_type)
             ]
             for index, desired in candidates.iterrows():
+                # A pending close already represents the desired exit. Keep its
+                # original quantity and limit instead of repricing it every run.
+                if side == "sell":
+                    match_index = index
+                    break
                 desired_qty = pd.to_numeric(pd.Series([desired.get("qty")]), errors="coerce").iloc[0]
                 desired_limit = pd.to_numeric(pd.Series([desired.get("limit_price")]), errors="coerce").iloc[0]
                 qty_matches = pd.notna(qty) and pd.notna(desired_qty) and float(qty) == float(desired_qty)
