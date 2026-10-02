@@ -1475,3 +1475,38 @@ def test_resolve_option_training_panel_selects_exact_unified_contract(tmp_path):
     assert runtime.resolve_option_training_panel(
         tmp_path, min_market_cap=10_000_000_000
     ) == panel
+
+
+def test_live_discount_preserves_premium_and_is_idempotent():
+    orders = pd.DataFrame([{'symbol': 'MKC_CALL', 'action': 'buy_to_open_call',
+                           'side': 'buy', 'qty': 10, 'bid_price': 10., 'ask_price': 10.1}])
+    priced = runtime.apply_option_limit_policy(orders, discount_pct=90.)
+    assert priced.loc[0, 'qty'] == 100
+    assert priced.loc[0, 'limit_price'] == 1.
+    assert priced.loc[0, 'undiscounted_entry_notional'] == 10_000.
+    assert priced.loc[0, 'estimated_entry_notional'] == 10_000.
+    again = runtime.apply_option_limit_policy(priced, discount_pct=90.)
+    assert again.loc[0, 'qty'] == 100
+    assert again.loc[0, 'estimated_entry_notional'] == 10_000.
+    reset = runtime.apply_option_limit_policy(again, discount_pct=0.)
+    assert reset.loc[0, "qty"] == 10
+    assert reset.loc[0, "limit_price"] == 10.
+
+
+def test_live_discount_rounding_stays_inside_budget_and_keeps_exits():
+    orders = pd.DataFrame([
+        {'symbol': 'MKC_CALL', 'action': 'buy_to_open_call', 'side': 'buy',
+         'qty': 19, 'bid_price': 1.67, 'ask_price': 1.8},
+        {'symbol': 'EXIT', 'action': 'sell_to_close_put', 'side': 'sell',
+         'qty': 7, 'bid_price': 1., 'ask_price': 1.5},
+        {'symbol': 'CANCEL', 'action': 'cancel_open_order', 'order_id': 'pending'},
+    ])
+    priced = runtime.apply_option_limit_policy(orders, discount_pct=90.)
+    assert priced.loc[0, 'limit_price'] == .16
+    assert priced.loc[0, 'qty'] == 198
+    assert priced.loc[0, 'estimated_entry_notional'] == 3168.
+    assert priced.loc[0, 'undiscounted_entry_notional'] == 3173.
+    assert priced.loc[1, 'qty'] == 7
+    assert priced.loc[1, 'limit_price'] == 1.5
+    assert priced.loc[2, 'order_id'] == 'pending'
+    assert not priced.loc[2, 'skip_submit']

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import pickle
+from decimal import Decimal, ROUND_FLOOR
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -2197,7 +2198,8 @@ def apply_option_limit_policy(
 ) -> pd.DataFrame:
     """Set option limit prices from the executable side of the quote.
 
-    Buy-to-open orders bid. Sell-to-close orders ask. Cancels pass through.
+    Buy-to-open orders bid and preserve their undiscounted premium budget when
+    discounted. Sell-to-close quantities and cancellations pass through.
     """
 
     discount = float(discount_pct)
@@ -2245,6 +2247,29 @@ def apply_option_limit_policy(
             work.at[idx, "skip_submit"] = True
             work.at[idx, "skip_reason"] = f"invalid_{source}"
             continue
+        if pricing_side == "buy" and (discount > 0 or pd.notna(row.get("undiscounted_entry_notional"))):
+            budget = _number(row.get("undiscounted_entry_notional"), default=float("nan"))
+            if not math.isfinite(budget) or budget <= 0:
+                quantity = _number(row.get("qty"), default=float("nan"))
+                base_price = normalize_option_limit_price(
+                    _first_positive(row.to_dict(), ("bid_price",)), side="buy")
+                if not math.isfinite(quantity) or quantity <= 0 or quantity != int(quantity) or base_price is None:
+                    work.at[idx, "skip_submit"] = True
+                    work.at[idx, "skip_reason"] = "invalid_undiscounted_quantity_or_price"
+                    continue
+                budget = float(Decimal(str(int(quantity))) * Decimal(str(base_price)) * 100)
+                work.at[idx, "undiscounted_qty"] = int(quantity)
+                work.at[idx, "undiscounted_limit_price"] = base_price
+                work.at[idx, "undiscounted_entry_notional"] = budget
+            quantity = int((Decimal(str(budget)) / (Decimal(str(limit_price)) * 100))
+                           .to_integral_value(rounding=ROUND_FLOOR))
+            if quantity <= 0:
+                work.at[idx, "skip_submit"] = True
+                work.at[idx, "skip_reason"] = "discounted_contract_exceeds_budget"
+                continue
+            work.at[idx, "qty"] = quantity
+            work.at[idx, "estimated_entry_notional"] = float(
+                Decimal(str(quantity)) * Decimal(str(limit_price)) * 100)
         work.at[idx, "limit_price"] = float(limit_price)
         work.at[idx, "limit_order_price"] = float(limit_price)
         work.at[idx, "price"] = float(limit_price)
